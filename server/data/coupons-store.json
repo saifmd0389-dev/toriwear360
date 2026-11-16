@@ -1,0 +1,62 @@
+[
+  {
+    "id": "coup-1",
+    "code": "TORI100",
+    "discountType": "FLAT",
+    "value": 100,
+    "minOrderValue": 999,
+    "startDate": "2026-01-01T00:00:00.000Z",
+    "expiryDate": "2026-12-31T23:59:59.000Z",
+    "usageCount": 188,
+    "isActive": true,
+    "description": "₹100 flat discount on orders above ₹999 for first drops",
+    "createdAt": "2026-10-26T04:12:06.475Z",
+    "updatedAt": "2026-11-09T05:27:33.821Z"
+  },
+  {
+    "id": "coup-2",
+    "code": "TWIN10",
+    "discountType": "PERCENTAGE",
+    "value": 10,
+    "maxDiscount": 350,
+    "minOrderValue": 1499,
+    "startDate": "2026-01-01T00:00:00.000Z",
+    "expiryDate": "2026-12-31T23:59:59.000Z",
+    "usageCount": 88,
+    "isActive": true,
+    "description": "10% off on Twinning combos (Men + Kid combo sets)",
+    "createdAt": "2026-10-26T04:12:06.475Z",
+    "updatedAt": "2026-10-26T04:12:06.475Z"
+  },
+  {
+    "id": "coup-3",
+    "code": "DROP2026",
+    "discountType": "PERCENTAGE",
+    "value": 15,
+    "maxDiscount": 500,
+    "minOrderValue": 1999,
+    "startDate": "2026-01-01T00:00:00.000Z",
+    "expiryDate": "2026-12-31T23:59:59.000Z",
+    "usageCount": 41,
+    "isActive": true,
+    "description": "15% off season pass for all anime capsule drops",
+    "createdAt": "2026-10-26T04:12:06.475Z",
+    "updatedAt": "2026-10-26T04:12:06.475Z"
+  },
+  {
+    "code": "PHASE3TEST",
+    "discountType": "PERCENTAGE",
+    "value": 25,
+    "minOrderValue": 999,
+    "maxDiscount": 500,
+    "usageLimit": 100,
+    "startDate": "2026-10-26T04:23:50.341Z",
+    "expiryDate": "2026-12-31T23:59:59.000Z",
+    "isActive": true,
+    "description": "Phase 3 Automated Test Promo",
+    "id": "coup-1792988630341-478",
+    "usageCount": 0,
+    "createdAt": "2026-10-26T04:23:50.341Z",
+    "updatedAt": "2026-10-26T04:23:50.341Z"
+  }
+]

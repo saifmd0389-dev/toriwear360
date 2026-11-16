@@ -1,0 +1,415 @@
+@import "tailwindcss";
+
+:root {
+  --font-brand: 'Bebas Neue', 'Arial Black', Impact, sans-serif;
+  --font-body: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+
+  --brand-red: #FF2028;
+  --brand-black: #050505;
+  --brand-white: #FFFFFF;
+  --brand-gray: #171717;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    font-family: var(--font-body);
+  }
+
+  body {
+    color: var(--brand-white);
+    background-color: #0b0b10;
+    overflow-x: clip;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-family: var(--font-body);
+  }
+}
+
+/* Official Logo Lock CSS */
+.toriwear-official-logo {
+  display: block;
+  object-fit: contain;
+}
+
+/* Three-Zone Header Layout - Always pinned and visible */
+.site-header {
+  z-index: 40;
+  width: 100%;
+  isolation: isolate;
+}
+
+.modal-layer-isolated {
+  isolation: isolate;
+  transform: translateZ(0);
+}
+
+/* Logo horizontal rotation animation: horizontal spin right to left (2 complete times), stops for 4 seconds, then spins again */
+@keyframes logoHorizontalSpinAndPause {
+  0% {
+    transform: rotateY(0deg);
+  }
+  33.33% {
+    transform: rotateY(-720deg);
+  }
+  100% {
+    transform: rotateY(-720deg);
+  }
+}
+
+.logo-spin-two-turns {
+  animation: logoHorizontalSpinAndPause 6s ease-in-out infinite;
+  transform-origin: center center;
+  transform-style: preserve-3d;
+  backface-visibility: visible;
+  will-change: transform;
+}
+
+/* Subtle tactile heart-beat scale animation when adding an item to the wishlist */
+@keyframes wishlistHeartBeat {
+  0% {
+    transform: scale(1);
+  }
+  22% {
+    transform: scale(1.38);
+  }
+  42% {
+    transform: scale(0.92);
+  }
+  62% {
+    transform: scale(1.2);
+  }
+  82% {
+    transform: scale(0.98);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.animate-heart-beat {
+  animation: wishlistHeartBeat 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: center center;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-heart-beat {
+    animation: none;
+  }
+}
+
+/* Storefront Skeleton Shimmer & Smooth Content Reveal (Compositor-only) */
+@keyframes toriSkeletonSweep {
+  0% {
+    transform: translate3d(-100%, 0, 0);
+  }
+  100% {
+    transform: translate3d(100%, 0, 0);
+  }
+}
+
+@keyframes toriSkeletonReveal {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.skeleton-dark,
+.skeleton-light,
+.skeleton-sky,
+.skeleton-neutral {
+  position: relative;
+  overflow: hidden;
+}
+
+.skeleton-dark {
+  background-color: #15161f;
+}
+
+.skeleton-light {
+  background-color: #e7e3da;
+}
+
+.skeleton-sky {
+  background-color: #e3f2fd;
+}
+
+.skeleton-neutral {
+  background-color: #efefec;
+}
+
+.skeleton-dark::after,
+.skeleton-light::after,
+.skeleton-sky::after,
+.skeleton-neutral::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translate3d(-100%, 0, 0);
+  animation: toriSkeletonSweep 1.35s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  will-change: transform;
+  pointer-events: none;
+}
+
+.skeleton-dark::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.06) 45%,
+    rgba(255, 255, 255, 0.1) 50%,
+    rgba(255, 255, 255, 0.06) 55%,
+    transparent 100%
+  );
+}
+
+.skeleton-light::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.55) 50%,
+    transparent 100%
+  );
+}
+
+.skeleton-sky::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.72) 50%,
+    transparent 100%
+  );
+}
+
+.skeleton-neutral::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.65) 50%,
+    transparent 100%
+  );
+}
+
+.skeleton-reveal {
+  animation: toriSkeletonReveal 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-dark::after,
+  .skeleton-light::after,
+  .skeleton-sky::after,
+  .skeleton-neutral::after {
+    animation: none;
+  }
+  .skeleton-reveal {
+    animation: none;
+  }
+}
+
+/* Admin White Theme - High Visibility */
+.admin-root {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+.admin-root .bg-\[\#0a0a0f\],
+.admin-root .bg-\[\#0d0d12\],
+.admin-root .bg-\[\#0e0e14\],
+.admin-root .bg-\[\#0f1118\],
+.admin-root .bg-\[\#0f111a\],
+.admin-root .bg-\[\#10111a\],
+.admin-root .bg-\[\#111118\],
+.admin-root .bg-\[\#11121c\],
+.admin-root .bg-\[\#11121d\],
+.admin-root .bg-\[\#121217\],
+.admin-root .bg-\[\#12121a\],
+.admin-root .bg-\[\#12131c\],
+.admin-root .bg-\[\#12141e\],
+.admin-root .bg-\[\#14141c\],
+.admin-root .bg-\[\#141522\],
+.admin-root .bg-\[\#141622\],
+.admin-root .bg-\[\#151726\],
+.admin-root .bg-\[\#161622\],
+.admin-root .bg-\[\#161724\],
+.admin-root .bg-\[\#161726\],
+.admin-root .bg-\[\#171724\],
+.admin-root .bg-\[\#171824\],
+.admin-root .bg-\[\#171825\],
+.admin-root .bg-\[\#171826\],
+.admin-root .bg-\[\#181824\],
+.admin-root .bg-\[\#181926\],
+.admin-root .bg-\[\#181928\],
+.admin-root .bg-\[\#181a29\],
+.admin-root .bg-\[\#1a1c2c\],
+.admin-root .bg-\[\#1a1c2d\],
+.admin-root .bg-\[\#1c1d29\],
+.admin-root .bg-\[\#1c1d2c\],
+.admin-root .bg-\[\#1f2030\],
+.admin-root .bg-\[\#202235\],
+.admin-root .bg-\[\#22253c\],
+.admin-root .bg-\[\#252737\],
+.admin-root .bg-\[\#25273b\] {
+  background-color: #ffffff !important;
+  background-image: none !important;
+  border-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+
+/* Sub-card backgrounds for slight contrast in AI Design Lab */
+.admin-root .bg-\[\#161724\],
+.admin-root .bg-\[\#171824\],
+.admin-root .bg-\[\#171825\],
+.admin-root .bg-\[\#181926\],
+.admin-root .bg-\[\#1c1d29\],
+.admin-root .bg-\[\#1c1d2c\],
+.admin-root .bg-\[\#1f2030\],
+.admin-root .bg-\[\#252737\],
+.admin-root .bg-\[\#202235\],
+.admin-root .bg-\[\#22253c\] {
+  background-color: #f8fafc !important;
+  border-color: #e2e8f0 !important;
+  color: #0f172a !important;
+}
+
+/* Form controls in AI Design Lab */
+.admin-root input:not([type="checkbox"]):not([type="radio"]),
+.admin-root select,
+.admin-root textarea {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+
+.admin-root select option {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+.admin-root .bg-neutral-950,
+.admin-root .bg-neutral-900\/90,
+.admin-root .bg-neutral-900\/80,
+.admin-root .bg-neutral-900\/70,
+.admin-root .bg-neutral-900\/60,
+.admin-root .bg-neutral-900 {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+  border-color: #e2e8f0 !important;
+}
+
+.admin-root .bg-neutral-800,
+.admin-root .bg-neutral-800\/80,
+.admin-root .bg-neutral-800\/50 {
+  background-color: #f1f5f9 !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+
+.admin-root .text-white {
+  color: #0f172a !important;
+}
+
+/* Ensure dark-background elements, badges, containers, tables, and buttons have visible white text */
+.admin-root .bg-slate-900,
+.admin-root .bg-slate-900.text-white,
+.admin-root .bg-slate-900 .text-white,
+.admin-root .bg-slate-900 .text-white *,
+.admin-root .bg-slate-950,
+.admin-root .bg-slate-950.text-white,
+.admin-root .bg-slate-950 .text-white,
+.admin-root .bg-slate-950 .text-white *,
+.admin-root .bg-slate-800.text-white,
+.admin-root .bg-slate-800 .text-white,
+.admin-root .bg-slate-800 .text-white *,
+.admin-root .bg-black.text-white,
+.admin-root .bg-black .text-white,
+.admin-root .bg-black .text-white *,
+.admin-root .bg-red-600.text-white,
+.admin-root .bg-red-600 .text-white,
+.admin-root .bg-red-600 .text-white *,
+.admin-root .bg-emerald-600.text-white,
+.admin-root .bg-emerald-600 .text-white,
+.admin-root .bg-emerald-600 .text-white *,
+.admin-root button.bg-slate-900,
+.admin-root button.bg-slate-900 *,
+.admin-root button.bg-slate-800,
+.admin-root button.bg-slate-800 *,
+.admin-root button.bg-red-600,
+.admin-root button.bg-red-600 *,
+.admin-root button.bg-emerald-600,
+.admin-root button.bg-emerald-600 *,
+.admin-root span.bg-slate-900,
+.admin-root span.bg-slate-900 *,
+.admin-root span.bg-slate-800,
+.admin-root span.bg-slate-800 *,
+.admin-root tr.bg-slate-900,
+.admin-root tr.bg-slate-900 td,
+.admin-root tr.bg-slate-900 th,
+.admin-root .badge-dark,
+.admin-root .badge-dark * {
+  color: #ffffff !important;
+}
+
+.admin-root .text-neutral-100,
+.admin-root .text-neutral-200 {
+  color: #1e293b !important;
+}
+
+.admin-root .text-neutral-300,
+.admin-root .text-neutral-400 {
+  color: #475569 !important;
+}
+
+.admin-root .text-neutral-500 {
+  color: #64748b !important;
+}
+
+.admin-root .border-neutral-800,
+.admin-root .border-neutral-800\/80,
+.admin-root .border-neutral-800\/90,
+.admin-root .border-neutral-700,
+.admin-root .border-neutral-700\/60 {
+  border-color: #e2e8f0 !important;
+}
+
+.font-brand {
+  font-family: var(--font-brand);
+}
+
+.font-body {
+  font-family: var(--font-body);
+}
+
+/* Tabular numbers for prices, quantities, stock */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom sleek dark scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0b0b10;
+}
+::-webkit-scrollbar-thumb {
+  background: #262626;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #333333;
+}
+
+/* Hide scrollbar for clean horizontal strips */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
