@@ -11,7 +11,9 @@ import {
 } from 'lucide-react';
 
 export const StaffPermissionsView: React.FC = () => {
-  const { staff, addStaffMember, updateStaffRole, toggleStaffStatus, currentUser } = useAdmin();
+  const { staff, addStaffMember, updateStaffRole, toggleStaffStatus, currentUser, hasPermission } = useAdmin();
+  const isRootSuperAdmin = currentUser?.role === 'SUPER_ADMIN' || currentUser?.id === 'usr-saif';
+  const canManageStaff = isRootSuperAdmin || hasPermission('staff.manage');
 
   const [activeTab, setActiveTab] = useState<'STAFF' | 'MATRIX'>('STAFF');
   const [showInviteModal, setShowInviteModal] = useState(false);
@@ -127,12 +129,14 @@ export const StaffPermissionsView: React.FC = () => {
                     <td className="p-3.5">
                       <select
                         value={u.role}
-                        disabled={currentUser?.role !== 'SUPER_ADMIN'}
+                        disabled={!canManageStaff}
                         onChange={(e) => updateStaffRole(u.id, e.target.value as Role)}
-                        className="px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-xs text-white font-mono cursor-pointer"
+                        className="px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-xs text-white font-mono cursor-pointer disabled:opacity-60"
                       >
                         {rolesList.map((r) => (
-                          <option key={r} value={r}>{r}</option>
+                          <option key={r} value={r} disabled={r === 'SUPER_ADMIN' && !isRootSuperAdmin}>
+                            {r}
+                          </option>
                         ))}
                       </select>
                     </td>
@@ -253,7 +257,9 @@ export const StaffPermissionsView: React.FC = () => {
                   className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-white focus:outline-none focus:border-red-500 cursor-pointer font-mono"
                 >
                   {rolesList.map((r) => (
-                    <option key={r} value={r}>{r}</option>
+                    <option key={r} value={r} disabled={r === 'SUPER_ADMIN' && !isRootSuperAdmin}>
+                      {r}
+                    </option>
                   ))}
                 </select>
               </div>

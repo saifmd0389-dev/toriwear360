@@ -1,10 +1,46 @@
+import fs from 'fs';
 import {
   PlatformUser,
   GranularPermissions,
   SecurityPolicyConfig,
   ActiveSession,
+  ModuleName,
+  PermissionAction,
+  AdminAccessTier,
 } from './rbacTypes';
 import { auditStore } from './auditStore';
+import { resolveSecureStorePath } from './utils/storageHelper';
+import { getPrismaClient } from './db/prisma';
+
+const ALL_MODULES: ModuleName[] = [
+  'dashboard',
+  'products',
+  'inventory',
+  'orders',
+  'customers',
+  'customerSupport',
+  'marketing',
+  'catalog',
+  'shipping',
+  'finance',
+  'reports',
+  'communication',
+  'meetings',
+  'aiDesignLab',
+  'website',
+  'staff',
+  'security',
+  'settings',
+  'superAdmin',
+];
+
+const ALL_ACTIONS: PermissionAction[] = ['view', 'create', 'edit', 'approve', 'export', 'delete'];
+
+const PARTNER_PERMISSIONS_STORE_PATH = resolveSecureStorePath(
+  '.partner-permissions.json',
+  'public/generated-assets/.partner-permissions.json'
+);
+const PARTNER_PERMISSIONS_DB_KEY = 'platform.partner_permissions_overrides';
 
 export const FULL_SUPER_ADMIN_PERMISSIONS: GranularPermissions = {
   dashboard: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
@@ -21,6 +57,32 @@ export const FULL_SUPER_ADMIN_PERMISSIONS: GranularPermissions = {
   communication: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
   meetings: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
   aiDesignLab: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  website: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  staff: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  security: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  settings: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  superAdmin: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+};
+
+export const FULL_ADMIN_PARTNER_PERMISSIONS: GranularPermissions = {
+  dashboard: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  products: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  inventory: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  orders: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  customers: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  customerSupport: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  marketing: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  catalog: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  shipping: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  finance: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  reports: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  communication: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  meetings: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  aiDesignLab: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  website: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  staff: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  security: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
+  settings: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
   superAdmin: ['view', 'create', 'edit', 'approve', 'export', 'delete'],
 };
 
@@ -39,8 +101,20 @@ export const PARTNER_PERMISSIONS: GranularPermissions = {
   communication: ['view', 'create', 'edit', 'approve', 'export'],
   meetings: ['view', 'create', 'edit', 'approve', 'export'],
   aiDesignLab: ['view', 'create', 'edit', 'approve', 'export'],
-  superAdmin: [], // Partners strictly have NO access to Super Admin controls
+  website: ['view', 'edit'],
+  staff: [],
+  security: [],
+  settings: [],
+  superAdmin: [], // Restricted governance modules require explicit Super Admin grant
 };
+
+export const EXEC_VIEW_ONLY_PARTNER_PERMISSIONS: GranularPermissions = ALL_MODULES.reduce(
+  (acc, mod) => {
+    acc[mod] = ['view'];
+    return acc;
+  },
+  {} as GranularPermissions
+);
 
 export const DEFAULT_STAFF_PERMISSIONS: GranularPermissions = {
   dashboard: ['view'],
@@ -57,11 +131,65 @@ export const DEFAULT_STAFF_PERMISSIONS: GranularPermissions = {
   communication: ['view', 'create'],
   meetings: ['view'],
   aiDesignLab: ['view'],
+  website: [],
+  staff: [],
+  security: [],
+  settings: [],
   superAdmin: [],
 };
 
+export function normalizeGranularPermissions(
+  raw?: Partial<Record<string, unknown>> | null,
+  fallback: GranularPermissions = PARTNER_PERMISSIONS
+): GranularPermissions {
+  const result = {} as GranularPermissions;
+  for (const mod of ALL_MODULES) {
+    const rawList = raw && Array.isArray(raw[mod]) ? (raw[mod] as unknown[]) : fallback[mod] || [];
+    const cleaned = Array.from(
+      new Set(
+        rawList.filter(
+          (a): a is PermissionAction => typeof a === 'string' && ALL_ACTIONS.includes(a as PermissionAction)
+        )
+      )
+    );
+    result[mod] = cleaned;
+  }
+  return result;
+}
+
+export function computeAdminAccessTier(
+  user: Pick<PlatformUser, 'role' | 'id' | 'email' | 'permissions'>
+): AdminAccessTier {
+  if (user.role === 'SUPER_ADMIN' || user.id === 'usr-saif' || user.email?.toLowerCase() === 'admin@toriwear.com') {
+    return 'SUPER_ADMIN';
+  }
+  const perms = user.permissions;
+  const hasSuperAdminFull =
+    Boolean(perms?.superAdmin?.includes('edit')) &&
+    Boolean(perms?.staff?.includes('edit')) &&
+    Boolean(perms?.security?.includes('edit')) &&
+    Boolean(perms?.settings?.includes('edit'));
+  if (hasSuperAdminFull) {
+    return 'FULL_ADMIN';
+  }
+  const hasAnyElevated =
+    (perms?.superAdmin?.length || 0) > 0 ||
+    (perms?.staff?.length || 0) > 0 ||
+    (perms?.security?.length || 0) > 0 ||
+    (perms?.settings?.length || 0) > 0;
+  return hasAnyElevated ? 'ELEVATED_PARTNER' : 'STANDARD_PARTNER';
+}
+
+interface PartnerPermissionOverrideRecord {
+  permissions: GranularPermissions;
+  adminAccessTier: AdminAccessTier;
+  updatedAt: string;
+  updatedBy: string;
+}
+
 class UserStore {
   private users: PlatformUser[] = [];
+  private partnerPermissionOverrides = new Map<string, PartnerPermissionOverrideRecord>();
   private securityPolicies: SecurityPolicyConfig = {
     requireTwoFactorForStaff: false,
     requireTwoFactorForPartners: false,
@@ -76,7 +204,128 @@ class UserStore {
   };
 
   constructor() {
+    this.loadPermissionsFromDisk();
     this.seedUsers();
+  }
+
+  private loadPermissionsFromDisk() {
+    try {
+      if (!fs.existsSync(PARTNER_PERMISSIONS_STORE_PATH)) return;
+      const raw = fs.readFileSync(PARTNER_PERMISSIONS_STORE_PATH, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return;
+      for (const [partnerId, rec] of Object.entries<any>(parsed)) {
+        if (!partnerId || partnerId === 'usr-saif' || !rec || typeof rec !== 'object') continue;
+        const normalizedPerms = normalizeGranularPermissions(rec.permissions, PARTNER_PERMISSIONS);
+        const tier: AdminAccessTier = rec.adminAccessTier || computeAdminAccessTier({
+          id: partnerId,
+          role: 'PARTNER',
+          email: '',
+          permissions: normalizedPerms,
+        });
+        this.partnerPermissionOverrides.set(partnerId, {
+          permissions: normalizedPerms,
+          adminAccessTier: tier,
+          updatedAt: rec.updatedAt || new Date().toISOString(),
+          updatedBy: rec.updatedBy || 'usr-saif',
+        });
+      }
+    } catch (err) {
+      console.warn('[USER_STORE] Failed to read partner permissions override file:', err);
+    }
+  }
+
+  private applyOverridesToUsers() {
+    for (const user of this.users) {
+      if (this.isRootSuperAdmin(user)) {
+        user.permissions = normalizeGranularPermissions(FULL_SUPER_ADMIN_PERMISSIONS, FULL_SUPER_ADMIN_PERMISSIONS);
+        user.adminAccessTier = 'SUPER_ADMIN';
+        continue;
+      }
+      if (user.role === 'PARTNER') {
+        const override = this.partnerPermissionOverrides.get(user.id) || this.partnerPermissionOverrides.get(user.email.toLowerCase());
+        if (override) {
+          user.permissions = normalizeGranularPermissions(override.permissions, PARTNER_PERMISSIONS);
+          user.adminAccessTier = override.adminAccessTier || computeAdminAccessTier(user);
+        } else {
+          user.permissions = normalizeGranularPermissions(user.permissions, PARTNER_PERMISSIONS);
+          user.adminAccessTier = computeAdminAccessTier(user);
+        }
+      }
+    }
+  }
+
+  private persistPermissionsOverrides() {
+    const payload: Record<string, PartnerPermissionOverrideRecord> = {};
+    for (const [key, val] of this.partnerPermissionOverrides.entries()) {
+      payload[key] = val;
+    }
+    const serialized = JSON.stringify(payload, null, 2);
+    try {
+      const tmpPath = `${PARTNER_PERMISSIONS_STORE_PATH}.tmp`;
+      fs.writeFileSync(tmpPath, serialized, 'utf-8');
+      fs.renameSync(tmpPath, PARTNER_PERMISSIONS_STORE_PATH);
+    } catch (err) {
+      console.warn('[USER_STORE] Failed to persist partner permissions to disk:', err);
+    }
+
+    const prisma = getPrismaClient();
+    if (prisma?.websiteSetting) {
+      prisma.websiteSetting
+        .upsert({
+          where: { key: PARTNER_PERMISSIONS_DB_KEY },
+          create: {
+            key: PARTNER_PERMISSIONS_DB_KEY,
+            value: serialized,
+            group: 'GENERAL',
+            isPublic: false,
+            description: 'Super Admin granular partner permission overrides',
+          },
+          update: { value: serialized },
+        })
+        .catch((err: unknown) => {
+          console.warn('[USER_STORE] Failed to persist partner permissions to MySQL:', err);
+        });
+    }
+  }
+
+  public async hydratePermissionsFromDb(): Promise<void> {
+    try {
+      const prisma = getPrismaClient();
+      if (!prisma?.websiteSetting) return;
+      const row = await prisma.websiteSetting.findUnique({
+        where: { key: PARTNER_PERMISSIONS_DB_KEY },
+      });
+      if (!row?.value) {
+        if (this.partnerPermissionOverrides.size > 0) {
+          this.persistPermissionsOverrides();
+        }
+        return;
+      }
+      const parsed = JSON.parse(row.value);
+      if (!parsed || typeof parsed !== 'object') return;
+      for (const [partnerId, rec] of Object.entries<any>(parsed)) {
+        if (!partnerId || partnerId === 'usr-saif' || !rec || typeof rec !== 'object') continue;
+        const normalizedPerms = normalizeGranularPermissions(rec.permissions, PARTNER_PERMISSIONS);
+        const tier: AdminAccessTier =
+          rec.adminAccessTier ||
+          computeAdminAccessTier({
+            id: partnerId,
+            role: 'PARTNER',
+            email: '',
+            permissions: normalizedPerms,
+          });
+        this.partnerPermissionOverrides.set(partnerId, {
+          permissions: normalizedPerms,
+          adminAccessTier: tier,
+          updatedAt: rec.updatedAt || new Date().toISOString(),
+          updatedBy: rec.updatedBy || 'usr-saif',
+        });
+      }
+      this.applyOverridesToUsers();
+    } catch (err) {
+      console.warn('[USER_STORE] Failed to hydrate partner permissions from MySQL:', err);
+    }
   }
 
   private seedUsers() {
@@ -360,39 +609,72 @@ class UserStore {
         activeSessions: [],
       }
     ];
+
+    this.applyOverridesToUsers();
   }
 
   // --- Readers ---
 
+  private enrichUserView(user: PlatformUser): PlatformUser {
+    return {
+      ...user,
+      adminAccessTier: user.adminAccessTier || computeAdminAccessTier(user),
+    };
+  }
+
   public getAllUsers(): PlatformUser[] {
-    return this.users.map(u => ({ ...u }));
+    return this.users.map(u => this.enrichUserView(u));
   }
 
   public getPartners(): PlatformUser[] {
-    return this.users.filter(u => u.role === 'PARTNER' || (u.role === 'SUPER_ADMIN' && u.ownershipPercentage));
+    return this.users
+      .filter(u => u.role === 'PARTNER' || (u.role === 'SUPER_ADMIN' && u.ownershipPercentage))
+      .map(u => this.enrichUserView(u));
   }
 
   public getStaff(): PlatformUser[] {
-    return this.users.filter(u => u.role === 'STAFF');
+    return this.users.filter(u => u.role === 'STAFF').map(u => this.enrichUserView(u));
   }
 
   public getUserById(id: string): PlatformUser | undefined {
-    return this.users.find(u => u.id === id);
+    const found = this.users.find(u => u.id === id);
+    return found ? this.enrichUserView(found) : undefined;
   }
 
   public getUserByEmail(email: string): PlatformUser | undefined {
-    return this.users.find(u => u.email.toLowerCase() === email.toLowerCase());
+    const found = this.users.find(u => u.email.toLowerCase() === email.toLowerCase());
+    return found ? this.enrichUserView(found) : undefined;
   }
 
   public getSecurityPolicies(): SecurityPolicyConfig {
     return { ...this.securityPolicies };
   }
 
-  // --- Super Admin Protection Check ---
+  // --- Super Admin Protection & Capability Helpers ---
+
+  public isRootSuperAdmin(user?: Pick<PlatformUser, 'id' | 'role' | 'email'> | null): boolean {
+    if (!user) return false;
+    return (
+      user.role === 'SUPER_ADMIN' ||
+      user.id === 'usr-saif' ||
+      user.email?.toLowerCase() === 'admin@toriwear.com'
+    );
+  }
 
   public isSuperAdminUser(userId: string): boolean {
-    const user = this.getUserById(userId);
-    return user?.role === 'SUPER_ADMIN' || user?.id === 'usr-saif' || user?.email === 'admin@toriwear.com';
+    const user = this.users.find(u => u.id === userId);
+    return this.isRootSuperAdmin(user);
+  }
+
+  public hasAdminCapability(
+    user: PlatformUser | undefined,
+    moduleName: ModuleName,
+    action: PermissionAction = 'view'
+  ): boolean {
+    if (!user) return false;
+    if (this.isRootSuperAdmin(user)) return true;
+    if (user.accountStatus !== 'ACTIVE') return false;
+    return Boolean(user.permissions?.[moduleName]?.includes(action));
   }
 
   // --- Partner Management (Super Admin Exclusive) ---
@@ -452,25 +734,42 @@ class UserStore {
   }
 
   public updatePartner(partnerId: string, updates: Partial<PlatformUser>, actor: PlatformUser): { success: boolean; error?: string } {
-    if (actor.role !== 'SUPER_ADMIN') {
+    if (!this.isRootSuperAdmin(actor)) {
       return { success: false, error: 'Authorization violation: Only Super Admin can modify partner credentials or permissions.' };
     }
 
-    const partner = this.getUserById(partnerId);
+    const partner = this.users.find(u => u.id === partnerId);
     if (!partner) {
       return { success: false, error: 'Partner not found.' };
     }
 
     // Protection rule: Never allow deactivating or stripping the Super Admin account
-    if (partner.id === 'usr-saif' && updates.accountStatus === 'SUSPENDED') {
-      return { success: false, error: 'Super Admin protection rule: Super Admin account cannot be deactivated or suspended.' };
+    if (this.isRootSuperAdmin(partner) && (updates.accountStatus === 'SUSPENDED' || updates.role && updates.role !== 'SUPER_ADMIN')) {
+      return { success: false, error: 'Super Admin protection rule: Super Admin account cannot be deactivated or downgraded.' };
+    }
+
+    const safeUpdates: Partial<PlatformUser> = { ...updates };
+    if (safeUpdates.permissions) {
+      safeUpdates.permissions = normalizeGranularPermissions(safeUpdates.permissions, PARTNER_PERMISSIONS);
     }
 
     const oldStatus = partner.accountStatus;
     Object.assign(partner, {
-      ...updates,
+      ...safeUpdates,
       updatedAt: new Date().toISOString(),
     });
+
+    if (partner.role === 'PARTNER' && safeUpdates.permissions) {
+      const tier = computeAdminAccessTier(partner);
+      partner.adminAccessTier = tier;
+      this.partnerPermissionOverrides.set(partner.id, {
+        permissions: partner.permissions,
+        adminAccessTier: tier,
+        updatedAt: partner.updatedAt,
+        updatedBy: actor.id,
+      });
+      this.persistPermissionsOverrides();
+    }
 
     auditStore.record({
       userId: actor.id,
@@ -480,12 +779,99 @@ class UserStore {
       action: 'PARTNER_UPDATED',
       recordAffected: `${partner.name} (${partner.email})`,
       previousValue: `Status: ${oldStatus}`,
-      newValue: `Updated fields: ${Object.keys(updates).join(', ')}`,
+      newValue: `Updated fields: ${Object.keys(safeUpdates).join(', ')}`,
       ipAddress: '103.21.144.12',
       severity: 'WARNING',
     });
 
     return { success: true };
+  }
+
+  public updatePartnerPermissions(
+    partnerId: string,
+    rawPermissions: Partial<GranularPermissions> | undefined,
+    requestedTier: AdminAccessTier | undefined,
+    actor: PlatformUser,
+    preset?: 'FULL_ADMIN' | 'STANDARD_PARTNER' | 'EXEC_VIEW_ONLY'
+  ): { success: boolean; partner?: PlatformUser; error?: string; statusCode?: number } {
+    if (!this.isRootSuperAdmin(actor)) {
+      return {
+        success: false,
+        statusCode: 403,
+        error: 'Authorization violation: Only Super Admin (Mohammed Saif) can grant or modify partner admin access.',
+      };
+    }
+
+    const partner = this.users.find(u => u.id === partnerId);
+    if (!partner) {
+      return { success: false, statusCode: 404, error: 'Partner account not found.' };
+    }
+
+    if (this.isRootSuperAdmin(partner)) {
+      return {
+        success: false,
+        statusCode: 403,
+        error: 'Super Admin protection rule: Mohammed Saif root account permissions are immutable.',
+      };
+    }
+
+    if (partner.role !== 'PARTNER') {
+      return { success: false, statusCode: 400, error: 'Target user is not a Partner account.' };
+    }
+
+    const basePermissions =
+      preset === 'FULL_ADMIN'
+        ? FULL_ADMIN_PARTNER_PERMISSIONS
+        : preset === 'STANDARD_PARTNER'
+          ? PARTNER_PERMISSIONS
+          : preset === 'EXEC_VIEW_ONLY'
+            ? EXEC_VIEW_ONLY_PARTNER_PERMISSIONS
+            : normalizeGranularPermissions(rawPermissions, partner.permissions || PARTNER_PERMISSIONS);
+
+    const normalized = normalizeGranularPermissions(basePermissions, PARTNER_PERMISSIONS);
+    const previousTier = partner.adminAccessTier || computeAdminAccessTier(partner);
+    const nextTier =
+      preset === 'FULL_ADMIN'
+        ? 'FULL_ADMIN'
+        : preset === 'STANDARD_PARTNER'
+          ? 'STANDARD_PARTNER'
+          : preset === 'EXEC_VIEW_ONLY'
+            ? 'ELEVATED_PARTNER'
+            : requestedTier && requestedTier !== 'SUPER_ADMIN'
+              ? requestedTier
+              : computeAdminAccessTier({ ...partner, permissions: normalized });
+
+    const nowIso = new Date().toISOString();
+    partner.permissions = normalized;
+    partner.adminAccessTier = nextTier;
+    partner.updatedAt = nowIso;
+
+    this.partnerPermissionOverrides.set(partner.id, {
+      permissions: normalized,
+      adminAccessTier: nextTier,
+      updatedAt: nowIso,
+      updatedBy: actor.id,
+    });
+    this.persistPermissionsOverrides();
+
+    const enabledModules = Object.entries(normalized)
+      .filter(([, acts]) => acts.length > 0)
+      .map(([mod]) => mod);
+
+    auditStore.record({
+      userId: actor.id,
+      userName: actor.name,
+      userRole: actor.role,
+      module: 'partners',
+      action: 'PARTNER_PERMISSIONS_UPDATED',
+      recordAffected: `${partner.name} (${partner.email})`,
+      previousValue: `Tier: ${previousTier}`,
+      newValue: `Tier: ${nextTier} | Unlocked Modules (${enabledModules.length}): ${enabledModules.join(', ')}`,
+      ipAddress: '103.21.144.12',
+      severity: 'CRITICAL',
+    });
+
+    return { success: true, partner: this.enrichUserView(partner) };
   }
 
   public deactivatePartner(partnerId: string, actor: PlatformUser): { success: boolean; error?: string } {
@@ -634,15 +1020,28 @@ class UserStore {
     return { success: true };
   }
 
-  // --- Session & Security Policies (Super Admin Only) ---
+  // --- Session & Security Policies (Super Admin & Elevated Authorized Partners) ---
 
-  public forceLogoutUser(userId: string, actor: PlatformUser): { success: boolean; error?: string } {
-    if (actor.role !== 'SUPER_ADMIN') {
-      return { success: false, error: 'Authorization violation: Only Super Admin can force terminate user sessions.' };
+  public forceLogoutUser(userId: string, actor: PlatformUser): { success: boolean; error?: string; statusCode?: number } {
+    const isRoot = this.isRootSuperAdmin(actor);
+    const hasElevatedSecurity =
+      actor.role === 'PARTNER' &&
+      (this.hasAdminCapability(actor, 'superAdmin', 'edit') || this.hasAdminCapability(actor, 'security', 'edit'));
+
+    if (!isRoot && !hasElevatedSecurity) {
+      return { success: false, statusCode: 403, error: 'Authorization violation: Super Admin or elevated security access required to terminate user sessions.' };
     }
 
-    const target = this.getUserById(userId);
-    if (!target) return { success: false, error: 'User not found.' };
+    const target = this.users.find(u => u.id === userId);
+    if (!target) return { success: false, statusCode: 404, error: 'User not found.' };
+
+    if (!isRoot && (this.isRootSuperAdmin(target) || (target.role === 'PARTNER' && target.id !== actor.id))) {
+      return {
+        success: false,
+        statusCode: 403,
+        error: 'Protection rule: Partners cannot terminate sessions for Mohammed Saif (Super Admin) or fellow Partners.',
+      };
+    }
 
     target.activeSessions = [];
     target.updatedAt = new Date().toISOString();
@@ -662,13 +1061,26 @@ class UserStore {
     return { success: true };
   }
 
-  public resetUser2FA(userId: string, actor: PlatformUser): { success: boolean; error?: string } {
-    if (actor.role !== 'SUPER_ADMIN') {
-      return { success: false, error: 'Authorization violation: Only Super Admin can reset two-factor authentication.' };
+  public resetUser2FA(userId: string, actor: PlatformUser): { success: boolean; error?: string; statusCode?: number } {
+    const isRoot = this.isRootSuperAdmin(actor);
+    const hasElevatedSecurity =
+      actor.role === 'PARTNER' &&
+      (this.hasAdminCapability(actor, 'superAdmin', 'edit') || this.hasAdminCapability(actor, 'security', 'edit'));
+
+    if (!isRoot && !hasElevatedSecurity) {
+      return { success: false, statusCode: 403, error: 'Authorization violation: Super Admin or elevated security access required to reset two-factor authentication.' };
     }
 
-    const target = this.getUserById(userId);
-    if (!target) return { success: false, error: 'User not found.' };
+    const target = this.users.find(u => u.id === userId);
+    if (!target) return { success: false, statusCode: 404, error: 'User not found.' };
+
+    if (!isRoot && (this.isRootSuperAdmin(target) || (target.role === 'PARTNER' && target.id !== actor.id))) {
+      return {
+        success: false,
+        statusCode: 403,
+        error: 'Protection rule: Partners cannot reset 2FA for Mohammed Saif (Super Admin) or fellow Partners.',
+      };
+    }
 
     target.twoFactorEnabled = false;
     target.updatedAt = new Date().toISOString();
@@ -688,9 +1100,14 @@ class UserStore {
     return { success: true };
   }
 
-  public updateSecurityPolicies(updates: Partial<SecurityPolicyConfig>, actor: PlatformUser): { success: boolean; error?: string } {
-    if (actor.role !== 'SUPER_ADMIN') {
-      return { success: false, error: 'Authorization violation: Only Super Admin can update enterprise security policies.' };
+  public updateSecurityPolicies(updates: Partial<SecurityPolicyConfig>, actor: PlatformUser): { success: boolean; error?: string; statusCode?: number } {
+    const isRoot = this.isRootSuperAdmin(actor);
+    const hasElevatedSecurity =
+      actor.role === 'PARTNER' &&
+      (this.hasAdminCapability(actor, 'superAdmin', 'edit') || this.hasAdminCapability(actor, 'security', 'edit'));
+
+    if (!isRoot && !hasElevatedSecurity) {
+      return { success: false, statusCode: 403, error: 'Authorization violation: Super Admin or elevated security access required to update enterprise security policies.' };
     }
 
     Object.assign(this.securityPolicies, updates);
@@ -734,7 +1151,8 @@ class UserStore {
       if (dbUser.department) existing.department = dbUser.department as PlatformUser['department'];
       if (dbUser.accountStatus) existing.accountStatus = dbUser.accountStatus as PlatformUser['accountStatus'];
       if (typeof dbUser.twoFactorEnabled === 'boolean') existing.twoFactorEnabled = dbUser.twoFactorEnabled;
-      return { ...existing };
+      this.applyOverridesToUsers();
+      return this.enrichUserView(existing);
     }
 
     const roleUpper = String(dbUser.role || 'STAFF').toUpperCase();
@@ -745,11 +1163,17 @@ class UserStore {
           ? 'PARTNER'
           : 'STAFF';
 
+    const override =
+      mappedRole === 'PARTNER'
+        ? this.partnerPermissionOverrides.get(dbUser.id) ||
+          this.partnerPermissionOverrides.get(dbUser.email.toLowerCase())
+        : undefined;
+
     const permissions: GranularPermissions =
       mappedRole === 'SUPER_ADMIN'
         ? FULL_SUPER_ADMIN_PERMISSIONS
         : mappedRole === 'PARTNER'
-          ? PARTNER_PERMISSIONS
+          ? override?.permissions || PARTNER_PERMISSIONS
           : DEFAULT_STAFF_PERMISSIONS;
 
     const nowIso = new Date().toISOString();
@@ -768,12 +1192,13 @@ class UserStore {
       createdBy: 'DATABASE',
       createdAt: dbUser.createdAt ? new Date(dbUser.createdAt).toISOString() : nowIso,
       updatedAt: dbUser.updatedAt ? new Date(dbUser.updatedAt).toISOString() : nowIso,
-      permissions,
+      permissions: normalizeGranularPermissions(permissions, PARTNER_PERMISSIONS),
       activeSessions: [],
     };
+    record.adminAccessTier = override?.adminAccessTier || computeAdminAccessTier(record);
 
     this.users.push(record);
-    return { ...record };
+    return this.enrichUserView(record);
   }
 }
 

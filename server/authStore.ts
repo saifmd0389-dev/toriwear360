@@ -72,6 +72,7 @@ interface TwoFactorChallenge {
 }
 
 const SESSIONS_STORE_PATH = resolveSecureStorePath('.auth-sessions.json', 'public/generated-assets/.auth-sessions.json');
+const CREDENTIALS_STORE_PATH = resolveSecureStorePath('.auth-credentials.json', 'public/generated-assets/.auth-credentials.json');
 
 class AuthStore {
   private credentials = new Map<string, UserCredential>();
@@ -84,7 +85,10 @@ class AuthStore {
   private sessionHydrationPromise: Promise<void> | null = null;
 
   constructor() {
-    if (process.env.NODE_ENV !== 'production') this.seedDefaultCredentials();
+    if (process.env.NODE_ENV !== 'production') {
+      this.seedDefaultCredentials();
+      this.loadCredentialsFromDisk();
+    }
     this.loadSessionsFromDisk();
   }
 
@@ -368,6 +372,56 @@ class AuthStore {
     }
   }
 
+  private saveCredentialsToDisk() {
+    if (process.env.NODE_ENV === 'production') return;
+    try {
+      const dir = path.dirname(CREDENTIALS_STORE_PATH);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const serializable = Array.from(this.credentials.values())
+        .filter((c) => Boolean(c.passwordHash && c.salt))
+        .map((c) => ({
+          userId: c.userId,
+          passwordHash: c.passwordHash,
+          salt: c.salt,
+          mustChangePasswordOnFirstLogin: Boolean(c.mustChangePasswordOnFirstLogin),
+          lastPasswordChange: c.lastPasswordChange,
+          twoFactorEnabled: Boolean(c.twoFactorEnabled),
+        }));
+      const tmpPath = `${CREDENTIALS_STORE_PATH}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify({ credentials: serializable }, null, 2), 'utf-8');
+      fs.renameSync(tmpPath, CREDENTIALS_STORE_PATH);
+    } catch (err) {
+      console.warn('[AUTH] Failed to persist dev credentials to disk:', err);
+    }
+  }
+
+  private loadCredentialsFromDisk() {
+    try {
+      if (!fs.existsSync(CREDENTIALS_STORE_PATH)) return;
+      const raw = fs.readFileSync(CREDENTIALS_STORE_PATH, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (!parsed || !Array.isArray(parsed.credentials)) return;
+      for (const c of parsed.credentials) {
+        if (!c?.userId || !c?.passwordHash || !c?.salt) continue;
+        const existing = this.credentials.get(c.userId);
+        this.credentials.set(c.userId, {
+          ...(existing || {}),
+          userId: c.userId,
+          passwordHash: c.passwordHash,
+          salt: c.salt,
+          failedLoginAttempts: 0,
+          mustChangePasswordOnFirstLogin: Boolean(c.mustChangePasswordOnFirstLogin),
+          lastPasswordChange: c.lastPasswordChange || new Date().toISOString(),
+          twoFactorEnabled: Boolean(c.twoFactorEnabled),
+        });
+      }
+    } catch (err) {
+      console.warn('[AUTH] Could not load persisted dev credentials:', err);
+    }
+  }
+
   // Cryptographically secure password hashing using PBKDF2 with SHA-512 (10,000 iterations)
   private hashPassword(password: string, salt: string): string {
     return crypto.pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
@@ -378,20 +432,17 @@ class AuthStore {
   }
 
   private seedDefaultCredentials() {
-    // Only Super Admin / Founder has initial bootstrap password
+    // Only Super Admin / Founder has initial bootstrap password if configured
     const bootstrapPassword = process.env.TORI_BOOTSTRAP_ADMIN_PASSWORD;
-    if (bootstrapPassword) {
-      const saifSalt = this.generateSalt();
-      const saifHash = this.hashPassword(bootstrapPassword, saifSalt);
-      this.credentials.set('usr-saif', {
-        userId: 'usr-saif',
-        passwordHash: saifHash,
-        salt: saifSalt,
-        failedLoginAttempts: 0,
-        lastPasswordChange: new Date().toISOString(),
-        twoFactorEnabled: false,
-      });
-    }
+    const saifSalt = this.generateSalt();
+    this.credentials.set('usr-saif', {
+      userId: 'usr-saif',
+      ...(bootstrapPassword ? { passwordHash: this.hashPassword(bootstrapPassword, saifSalt) } : {}),
+      salt: saifSalt,
+      failedLoginAttempts: 0,
+      lastPasswordChange: new Date().toISOString(),
+      twoFactorEnabled: false,
+    });
 
     // Partners and operational staff: Zero hardcoded passwords.
     // Initialized as pending password setup with secure cryptographically random invitation tokens.
@@ -1398,6 +1449,7 @@ class AuthStore {
     cred.lastPasswordChange = new Date().toISOString();
     cred.mustChangePasswordOnFirstLogin = false;
     user.updatedAt = new Date().toISOString();
+    this.saveCredentialsToDisk();
 
     const prisma = getPrismaClient();
     if (prisma?.user) {
@@ -1545,6 +1597,7 @@ class AuthStore {
     cred.failedLoginAttempts = 0;
     cred.lockoutUntil = undefined;
     record.used = true;
+    this.saveCredentialsToDisk();
 
     if (prisma) {
       try {
@@ -1626,6 +1679,7 @@ class AuthStore {
       lastPasswordChange: new Date().toISOString(),
       mustChangePasswordOnFirstLogin: false,
     });
+    this.saveCredentialsToDisk();
 
     const prisma = getPrismaClient();
     if (prisma?.user) {
@@ -1712,6 +1766,7 @@ class AuthStore {
       cred.mustChangePasswordOnFirstLogin = mustChangePassword;
       cred.lastPasswordChange = new Date().toISOString();
     }
+    this.saveCredentialsToDisk();
 
     // Persist to PostgreSQL if connected
     const prisma = getPrismaClient();

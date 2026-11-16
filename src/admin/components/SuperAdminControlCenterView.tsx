@@ -18,11 +18,40 @@ import {
 import { platformApi } from '../services/platformService';
 import { PlatformUser, SecurityPolicyConfig, PlatformAuditEntry } from '../../../server/rbacTypes';
 import { AdminResetUserPasswordModal } from './AdminResetUserPasswordModal';
+import { PartnerAdminAccessModal } from './PartnerAdminAccessModal';
+import { useAdmin } from '../AdminDataContext';
 
 const PRECONFIGURED_CREDENTIALS: Record<string, { employeeId: string }> = {};
 
+function getAccessTierLabel(partner: PlatformUser): { label: string; badgeClass: string; unlockedCount: number } {
+  const perms = partner.permissions || ({} as any);
+  const unlockedCount = Object.values(perms).filter((arr: any) => Array.isArray(arr) && arr.length > 0).length;
+  const tier = partner.adminAccessTier;
+  if (tier === 'FULL_ADMIN') {
+    return {
+      label: `Full Admin Access (${unlockedCount} Modules)`,
+      badgeClass: 'bg-indigo-100 text-indigo-800 border border-indigo-200',
+      unlockedCount,
+    };
+  }
+  if (tier === 'ELEVATED_PARTNER') {
+    return {
+      label: `Elevated Admin (${unlockedCount} Modules)`,
+      badgeClass: 'bg-amber-100 text-amber-800 border border-amber-200',
+      unlockedCount,
+    };
+  }
+  return {
+    label: `Standard Partner (${unlockedCount} Modules)`,
+    badgeClass: 'bg-slate-100 text-slate-700 border border-slate-200',
+    unlockedCount,
+  };
+}
+
 export const SuperAdminControlCenterView: React.FC = () => {
+  const { refreshCurrentUser } = useAdmin();
   const [currentUser, setCurrentUser] = useState<PlatformUser | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
   const [partners, setPartners] = useState<PlatformUser[]>([]);
   const [staff, setStaff] = useState<PlatformUser[]>([]);
   const [policies, setPolicies] = useState<SecurityPolicyConfig | null>(null);
@@ -31,8 +60,9 @@ export const SuperAdminControlCenterView: React.FC = () => {
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [partnerError, setPartnerError] = useState<string>('');
 
-  // Password & Credentials Modal
+  // Modals
   const [passwordModalUser, setPasswordModalUser] = useState<PlatformUser | null>(null);
+  const [accessModalPartner, setAccessModalPartner] = useState<PlatformUser | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const copyText = (text: string, id: string) => {
@@ -64,6 +94,8 @@ export const SuperAdminControlCenterView: React.FC = () => {
       setCriticalAuditLogs(logs);
     } catch (err) {
       console.error('Failed to load Super Admin Control Center data:', err);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -76,10 +108,26 @@ export const SuperAdminControlCenterView: React.FC = () => {
     setTimeout(() => setActionNotice(null), 4000);
   };
 
-  const isSuperAdmin = currentUser?.role === 'SUPER_ADMIN' || currentUser?.id === 'usr-saif';
+  const isRootSuperAdmin = currentUser?.role === 'SUPER_ADMIN' || currentUser?.id === 'usr-saif';
+  const hasElevatedSuperAdminAccess =
+    isRootSuperAdmin || Boolean(currentUser?.permissions?.superAdmin?.includes('view'));
+  const canEditSuperAdminControls =
+    isRootSuperAdmin ||
+    Boolean(
+      currentUser?.permissions?.superAdmin?.includes('edit') ||
+        currentUser?.permissions?.security?.includes('edit')
+    );
 
-  // Super Admin exclusivity protection gate
-  if (!isSuperAdmin) {
+  if (loading && !currentUser) {
+    return (
+      <div className="py-16 text-center text-xs text-slate-500 font-medium">
+        Loading Super Admin Control Center...
+      </div>
+    );
+  }
+
+  // Super Admin & explicitly authorized Partner gate
+  if (!hasElevatedSuperAdminAccess) {
     return (
       <div className="bg-red-50 border border-red-200 rounded-3xl p-8 text-center max-w-2xl mx-auto my-12 space-y-4">
         <div className="w-16 h-16 rounded-2xl bg-red-100 border border-red-200 text-red-600 flex items-center justify-center mx-auto shadow-inner">
@@ -89,7 +137,7 @@ export const SuperAdminControlCenterView: React.FC = () => {
           Super Admin Control Center Restricted
         </h2>
         <p className="text-xs text-slate-600 leading-relaxed">
-          Access denied. This console is exclusively accessible by <strong>Mohammed Saif (Super Admin)</strong>. Partners and operational staff cannot modify master platform credentials, reset partner access, or alter enterprise security policies.
+          Access denied. This console is accessible by <strong>Mohammed Saif (Super Admin)</strong> or Partners explicitly granted <strong>Super Admin Control</strong> access.
         </p>
         <div className="pt-2">
           <button
@@ -274,21 +322,32 @@ export const SuperAdminControlCenterView: React.FC = () => {
       {/* 1. PARTNER MANAGEMENT */}
       {activeTab === 'PARTNERS' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-bold text-slate-900">Partner Credentials & Session Controls</h2>
-            <button
-              onClick={() => setShowCreatePartnerModal(true)}
-              className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold shadow-sm flex items-center gap-1.5 cursor-pointer"
-            >
-              <PlusCircle className="w-4 h-4" />
-              <span>Create New Partner</span>
-            </button>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold text-slate-900">Partner Credentials, Admin Access & Session Controls</h2>
+              {isRootSuperAdmin && (
+                <p className="text-[11px] text-slate-500">
+                  Click <strong>Manage Admin Access</strong> on any Partner card to unlock full admin options or customize module permissions.
+                </p>
+              )}
+            </div>
+            {isRootSuperAdmin && (
+              <button
+                onClick={() => setShowCreatePartnerModal(true)}
+                className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold shadow-sm flex items-center gap-1.5 cursor-pointer shrink-0"
+              >
+                <PlusCircle className="w-4 h-4" />
+                <span>Create New Partner</span>
+              </button>
+            )}
           </div>
 
           <div className="space-y-4">
             {partners.map((partner) => {
               const isSaif = partner.id === 'usr-saif';
               const creds = PRECONFIGURED_CREDENTIALS[partner.id];
+              const tierInfo = getAccessTierLabel(partner);
+              const canManageThisPartnerCreds = isRootSuperAdmin || partner.id === currentUser?.id;
 
               return (
                 <div 
@@ -305,9 +364,13 @@ export const SuperAdminControlCenterView: React.FC = () => {
                       <div>
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-bold text-slate-900 text-sm">{partner.name}</span>
-                          {isSaif && (
+                          {isSaif ? (
                             <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">
                               SUPER ADMIN ROOT
+                            </span>
+                          ) : (
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${tierInfo.badgeClass}`}>
+                              {tierInfo.label}
                             </span>
                           )}
                           <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-100 text-emerald-800">
@@ -324,41 +387,64 @@ export const SuperAdminControlCenterView: React.FC = () => {
 
                     {/* Actions */}
                     <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        onClick={() => setPasswordModalUser(partner)}
-                        className="px-3 py-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
-                        title="Directly reset, create, or overwrite password for this partner"
-                      >
-                        <KeyRound className="w-3.5 h-3.5 text-red-600" />
-                        <span>Reset / Set Password</span>
-                      </button>
+                      {!isSaif && isRootSuperAdmin && (
+                        <button
+                          onClick={() => setAccessModalPartner(partner)}
+                          className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                          title="Grant full admin access or customize individual admin modules for this partner"
+                        >
+                          <Sliders className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>Manage Admin Access</span>
+                        </button>
+                      )}
 
-                      <button
-                        onClick={() => handleForceLogout(partner.id, partner.name)}
-                        className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
-                        title="Invalidates all sessions across devices immediately"
-                      >
-                        <LogOut className="w-3.5 h-3.5 text-slate-500" />
-                        <span>Force Logout</span>
-                      </button>
+                      {canManageThisPartnerCreds && (
+                        <button
+                          onClick={() => setPasswordModalUser(partner)}
+                          className="px-3 py-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                          title="Directly reset, create, or overwrite password for this partner"
+                        >
+                          <KeyRound className="w-3.5 h-3.5 text-red-600" />
+                          <span>Reset / Set Password</span>
+                        </button>
+                      )}
 
-                      <button
-                        onClick={() => handleReset2FA(partner.id, partner.name)}
-                        className="px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
-                        title="Requires partner to re-enroll TOTP device"
-                      >
-                        <RefreshCw className="w-3.5 h-3.5 text-amber-600" />
-                        <span>Reset 2FA</span>
-                      </button>
+                      {isRootSuperAdmin && (
+                        <>
+                          <button
+                            onClick={() => handleForceLogout(partner.id, partner.name)}
+                            className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                            title="Invalidates all sessions across devices immediately"
+                          >
+                            <LogOut className="w-3.5 h-3.5 text-slate-500" />
+                            <span>Force Logout</span>
+                          </button>
+
+                          <button
+                            onClick={() => handleReset2FA(partner.id, partner.name)}
+                            className="px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                            title="Requires partner to re-enroll TOTP device"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5 text-amber-600" />
+                            <span>Reset 2FA</span>
+                          </button>
+                        </>
+                      )}
 
                       {!isSaif ? (
-                        <button
-                          onClick={() => handleDeactivatePartner(partner.id, partner.name)}
-                          className="px-3 py-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
-                        >
-                          <ShieldAlert className="w-3.5 h-3.5 text-red-600" />
-                          <span>Deactivate Partner</span>
-                        </button>
+                        isRootSuperAdmin ? (
+                          <button
+                            onClick={() => handleDeactivatePartner(partner.id, partner.name)}
+                            className="px-3 py-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                          >
+                            <ShieldAlert className="w-3.5 h-3.5 text-red-600" />
+                            <span>Deactivate Partner</span>
+                          </button>
+                        ) : (
+                          <span className="text-[10px] text-slate-500 font-mono px-2 py-1 bg-slate-50 rounded-lg border border-slate-200">
+                            Partner Protected
+                          </span>
+                        )
                       ) : (
                         <span className="text-[10px] text-slate-400 font-mono px-2 py-1 bg-slate-50 rounded-lg border border-slate-200">
                           Immutable Master
@@ -469,25 +555,31 @@ export const SuperAdminControlCenterView: React.FC = () => {
                           </span>
                         </td>
                         <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
-                          <button
-                            onClick={() => setPasswordModalUser(s)}
-                            className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-[11px] font-semibold cursor-pointer"
-                            title="Reset or overwrite password for this staff member"
-                          >
-                            Set Password
-                          </button>
-                          <button
-                            onClick={() => handleForceLogout(s.id, s.name)}
-                            className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-medium cursor-pointer"
-                          >
-                            Force Logout
-                          </button>
-                          <button
-                            onClick={() => handleReset2FA(s.id, s.name)}
-                            className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-[11px] font-medium cursor-pointer"
-                          >
-                            Reset 2FA
-                          </button>
+                          {canEditSuperAdminControls ? (
+                            <>
+                              <button
+                                onClick={() => setPasswordModalUser(s)}
+                                className="px-2.5 py-1 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-[11px] font-semibold cursor-pointer"
+                                title="Reset or overwrite password for this staff member"
+                              >
+                                Set Password
+                              </button>
+                              <button
+                                onClick={() => handleForceLogout(s.id, s.name)}
+                                className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-medium cursor-pointer"
+                              >
+                                Force Logout
+                              </button>
+                              <button
+                                onClick={() => handleReset2FA(s.id, s.name)}
+                                className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-[11px] font-medium cursor-pointer"
+                              >
+                                Reset 2FA
+                              </button>
+                            </>
+                          ) : (
+                            <span className="text-[11px] text-slate-400 font-mono">View Only</span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -505,7 +597,7 @@ export const SuperAdminControlCenterView: React.FC = () => {
           <div>
             <h2 className="text-sm font-bold text-slate-900">Enterprise Security Policies</h2>
             <p className="text-xs text-slate-500">
-              Only Mohammed Saif can adjust platform authentication standards, session timeouts, and encryption enforcement.
+              Adjust platform authentication standards, session timeouts, and encryption enforcement (requires Super Admin or granted Security Edit access).
             </p>
           </div>
 
@@ -517,9 +609,10 @@ export const SuperAdminControlCenterView: React.FC = () => {
               </div>
               <input
                 type="checkbox"
+                disabled={!canEditSuperAdminControls}
                 checked={policies.requireTwoFactorForStaff}
                 onChange={(e) => handleUpdatePolicy('requireTwoFactorForStaff', e.target.checked)}
-                className="w-4 h-4 rounded text-red-600 cursor-pointer"
+                className="w-4 h-4 rounded text-red-600 cursor-pointer disabled:opacity-50"
               />
             </div>
 
@@ -530,9 +623,10 @@ export const SuperAdminControlCenterView: React.FC = () => {
               </div>
               <input
                 type="checkbox"
+                disabled={!canEditSuperAdminControls}
                 checked={policies.requireTwoFactorForPartners}
                 onChange={(e) => handleUpdatePolicy('requireTwoFactorForPartners', e.target.checked)}
-                className="w-4 h-4 rounded text-red-600 cursor-pointer"
+                className="w-4 h-4 rounded text-red-600 cursor-pointer disabled:opacity-50"
               />
             </div>
 
@@ -542,9 +636,10 @@ export const SuperAdminControlCenterView: React.FC = () => {
                 <span className="text-[11px] text-slate-500">Forces re-authentication after idle duration</span>
               </div>
               <select
+                disabled={!canEditSuperAdminControls}
                 value={policies.sessionTimeoutMinutes}
                 onChange={(e) => handleUpdatePolicy('sessionTimeoutMinutes', Number(e.target.value))}
-                className="px-2.5 py-1 rounded-lg border border-slate-300 text-xs bg-white text-slate-900 font-semibold"
+                className="px-2.5 py-1 rounded-lg border border-slate-300 text-xs bg-white text-slate-900 font-semibold disabled:opacity-50"
               >
                 <option value={15}>15 Minutes</option>
                 <option value={30}>30 Minutes</option>
@@ -560,9 +655,10 @@ export const SuperAdminControlCenterView: React.FC = () => {
               </div>
               <input
                 type="checkbox"
+                disabled={!canEditSuperAdminControls}
                 checked={policies.enforceE2EEncryptionInPrivateChat}
                 onChange={(e) => handleUpdatePolicy('enforceE2EEncryptionInPrivateChat', e.target.checked)}
-                className="w-4 h-4 rounded text-red-600 cursor-pointer"
+                className="w-4 h-4 rounded text-red-600 cursor-pointer disabled:opacity-50"
               />
             </div>
           </div>
@@ -713,6 +809,28 @@ export const SuperAdminControlCenterView: React.FC = () => {
           onClose={() => setPasswordModalUser(null)}
           targetUser={passwordModalUser}
           onSuccess={loadData}
+        />
+      )}
+
+      {/* Partner Admin Access Management Modal */}
+      {accessModalPartner && (
+        <PartnerAdminAccessModal
+          isOpen={Boolean(accessModalPartner)}
+          onClose={() => setAccessModalPartner(null)}
+          partner={accessModalPartner}
+          onSuccess={async (updated) => {
+            triggerNotice(
+              `Updated admin access for ${updated?.name || accessModalPartner.name} (${
+                updated?.adminAccessTier === 'FULL_ADMIN'
+                  ? 'Full Admin Access'
+                  : updated?.adminAccessTier === 'ELEVATED_PARTNER'
+                    ? 'Elevated Admin'
+                    : 'Standard Partner'
+              }).`
+            );
+            await loadData();
+            await refreshCurrentUser();
+          }}
         />
       )}
     </div>

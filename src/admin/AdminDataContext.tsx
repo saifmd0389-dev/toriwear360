@@ -118,6 +118,7 @@ interface AdminDataContextType {
   verify2FA: (code: string, tempTokenOverride?: string) => any;
   logout: () => void;
   hasPermission: (permission: string) => boolean;
+  refreshCurrentUser: () => Promise<void>;
 
   // View Navigation
   currentView: AdminView;
@@ -378,11 +379,15 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             name: res.user.name,
             email: res.user.email,
             role: res.user.role as any,
+            adminAccessTier: res.user.adminAccessTier,
+            employeeId: res.user.employeeId,
+            designation: res.user.designation,
             department: res.user.department || 'Executive Leadership',
             avatarUrl: res.user.avatarUrl || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80',
             twoFactorEnabled: res.user.twoFactorEnabled,
             lastLogin: 'Active now',
             isActive: true,
+            permissions: res.user.permissions as any,
           };
           setCurrentUser(mappedUser);
         } else if (isMounted) {
@@ -993,12 +998,104 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setAuditLogs(prev => [newLog, ...prev]);
   };
 
-  // Permission check
+  // Permission check — evaluates live server-authoritative GranularPermissions first
   const hasPermission = (permission: string): boolean => {
     if (!currentUser) return false;
-    if (currentUser.role === 'SUPER_ADMIN') return true;
+    if (currentUser.role === 'SUPER_ADMIN' || currentUser.id === 'usr-saif') return true;
+
+    const perms = currentUser.permissions;
+    if (perms && typeof perms === 'object') {
+      const hasAction = (mod: string, action: string) =>
+        Array.isArray(perms[mod]) && perms[mod].includes(action);
+
+      switch (permission) {
+        case 'products.view': return hasAction('products', 'view');
+        case 'products.create': return hasAction('products', 'create');
+        case 'products.edit': return hasAction('products', 'edit');
+        case 'products.delete': return hasAction('products', 'delete');
+        case 'inventory.view': return hasAction('inventory', 'view');
+        case 'inventory.edit': return hasAction('inventory', 'edit');
+        case 'orders.view': return hasAction('orders', 'view');
+        case 'orders.edit': return hasAction('orders', 'edit') || hasAction('shipping', 'edit');
+        case 'orders.cancel': return hasAction('orders', 'edit') || hasAction('orders', 'delete');
+        case 'refunds.create': return hasAction('finance', 'approve') || hasAction('orders', 'approve');
+        case 'payments.view': return hasAction('finance', 'view') || hasAction('orders', 'view');
+        case 'marketing.create': return hasAction('marketing', 'create');
+        case 'marketing.edit': return hasAction('marketing', 'edit');
+        case 'customers.view': return hasAction('customers', 'view');
+        case 'customers.edit': return hasAction('customers', 'edit');
+        case 'website.edit':
+          return hasAction('website', 'edit') || hasAction('website', 'view') || hasAction('catalog', 'edit') || hasAction('marketing', 'edit');
+        case 'reports.view': return hasAction('reports', 'view');
+        case 'staff.manage':
+          return hasAction('staff', 'view') || hasAction('staff', 'edit') || hasAction('superAdmin', 'edit');
+        case 'security.manage':
+          return hasAction('security', 'view') || hasAction('security', 'edit') || hasAction('superAdmin', 'view');
+        case 'settings.manage':
+          return hasAction('settings', 'view') || hasAction('settings', 'edit') || hasAction('superAdmin', 'edit');
+        case 'superadmin.view':
+          return hasAction('superAdmin', 'view');
+        case 'superadmin.edit':
+          return hasAction('superAdmin', 'edit');
+        case 'finance.view': return hasAction('finance', 'view');
+        case 'finance.create': return hasAction('finance', 'create');
+        case 'finance.edit': return hasAction('finance', 'edit');
+        case 'finance.approve': return hasAction('finance', 'approve');
+        case 'finance.partners': return hasAction('finance', 'view');
+        case 'finance.accounts': return hasAction('finance', 'view');
+        case 'finance.reports': return hasAction('finance', 'export') || hasAction('finance', 'view');
+        case 'ai.view':
+        case 'AI_DESIGN_LAB_VIEW':
+          return hasAction('aiDesignLab', 'view');
+        case 'ai.create':
+        case 'AI_DESIGN_LAB_CREATE':
+          return hasAction('aiDesignLab', 'create');
+        case 'ai.edit':
+        case 'AI_DESIGN_LAB_EDIT':
+          return hasAction('aiDesignLab', 'edit');
+        case 'ai.approve':
+        case 'AI_DESIGN_LAB_APPROVE':
+          return hasAction('aiDesignLab', 'approve');
+        case 'ai.delete':
+        case 'AI_DESIGN_LAB_DELETE':
+          return hasAction('aiDesignLab', 'delete');
+        case 'ai.settings':
+        case 'AI_DESIGN_LAB_SETTINGS':
+          return hasAction('aiDesignLab', 'edit') || hasAction('settings', 'edit');
+        default:
+          break;
+      }
+    }
+
     const allowed = ROLE_PERMISSIONS[currentUser.role] || [];
     return allowed.includes(permission as any);
+  };
+
+  const refreshCurrentUser = async () => {
+    const token = getSessionToken();
+    if (!token) return;
+    try {
+      const res = await platformApi.getMe();
+      if (res && res.authenticated && res.user) {
+        const refreshed: AdminUser = {
+          id: res.user.id,
+          name: res.user.name,
+          email: res.user.email,
+          role: res.user.role as any,
+          adminAccessTier: res.user.adminAccessTier,
+          employeeId: res.user.employeeId,
+          designation: res.user.designation,
+          department: res.user.department || 'Executive Leadership',
+          avatarUrl: res.user.avatarUrl || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80',
+          twoFactorEnabled: res.user.twoFactorEnabled,
+          lastLogin: 'Active now',
+          isActive: true,
+          permissions: res.user.permissions as any,
+        };
+        setCurrentUser(refreshed);
+        safeLocalStorageSet('tori_admin_currentUser', refreshed);
+      }
+    } catch {}
   };
 
   const loginWithSession = (user: any) => {
@@ -1007,11 +1104,15 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       name: user.name,
       email: user.email,
       role: user.role as any,
+      adminAccessTier: user.adminAccessTier,
+      employeeId: user.employeeId,
+      designation: user.designation,
       department: user.department || 'Management',
       avatarUrl: user.avatarUrl || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80',
       twoFactorEnabled: user.twoFactorEnabled,
       lastLogin: 'Active now',
       isActive: true,
+      permissions: user.permissions as any,
     };
     setCurrentUser(mappedUser);
     setTwoFactorRequired(false);
@@ -2413,6 +2514,7 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         verify2FA,
         logout,
         hasPermission,
+        refreshCurrentUser,
 
         currentView,
         setCurrentView,

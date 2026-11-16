@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { financeRepository } from '../repositories/financeRepository';
 import { extractSessionToken } from '../middleware/authMiddleware';
 import { authStore } from '../authStore';
+import { userStore } from '../userStore';
 import { userService } from '../services/userService';
 import { PlatformUser, PlatformRole, PermissionAction } from '../rbacTypes';
 
@@ -35,7 +36,11 @@ function requireFinanceAccess(action: PermissionAction = 'view') {
     if (!user) {
       const session = await userService.validateSession(token);
       if (session) {
-        user = session.user;
+        const storeUser = userStore.getUserById(session.user.id);
+        user = {
+          ...session.user,
+          permissions: storeUser?.permissions,
+        };
       }
     }
 

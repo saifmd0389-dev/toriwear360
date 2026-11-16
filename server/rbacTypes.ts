@@ -29,11 +29,17 @@ export type ModuleName =
   | 'communication'
   | 'meetings'
   | 'aiDesignLab'
+  | 'website'
+  | 'staff'
+  | 'security'
+  | 'settings'
   | 'superAdmin';
 
 export type PermissionAction = 'view' | 'create' | 'edit' | 'approve' | 'export' | 'delete';
 
 export type GranularPermissions = Record<ModuleName, PermissionAction[]>;
+
+export type AdminAccessTier = 'STANDARD_PARTNER' | 'ELEVATED_PARTNER' | 'FULL_ADMIN' | 'SUPER_ADMIN';
 
 export interface ActiveSession {
   sessionId: string;
@@ -53,6 +59,7 @@ export interface PlatformUser {
   phone?: string;
   employeeId?: string;
   role: PlatformRole;
+  adminAccessTier?: AdminAccessTier;
   designation?: string;
   department?: StaffDepartment;
   accountStatus: 'ACTIVE' | 'PENDING' | 'SUSPENDED' | 'DEACTIVATED' | 'INACTIVE';

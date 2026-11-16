@@ -62,7 +62,11 @@ class AuditStore {
     };
     // Append to immutable log
     this.logs.unshift(newEntry);
-    console.log(`[AUDIT] [${newEntry.severity}] ${newEntry.action} by ${newEntry.userName} (${newEntry.userRole}) on ${newEntry.module}: ${newEntry.recordAffected}`);
+    if (newEntry.action.startsWith('FAILED_LOGIN_')) {
+      console.log(`[AUTH] Verification rejected (${newEntry.action}) for ${newEntry.recordAffected}`);
+    } else {
+      console.log(`[AUDIT] [${newEntry.severity}] ${newEntry.action} by ${newEntry.userName} (${newEntry.userRole}) on ${newEntry.module}: ${newEntry.recordAffected}`);
+    }
     return newEntry;
   }
 

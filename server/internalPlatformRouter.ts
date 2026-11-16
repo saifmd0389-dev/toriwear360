@@ -45,6 +45,10 @@ const UNAUTHENTICATED_ACTOR: PlatformUser = {
     communication: [],
     meetings: [],
     aiDesignLab: [],
+    website: [],
+    staff: [],
+    security: [],
+    settings: [],
     superAdmin: [],
   },
   activeSessions: [],
@@ -527,6 +531,43 @@ platformRouter.put('/users/partners/:id', (req: Request, res: Response) => {
   return res.json({ success: true, partner: userStore.getUserById(partnerId) });
 });
 
+platformRouter.put('/users/partners/:id/permissions', (req: Request, res: Response) => {
+  const actor = getActor(req);
+  if (!userStore.isRootSuperAdmin(actor)) {
+    return res.status(403).json({
+      success: false,
+      code: 'FORBIDDEN',
+      error: 'Access Denied: Only Super Admin (Mohammed Saif) can grant or revoke partner admin access.',
+    });
+  }
+
+  const partnerId = String(req.params.id || '');
+  const { permissions, adminAccessTier, preset } = req.body || {};
+
+  const result = userStore.updatePartnerPermissions(
+    partnerId,
+    permissions,
+    adminAccessTier,
+    actor,
+    preset === 'FULL_ADMIN' || preset === 'STANDARD_PARTNER' || preset === 'EXEC_VIEW_ONLY'
+      ? preset
+      : undefined
+  );
+
+  if (!result.success) {
+    return res.status(result.statusCode || 400).json({
+      success: false,
+      error: result.error,
+    });
+  }
+
+  return res.json({
+    success: true,
+    partner: result.partner,
+    message: `Updated admin access permissions for ${result.partner?.name || 'partner'}.`,
+  });
+});
+
 platformRouter.post('/users/partners/:id/deactivate', (req: Request, res: Response) => {
   const actor = getActor(req);
   if (actor.role !== 'SUPER_ADMIN') {
@@ -614,49 +655,71 @@ platformRouter.post('/users/staff/:id/deactivate', (req: Request, res: Response)
   return res.json({ success: true, staff: userStore.getUserById(staffId) });
 });
 
-// --- Super Admin Control Center Exclusive Operations ---
+// --- Super Admin Control Center Operations (Super Admin + Elevated Authorized Partners) ---
+
+function canManageTargetCredentials(actor: PlatformUser, targetUserId: string): { allowed: boolean; reason?: string } {
+  if (userStore.isRootSuperAdmin(actor)) return { allowed: true };
+  if (actor.id === targetUserId) return { allowed: true };
+
+  const target = userStore.getUserById(targetUserId);
+  if (!target) return { allowed: false, reason: 'Target account not found.' };
+
+  if (userStore.isRootSuperAdmin(target) || target.role === 'PARTNER') {
+    return {
+      allowed: false,
+      reason: 'Protection rule: Only Mohammed Saif (Super Admin) can manage Super Admin or fellow Partner credentials and sessions.',
+    };
+  }
+
+  const hasElevatedAccess =
+    actor.role === 'PARTNER' &&
+    (userStore.hasAdminCapability(actor, 'superAdmin', 'edit') ||
+      userStore.hasAdminCapability(actor, 'staff', 'edit') ||
+      userStore.hasAdminCapability(actor, 'security', 'edit'));
+
+  if (!hasElevatedAccess) {
+    return {
+      allowed: false,
+      reason: 'Access Denied: Super Admin Control Center or elevated Partner admin privilege required.',
+    };
+  }
+
+  return { allowed: true };
+}
 
 platformRouter.post('/users/:id/force-logout', (req: Request, res: Response) => {
   const actor = getActor(req);
-  if (actor.role !== 'SUPER_ADMIN') {
-    return res.status(403).json({
-      success: false,
-      error: 'Access Denied: Super Admin Control Center privilege required.',
-    });
+  const targetUserId = String(req.params.id || '');
+  const result = userStore.forceLogoutUser(targetUserId, actor);
+  if (!result.success) {
+    return res.status(result.statusCode || 400).json({ success: false, error: result.error });
   }
-
-  const result = userStore.forceLogoutUser(String(req.params.id || ''), actor);
-  if (!result.success) return res.status(400).json(result);
 
   return res.json({ success: true, message: 'User active sessions revoked and forced to logout.' });
 });
 
 platformRouter.post('/users/:id/reset-2fa', async (req: Request, res: Response) => {
   const actor = getActor(req);
-  if (actor.role !== 'SUPER_ADMIN') {
-    return res.status(403).json({
-      success: false,
-      error: 'Access Denied: Super Admin Control Center privilege required.',
-    });
-  }
-
   const targetUserId = String(req.params.id || '');
   const result = userStore.resetUser2FA(targetUserId, actor);
-  if (!result.success) return res.status(400).json(result);
+  if (!result.success) {
+    return res.status(result.statusCode || 400).json({ success: false, error: result.error });
+  }
 
   await authStore.disable2FA(targetUserId).catch(() => {});
 
   return res.json({ success: true, message: 'Two-factor authentication reset successfully.' });
 });
 
-// Direct Password Management for Super Admin & Partners
+// Direct Password Management for Super Admin & Elevated Partners (staff/self only)
 platformRouter.post('/users/:id/admin-set-password', async (req: Request, res: Response) => {
   const actor = getActor(req);
   const targetUserId = String(req.params.id || '');
-  if (actor.role !== 'SUPER_ADMIN' && actor.id !== targetUserId) {
+  const check = canManageTargetCredentials(actor, targetUserId);
+  if (!check.allowed) {
     return res.status(403).json({
       success: false,
-      error: 'Access Denied: Super Admin privilege required to manage partner/staff passwords.',
+      error: check.reason || 'Access Denied: Super Admin privilege required to manage partner/staff passwords.',
     });
   }
 
@@ -675,14 +738,15 @@ platformRouter.post('/users/:id/admin-set-password', async (req: Request, res: R
   return res.json(result);
 });
 
-// Reissue Single-Use Recovery Codes for Super Admin & Partners
+// Reissue Single-Use Recovery Codes for Super Admin & Elevated Partners (staff/self only)
 platformRouter.post('/users/:id/admin-reissue-recovery-codes', async (req: Request, res: Response) => {
   const actor = getActor(req);
   const targetUserId = String(req.params.id || '');
-  if (actor.role !== 'SUPER_ADMIN' && actor.id !== targetUserId) {
+  const check = canManageTargetCredentials(actor, targetUserId);
+  if (!check.allowed) {
     return res.status(403).json({
       success: false,
-      error: 'Access Denied: Super Admin privilege required to reissue recovery codes.',
+      error: check.reason || 'Access Denied: Super Admin privilege required to reissue recovery codes.',
     });
   }
 
@@ -698,10 +762,11 @@ platformRouter.post('/users/:id/admin-reissue-recovery-codes', async (req: Reque
 platformRouter.get('/users/:id/credential-details', async (req: Request, res: Response) => {
   const actor = getActor(req);
   const targetUserId = String(req.params.id || '');
-  if (actor.role !== 'SUPER_ADMIN' && actor.id !== targetUserId) {
+  const check = canManageTargetCredentials(actor, targetUserId);
+  if (!check.allowed) {
     return res.status(403).json({
       success: false,
-      error: 'Access Denied: Super Admin privilege required to view partner/staff credential details.',
+      error: check.reason || 'Access Denied: Super Admin privilege required to view partner/staff credential details.',
     });
   }
 
@@ -730,15 +795,10 @@ platformRouter.get('/security/policies', (req: Request, res: Response) => {
 
 platformRouter.put('/security/policies', (req: Request, res: Response) => {
   const actor = getActor(req);
-  if (actor.role !== 'SUPER_ADMIN') {
-    return res.status(403).json({
-      success: false,
-      error: 'Access Denied: Only Super Admin (Mohammed Saif) can update enterprise security policies.',
-    });
-  }
-
   const result = userStore.updateSecurityPolicies(req.body, actor);
-  if (!result.success) return res.status(400).json(result);
+  if (!result.success) {
+    return res.status(result.statusCode || 400).json({ success: false, error: result.error });
+  }
 
   return res.json({
     success: true,

@@ -10,10 +10,13 @@ import {
   X,
   Copy,
   Check,
+  Sliders,
 } from 'lucide-react';
 import { platformApi } from '../services/platformService';
 import { PlatformUser, GranularPermissions, StaffDepartment, ModuleName, PermissionAction } from '../../../server/rbacTypes';
 import { AdminResetUserPasswordModal } from './AdminResetUserPasswordModal';
+import { PartnerAdminAccessModal } from './PartnerAdminAccessModal';
+import { useAdmin } from '../AdminDataContext';
 
 const MODULES_LIST: { id: ModuleName; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
@@ -24,11 +27,16 @@ const MODULES_LIST: { id: ModuleName; label: string }[] = [
   { id: 'customers', label: 'Customer CRM' },
   { id: 'customerSupport', label: 'Customer Support' },
   { id: 'marketing', label: 'Promotions & Ads' },
+  { id: 'website', label: 'Storefront CMS' },
   { id: 'catalog', label: 'Digital Catalog' },
   { id: 'shipping', label: 'Logistics & Shipping' },
   { id: 'reports', label: 'Reports & Analytics' },
   { id: 'communication', label: 'Internal Chat & Meetings' },
   { id: 'aiDesignLab', label: 'AI Design Lab' },
+  { id: 'staff', label: 'Staff & Roles' },
+  { id: 'security', label: 'Audit Trail & Security' },
+  { id: 'settings', label: 'Store Settings & Gateways' },
+  { id: 'superAdmin', label: 'Super Admin Control' },
 ];
 
 const ACTIONS_LIST: PermissionAction[] = ['view', 'create', 'edit', 'approve', 'export', 'delete'];
@@ -36,6 +44,7 @@ const ACTIONS_LIST: PermissionAction[] = ['view', 'create', 'edit', 'approve', '
 const PRECONFIGURED_CREDENTIALS: Record<string, { employeeId: string }> = {};
 
 export const UserManagementView: React.FC = () => {
+  const { refreshCurrentUser } = useAdmin();
   const [, setUsers] = useState<PlatformUser[]>([]);
   const [partners, setPartners] = useState<PlatformUser[]>([]);
   const [staff, setStaff] = useState<PlatformUser[]>([]);
@@ -47,6 +56,7 @@ export const UserManagementView: React.FC = () => {
   const [showAddStaffModal, setShowAddStaffModal] = useState(false);
   const [viewSessionsUser, setViewSessionsUser] = useState<PlatformUser | null>(null);
   const [passwordModalUser, setPasswordModalUser] = useState<PlatformUser | null>(null);
+  const [accessModalPartner, setAccessModalPartner] = useState<PlatformUser | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string>('');
 
@@ -98,6 +108,7 @@ export const UserManagementView: React.FC = () => {
   };
 
   const isPartnerOrAdmin = currentUser?.role === 'SUPER_ADMIN' || currentUser?.role === 'PARTNER';
+  const isRootSuperAdmin = currentUser?.role === 'SUPER_ADMIN' || currentUser?.id === 'usr-saif';
 
   const handleCreateStaff = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -282,6 +293,10 @@ export const UserManagementView: React.FC = () => {
             {partners.map((partner) => {
               const isSaif = partner.id === 'usr-saif';
               const creds = PRECONFIGURED_CREDENTIALS[partner.id];
+              const unlockedModulesCount = Object.values(partner.permissions || {}).filter(
+                (acts: any) => Array.isArray(acts) && acts.length > 0
+              ).length;
+              const accessTier = partner.adminAccessTier;
 
               return (
                 <div 
@@ -305,11 +320,28 @@ export const UserManagementView: React.FC = () => {
                           className="w-14 h-14 rounded-2xl object-cover border border-slate-200 shrink-0" 
                         />
                         <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <h3 className="text-sm font-bold text-slate-900 truncate">{partner.name}</h3>
                             <span className="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono bg-emerald-100 text-emerald-800 border border-emerald-200 shrink-0">
                               {partner.ownershipPercentage}% EQUAL
                             </span>
+                            {!isSaif && (
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${
+                                  accessTier === 'FULL_ADMIN'
+                                    ? 'bg-indigo-100 text-indigo-800 border border-indigo-200'
+                                    : accessTier === 'ELEVATED_PARTNER'
+                                      ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                                      : 'bg-slate-100 text-slate-700 border border-slate-200'
+                                }`}
+                              >
+                                {accessTier === 'FULL_ADMIN'
+                                  ? `Full Admin (${unlockedModulesCount} Mod)`
+                                  : accessTier === 'ELEVATED_PARTNER'
+                                    ? `Elevated (${unlockedModulesCount} Mod)`
+                                    : `Standard (${unlockedModulesCount} Mod)`}
+                              </span>
+                            )}
                           </div>
                           <p className="text-xs font-medium text-slate-600 truncate mt-0.5">{partner.designation}</p>
                           <div className="text-[11px] text-slate-500 font-mono mt-1 truncate">{partner.email}</div>
@@ -322,15 +354,29 @@ export const UserManagementView: React.FC = () => {
                         </div>
                       </div>
 
-                      {/* Reset / Set Password Action */}
-                      <button
-                        onClick={() => setPasswordModalUser(partner)}
-                        className="px-3 py-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors shrink-0"
-                        title="Directly reset, create, or overwrite password for this partner"
-                      >
-                        <KeyRound className="w-3.5 h-3.5 text-red-600" />
-                        <span>Reset / Set Password</span>
-                      </button>
+                      {/* Partner Admin & Credential Actions */}
+                      <div className="flex flex-col items-end gap-1.5 shrink-0">
+                        {!isSaif && isRootSuperAdmin && (
+                          <button
+                            onClick={() => setAccessModalPartner(partner)}
+                            className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                            title="Assign full admin options or customize module permissions for this partner"
+                          >
+                            <Sliders className="w-3.5 h-3.5 text-indigo-600" />
+                            <span>Manage Admin Access</span>
+                          </button>
+                        )}
+                        {(isRootSuperAdmin || partner.id === currentUser?.id) && (
+                          <button
+                            onClick={() => setPasswordModalUser(partner)}
+                            className="px-3 py-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                            title="Directly reset, create, or overwrite password for this partner"
+                          >
+                            <KeyRound className="w-3.5 h-3.5 text-red-600" />
+                            <span>Reset / Set Password</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
 
                     <div className="grid grid-cols-2 gap-2 mt-4 pt-4 border-t border-slate-100 text-xs">
@@ -750,6 +796,28 @@ export const UserManagementView: React.FC = () => {
           onClose={() => setPasswordModalUser(null)}
           targetUser={passwordModalUser}
           onSuccess={loadData}
+        />
+      )}
+
+      {/* Partner Admin Access Management Modal */}
+      {accessModalPartner && (
+        <PartnerAdminAccessModal
+          isOpen={Boolean(accessModalPartner)}
+          onClose={() => setAccessModalPartner(null)}
+          partner={accessModalPartner}
+          onSuccess={async (updated) => {
+            setActionNotice(
+              `Admin access updated for ${updated?.name || accessModalPartner.name} (${
+                updated?.adminAccessTier === 'FULL_ADMIN'
+                  ? 'Full Admin Access'
+                  : updated?.adminAccessTier === 'ELEVATED_PARTNER'
+                    ? 'Elevated Admin'
+                    : 'Standard Partner'
+              }).`
+            );
+            await loadData();
+            await refreshCurrentUser();
+          }}
         />
       )}
     </div>

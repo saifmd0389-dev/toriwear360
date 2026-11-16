@@ -82,8 +82,16 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'AI_DESIGN_LAB_VIEW', 'AI_DESIGN_LAB_CREATE', 'AI_DESIGN_LAB_EDIT', 'AI_DESIGN_LAB_APPROVE', 'AI_DESIGN_LAB_DELETE', 'AI_DESIGN_LAB_SETTINGS',
   ],
   PARTNER: [
-    'products.view', 'orders.view', 'payments.view', 'reports.view',
-    'finance.view', 'finance.create', 'finance.partners', 'finance.reports',
+    'products.view', 'products.create', 'products.edit', 'products.delete',
+    'inventory.view', 'inventory.edit',
+    'orders.view', 'orders.edit', 'orders.cancel',
+    'refunds.create', 'payments.view',
+    'marketing.create', 'marketing.edit',
+    'customers.view', 'customers.edit',
+    'website.edit', 'reports.view',
+    'finance.view', 'finance.create', 'finance.edit', 'finance.approve', 'finance.partners', 'finance.accounts', 'finance.reports',
+    'ai.view', 'ai.create', 'ai.edit', 'ai.approve',
+    'AI_DESIGN_LAB_VIEW', 'AI_DESIGN_LAB_CREATE', 'AI_DESIGN_LAB_EDIT', 'AI_DESIGN_LAB_APPROVE',
   ],
   FINANCE_MANAGER: [
     'orders.view', 'payments.view', 'reports.view',

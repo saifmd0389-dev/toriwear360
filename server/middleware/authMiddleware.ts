@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { userService } from '../services/userService';
 import { authStore } from '../authStore';
+import { userStore } from '../userStore';
 
 export interface AuthenticatedUser {
   id: string;
@@ -55,11 +56,13 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   // 1. Try modern UserService session validation
   const sessionData = await userService.validateSession(token);
   if (sessionData) {
+    const storeUser = userStore.getUserById(sessionData.user.id);
     req.user = {
       id: sessionData.user.id,
       email: sessionData.user.email,
       name: sessionData.user.name,
       role: sessionData.user.role,
+      permissions: storeUser?.permissions,
       department: sessionData.user.department,
     };
     req.sessionToken = token;

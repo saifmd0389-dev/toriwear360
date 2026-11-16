@@ -18,6 +18,7 @@ import { verifyFirebaseIdToken } from '../services/firebaseAuthService';
 import { safeTimingEqual } from '../utils/storageHelper';
 import { requireAuth, requireRole, extractSessionToken } from '../middleware/authMiddleware';
 import { authStore } from '../authStore';
+import { userStore } from '../userStore';
 import { approvalStore } from '../approvalStore';
 import { PlatformRole, ModuleName, PermissionAction } from '../rbacTypes';
 import {
@@ -83,7 +84,7 @@ function hasStaffPermission(user: any, permissionName?: string): boolean {
   if (!user) return false;
   const role = String(user.role || '').toUpperCase();
   if (role === 'CUSTOMER') return false;
-  if (role === 'SUPER_ADMIN' || role === 'PARTNER') return true;
+  if (role === 'SUPER_ADMIN') return true;
   if (!permissionName) return true;
 
   const [rawModule, rawAction = 'view'] = permissionName.split('.');
@@ -92,7 +93,7 @@ function hasStaffPermission(user: any, permissionName?: string): boolean {
 
   // Map logical permission prefixes to RBAC GranularPermissions modules
   if (rawModule === 'settings') {
-    targetModule = 'superAdmin';
+    targetModule = 'settings';
   } else if (rawModule === 'payments') {
     targetModule = 'finance';
   } else if (rawModule === 'refunds') {
@@ -104,11 +105,19 @@ function hasStaffPermission(user: any, permissionName?: string): boolean {
   }
 
   const perms = user.permissions;
+  if (role === 'PARTNER') {
+    if (rawModule === 'settings') {
+      return Boolean(
+        perms?.settings?.includes(targetAction) || perms?.superAdmin?.includes(targetAction)
+      );
+    }
+    return true;
+  }
+
   if (perms && typeof perms === 'object') {
     const allowed: PermissionAction[] = perms[targetModule] || [];
     if (allowed.includes(targetAction)) return true;
-    // Allow Store Manager / authorized staff with orders.edit to manifest & edit shipping
-    if (rawModule === 'settings' && rawAction === 'view' && (perms.shipping?.includes('view') || perms.orders?.includes('view'))) {
+    if (rawModule === 'settings' && (perms.superAdmin?.includes(targetAction) || (rawAction === 'view' && (perms.shipping?.includes('view') || perms.orders?.includes('view'))))) {
       return true;
     }
     if (rawModule === 'refunds' && perms.orders?.includes('approve')) {
@@ -132,11 +141,13 @@ function requireStaffPermission(permissionName?: string) {
       let resolvedUser: any = null;
       const session = await userService.validateSession(token);
       if (session) {
+        const storeUser = userStore.getUserById(session.user.id);
         resolvedUser = {
           id: session.user.id,
           email: session.user.email,
           name: session.user.name,
           role: session.user.role,
+          permissions: storeUser?.permissions,
           department: session.user.department,
         };
       } else {
@@ -1766,7 +1777,7 @@ apiRouter.get('/v1/shipping/track/:identifier', requireStaffPermission('orders.v
 apiRouter.post(
   '/v1/shipping/manifest',
   requireAuth,
-  requireRole(['SUPER_ADMIN', 'STORE_MANAGER', 'INVENTORY_MANAGER', 'FULFILLMENT_STAFF']),
+  requireRole(['SUPER_ADMIN', 'PARTNER', 'STORE_MANAGER', 'INVENTORY_MANAGER', 'FULFILLMENT_STAFF']),
   async (req: Request, res: Response) => {
     const result = await shippingService.createShipment(req.body, req.user?.id || 'STAFF');
     if (!result.success) {

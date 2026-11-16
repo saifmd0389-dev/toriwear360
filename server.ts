@@ -1,7 +1,7 @@
+import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import http from 'http';
 import { createServer as createViteServer } from 'vite';
-import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { GEMINI_TEXT_MODEL } from './server/geminiImageService';
@@ -17,10 +17,9 @@ import { getPrismaClient } from './server/db/prisma';
 import { ensureMySqlSchemaInitialized } from './server/db/init-mysql';
 import { seedCatalogIfEmpty } from './server/db/seed';
 import { authStore } from './server/authStore';
+import { userStore } from './server/userStore';
 import { paymentConfigService } from './server/services/paymentConfigService';
 import { requireAuth } from './server/middleware/authMiddleware';
-
-dotenv.config();
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
@@ -917,6 +916,7 @@ async function startServer() {
     await Promise.allSettled([
       authStore.ensureProductionBootstrap(),
       authStore.hydrateSessionsFromDb(),
+      userStore.hydratePermissionsFromDb(),
       paymentConfigService.syncToDatabase(),
     ]);
   }

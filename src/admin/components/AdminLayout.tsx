@@ -151,7 +151,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
     { id: 'USER_MANAGEMENT', label: 'User Management', icon: Users },
     { id: 'APPROVALS', label: 'Approvals Workflow', icon: ClipboardCheck, badge: pendingApprovalsCount },
     { id: 'COMMUNICATION', label: 'Internal Teams Chat', icon: MessageSquare },
-    { id: 'SUPER_ADMIN', label: 'Super Admin Control', icon: Crown, superAdminOnly: true },
+    { id: 'SUPER_ADMIN', label: 'Super Admin Control', icon: Crown, permission: 'superadmin.view' },
     { id: 'ACCOUNT_SECURITY', label: 'My Account & Security', icon: ShieldCheck },
     { id: 'AI_DESIGN_LAB', label: 'AI Design Lab', icon: Sparkles, permission: 'ai.view' },
     { id: 'PRODUCTS', label: 'Products Vault', icon: Package, permission: 'products.view' },
@@ -173,7 +173,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
   const filteredNavItems = navItems.filter(item => {
     if (item.superAdminOnly && !isSuperAdminUser) return false;
     if (!item.permission) return true;
-    return hasPermission(item.permission);
+    return isSuperAdminUser || hasPermission(item.permission);
   });
 
   return (

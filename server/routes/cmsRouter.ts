@@ -6,6 +6,7 @@ import { cmsRepository } from '../repositories/cmsRepository';
 import { extractSessionToken } from '../middleware/authMiddleware';
 import { userService } from '../services/userService';
 import { authStore } from '../authStore';
+import { userStore } from '../userStore';
 
 export const cmsRouter = Router();
 
@@ -18,11 +19,13 @@ function requireAdminAuth(requiredAction: 'view' | 'edit' = 'edit') {
       let resolvedUser: any = null;
       const session = await userService.validateSession(token);
       if (session) {
+        const storeUser = userStore.getUserById(session.user.id);
         resolvedUser = {
           id: session.user.id,
           email: session.user.email,
           name: session.user.name,
           role: session.user.role,
+          permissions: storeUser?.permissions,
           department: session.user.department,
         };
       } else {
@@ -54,6 +57,7 @@ function requireAdminAuth(requiredAction: 'view' | 'edit' = 'edit') {
         const perms = resolvedUser.permissions;
         const hasPerm = isPrivileged || (
           perms && (
+            perms.website?.includes(requiredAction) ||
             perms.superAdmin?.includes(requiredAction) ||
             perms.catalog?.includes(requiredAction) ||
             perms.marketing?.includes(requiredAction) ||

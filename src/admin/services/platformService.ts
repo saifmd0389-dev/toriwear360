@@ -5,7 +5,9 @@ import {
   VideoMeeting, 
   ApprovalRequest, 
   PlatformAuditEntry, 
-  SecurityPolicyConfig 
+  SecurityPolicyConfig,
+  GranularPermissions,
+  AdminAccessTier,
 } from '../../../server/rbacTypes';
 
 // Active User ID and Session Token in client storage
@@ -323,6 +325,22 @@ export const platformApi = {
       method: 'PUT',
       headers: getHeaders(),
       body: JSON.stringify(updates),
+    });
+    return res.json();
+  },
+
+  async updatePartnerPermissions(
+    partnerId: string,
+    payload: {
+      permissions?: Partial<GranularPermissions>;
+      adminAccessTier?: AdminAccessTier;
+      preset?: 'FULL_ADMIN' | 'STANDARD_PARTNER' | 'EXEC_VIEW_ONLY';
+    }
+  ) {
+    const res = await fetch(`/api/users/partners/${partnerId}/permissions`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(payload),
     });
     return res.json();
   },

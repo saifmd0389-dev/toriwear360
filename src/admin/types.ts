@@ -18,12 +18,16 @@ export interface AdminUser {
   name: string;
   email: string;
   role: Role;
+  adminAccessTier?: string;
+  employeeId?: string;
+  designation?: string;
   avatarUrl?: string;
   twoFactorEnabled: boolean;
   twoFactorSecret?: string;
   lastLogin: string;
   isActive: boolean;
   department?: string;
+  permissions?: Record<string, string[]>;
 }
 
 export type Permission = 
@@ -47,6 +51,8 @@ export type Permission =
   | 'staff.manage'
   | 'security.manage'
   | 'settings.manage'
+  | 'superadmin.view'
+  | 'superadmin.edit'
   | 'finance.view'
   | 'finance.create'
   | 'finance.edit'
