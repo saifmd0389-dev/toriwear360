@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ChevronDown,
   ChevronUp,
@@ -1506,8 +1507,8 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
       {/* ========================================================================= */}
       {/* 4A. FULLSCREEN ALL-IMAGES GALLERY VIEWER (WHEN > 6 IMAGES ADDED)          */}
       {/* ========================================================================= */}
-      {isAllImagesOpen && (
-        <div
+      {isAllImagesOpen && typeof document !== 'undefined' && createPortal(
+        <div 
           style={{ zIndex: 9998 }}
           className="fixed inset-0 z-[9998] bg-white flex flex-col animate-in fade-in duration-200"
         >
@@ -1566,16 +1567,17 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
               ))}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* ========================================================================= */}
       {/* 4B. FULLSCREEN ZOOM LIGHTBOX MODAL WITH ULTRA CLEAR DESIGN ZOOM (Snip 5)  */}
       {/* ========================================================================= */}
-      {isZoomOpen && (
+      {isZoomOpen && typeof document !== 'undefined' && createPortal(
         <div 
           style={{ zIndex: 9999 }}
-          className="fixed inset-0 z-[9999] bg-black/90 backdrop-blur-sm flex flex-col items-center justify-between select-none animate-in fade-in duration-200"
+          className="fixed inset-0 z-[9999] bg-black/92 backdrop-blur-sm flex flex-col items-center justify-between select-none animate-in fade-in duration-200"
           onClick={() => setIsZoomOpen(false)}
         >
           {/* Top Bar with Zoom Controls & Close Button (Screenshot 5) */}
@@ -1633,7 +1635,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
 
           {/* Central Main Zoom Stage */}
           <div 
-            className="relative flex-1 w-full max-w-4xl flex items-center justify-center px-4 overflow-hidden"
+            className="relative flex-1 min-h-0 w-full max-w-5xl flex items-center justify-center px-4 py-2 overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Left Circular Navigation Arrow (Screenshot 5) */}
@@ -1669,7 +1671,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
               onMouseEnter={() => setIsHoverZooming(true)}
               onMouseLeave={() => setIsHoverZooming(false)}
               onClick={handleToggleZoomScale}
-              className={`relative max-h-[74vh] aspect-[3/4] overflow-hidden bg-neutral-950 flex items-center justify-center rounded-xs shadow-2xl ${
+              className={`relative h-full max-h-[74vh] max-w-full aspect-[3/4] overflow-hidden bg-neutral-950 flex items-center justify-center rounded-xs shadow-2xl ${
                 zoomScale > 1 ? 'cursor-move' : 'cursor-zoom-in'
               }`}
             >
@@ -1713,7 +1715,8 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
             ))}
           </div>
 
-        </div>
+        </div>,
+        document.body
       )}
 
     </div>
