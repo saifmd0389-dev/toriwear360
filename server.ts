@@ -933,6 +933,32 @@ async function startServer() {
   // Initialize Realtime WebSocket & WebRTC Signaling
   setupRealtimeWebSocket(httpServer);
 
+  const rawAdminEnv = process.env.VITE_ADMIN_PATH || process.env.ADMIN_PATH || '';
+  const serverAdminPath = (() => {
+    let val = String(rawAdminEnv).trim().replace(/^['"]+|['"]+$/g, '').trim();
+    if (/^https?:\/\//i.test(val)) {
+      try {
+        val = new URL(val).pathname;
+      } catch {
+        val = '';
+      }
+    }
+    val = (val.split('?')[0]?.split('#')[0] || '').trim();
+    if (val) {
+      val = (val.startsWith('/') ? val : `/${val}`).replace(/\/+/g, '/').replace(/\/+$/, '');
+      for (const suffix of ['/login', '/gateway', '/dashboard', '/forgot-password', '/reset-password', '/account/security']) {
+        if (val.toLowerCase().endsWith(suffix) && val.length > suffix.length) {
+          val = val.slice(0, val.length - suffix.length).replace(/\/+$/, '');
+          break;
+        }
+      }
+      if (val && val !== '/' && val.toLowerCase() !== '/admin') {
+        return val;
+      }
+    }
+    return '/tori-ops-gateway';
+  })();
+
   if (!isProd) {
     const vite = await createViteServer({
       server: {
@@ -950,16 +976,50 @@ async function startServer() {
       vite.middlewares(req, res, next);
     });
   } else {
-    const distDir = path.resolve(process.cwd(), 'dist');
+    const candidateDistDirs = [
+      path.resolve(process.cwd(), 'dist'),
+      path.resolve(import.meta.dirname || process.cwd(), 'dist'),
+    ];
+    const distDir = candidateDistDirs.find((d) => fs.existsSync(path.join(d, 'index.html'))) || candidateDistDirs[0]!;
+    const indexHtmlPath = path.join(distDir, 'index.html');
+
+    const getRuntimeSpaHtml = (): string | null => {
+      if (!fs.existsSync(indexHtmlPath)) return null;
+      const rawHtml = fs.readFileSync(indexHtmlPath, 'utf8');
+      const runtimeScript = `<script>window.__TORI_RUNTIME_CONFIG__=${JSON.stringify({ adminPath: serverAdminPath })};</script>`;
+      if (rawHtml.includes('</head>')) {
+        return rawHtml.replace('</head>', `    ${runtimeScript}\n  </head>`);
+      }
+      return `${runtimeScript}${rawHtml}`;
+    };
+
+    const sendSpaHtml = (_req: Request, res: Response) => {
+      const html = getRuntimeSpaHtml();
+      if (!html) {
+        return res.status(503).send('Production frontend build (dist/index.html) not found. Run npm run build.');
+      }
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      return res.send(html);
+    };
+
     app.use(express.static(distDir, {
+      index: false,
       maxAge: '7d',
       etag: true,
-      setHeaders: (res, filePath) => {
-        if (filePath.endsWith('index.html')) {
-          res.setHeader('Cache-Control', 'no-cache');
-        }
-      },
     }));
+
+    // Explicit production SPA routes for the private admin gateway & login subroutes
+    const adminRoutePatterns = Array.from(
+      new Set([
+        '/tori-ops-gateway',
+        '/tori-ops-gateway/*',
+        serverAdminPath,
+        `${serverAdminPath}/*`,
+      ])
+    );
+    app.get(adminRoutePatterns, sendSpaHtml);
+
     app.get('*', (req: Request, res: Response) => {
       if (req.originalUrl.startsWith('/api') || req.originalUrl.startsWith('/generated-assets') || req.originalUrl.startsWith('/assets') || req.originalUrl.startsWith('/models')) {
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -971,7 +1031,7 @@ async function startServer() {
           },
         });
       }
-      return res.sendFile(path.join(distDir, 'index.html'));
+      return sendSpaHtml(req, res);
     });
   }
 

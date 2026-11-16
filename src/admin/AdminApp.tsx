@@ -18,43 +18,76 @@ const AdminAppContent: React.FC<AdminAppContentProps> = ({ onExitAdmin }) => {
   const { isAuthenticated, isAuthChecking, setCurrentView } = useAdmin();
 
   // Determine subroute from window.location
-  const getInitialAuthRoute = (): { route: AuthRoute; token?: string } => {
+  const getInitialAuthRoute = (): { route: AuthRoute; token?: string; isPublicAuthPath?: boolean } => {
     if (typeof window !== 'undefined') {
-      const path = window.location.pathname.toLowerCase().replace(/\/+$/, '');
+      const path = window.location.pathname.toLowerCase().replace(/\/+/g, '/').replace(/\/+$/, '');
+      const hash = window.location.hash.toLowerCase().replace(/\/+/g, '/').replace(/\/+$/, '');
       const urlParams = new URLSearchParams(window.location.search);
       const token = urlParams.get('token') || '';
 
-      if (path.endsWith('/gateway')) {
-        return { route: 'GATEWAY' };
+      if (path.endsWith('/gateway') || hash.endsWith('/gateway')) {
+        return { route: 'GATEWAY', isPublicAuthPath: true };
       }
-      if (path.endsWith('/forgot-password')) {
-        return { route: 'FORGOT_PASSWORD' };
+      if (path.endsWith('/forgot-password') || hash.endsWith('/forgot-password')) {
+        return { route: 'FORGOT_PASSWORD', isPublicAuthPath: true };
       }
-      if (path.endsWith('/reset-password') || token) {
-        return { route: 'RESET_PASSWORD', token };
+      if (path.endsWith('/reset-password') || hash.endsWith('/reset-password') || token) {
+        return { route: 'RESET_PASSWORD', token, isPublicAuthPath: true };
       }
+      const adminLower = ADMIN_CONFIG.ADMIN_PATH.toLowerCase();
+      const defaultLower = ADMIN_CONFIG.DEFAULT_ADMIN_PATH.toLowerCase();
+      const isBaseOrLogin =
+        path === adminLower ||
+        path === defaultLower ||
+        path.endsWith(adminLower) ||
+        path.endsWith(defaultLower) ||
+        path.endsWith('/login') ||
+        hash.endsWith('/login');
+      return { route: 'LOGIN', isPublicAuthPath: isBaseOrLogin };
     }
-    return { route: 'LOGIN' };
+    return { route: 'LOGIN', isPublicAuthPath: true };
   };
 
-  const [authRouteState, setAuthRouteState] = useState<{ route: AuthRoute; token?: string }>(getInitialAuthRoute);
+  const [authRouteState, setAuthRouteState] = useState<{ route: AuthRoute; token?: string; isPublicAuthPath?: boolean }>(getInitialAuthRoute);
 
-  // Sync route on popstate
+  // Sync route on popstate & hashchange
   useEffect(() => {
-    const handlePopState = () => {
+    const handleRouteSync = () => {
       setAuthRouteState(getInitialAuthRoute());
     };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
+    window.addEventListener('popstate', handleRouteSync);
+    window.addEventListener('hashchange', handleRouteSync);
+    return () => {
+      window.removeEventListener('popstate', handleRouteSync);
+      window.removeEventListener('hashchange', handleRouteSync);
+    };
   }, []);
+
+  // Normalize unauthenticated protected deep links (e.g. /tori-ops-gateway/dashboard) to /tori-ops-gateway/login
+  useEffect(() => {
+    if (!isAuthChecking && !isAuthenticated && authRouteState.isPublicAuthPath === false && typeof window !== 'undefined') {
+      if (window.history.replaceState) {
+        window.history.replaceState(null, '', getAdminSubpath('login'));
+      }
+    }
+  }, [isAuthChecking, isAuthenticated, authRouteState.isPublicAuthPath]);
 
   // Update URL to dashboard upon successful authentication
   useEffect(() => {
     if (isAuthenticated && typeof window !== 'undefined') {
-      const path = window.location.pathname.toLowerCase().replace(/\/+$/, '');
+      const path = window.location.pathname.toLowerCase().replace(/\/+/g, '/').replace(/\/+$/, '');
+      const adminLower = ADMIN_CONFIG.ADMIN_PATH.toLowerCase();
+      const defaultLower = ADMIN_CONFIG.DEFAULT_ADMIN_PATH.toLowerCase();
       if (path.endsWith('/account/security')) {
         setCurrentView('ACCOUNT_SECURITY');
-      } else if (path === ADMIN_CONFIG.ADMIN_PATH || path.endsWith('/login') || path.endsWith('/gateway')) {
+      } else if (
+        path === adminLower ||
+        path === defaultLower ||
+        path.endsWith(adminLower) ||
+        path.endsWith(defaultLower) ||
+        path.endsWith('/login') ||
+        path.endsWith('/gateway')
+      ) {
         if (window.history.replaceState) {
           window.history.replaceState(null, '', getAdminSubpath('dashboard'));
         }
