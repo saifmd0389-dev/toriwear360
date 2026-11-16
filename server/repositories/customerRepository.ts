@@ -120,7 +120,7 @@ export class CustomerRepository {
         const found = await prisma.customer.findFirst({
           where: {
             OR: [
-              { email: { equals: clean, mode: 'insensitive' } },
+              { email: clean },
               { phone: clean },
             ],
           },

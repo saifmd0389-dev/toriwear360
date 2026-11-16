@@ -161,8 +161,8 @@ class AuthStore {
         where: {
           OR: [
             { id: 'usr-saif' },
-            { email: { equals: 'saif@toriwear.com', mode: 'insensitive' } },
-            { email: { equals: 'admin@toriwear.com', mode: 'insensitive' } },
+            { email: 'saif@toriwear.com' },
+            { email: 'admin@toriwear.com' },
           ],
         },
       });
@@ -230,7 +230,7 @@ class AuthStore {
           if (emailCandidates.length > 0) {
             dbUser = await prisma.user.findFirst({
               where: {
-                OR: emailCandidates.map((e) => ({ email: { equals: e, mode: 'insensitive' as const } })),
+                OR: emailCandidates.map((e) => ({ email: e })),
               },
             });
           }
@@ -457,8 +457,8 @@ class AuthStore {
           where: {
             OR: [
               { id: raw },
-              { email: { equals: clean, mode: 'insensitive' } },
-              { employeeId: { equals: raw, mode: 'insensitive' } },
+              { email: clean },
+              { employeeId: raw },
             ],
           },
           include: { twoFactorSetting: true },

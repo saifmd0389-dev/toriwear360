@@ -14,7 +14,8 @@ import { cmsRouter } from './server/routes/cmsRouter';
 import { cmsRepository } from './server/repositories/cmsRepository';
 import { setupRealtimeWebSocket } from './server/realtimeSocket';
 import { getPrismaClient } from './server/db/prisma';
-import { ensureDevPostgresRunning } from './server/db/start-postgres';
+import { ensureMySqlSchemaInitialized } from './server/db/init-mysql';
+import { seedCatalogIfEmpty } from './server/db/seed';
 import { authStore } from './server/authStore';
 import { paymentConfigService } from './server/services/paymentConfigService';
 import { requireAuth } from './server/middleware/authMiddleware';
@@ -908,19 +909,11 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
 // 9. VITE OR STATIC PROD MIDDLEWARE & SERVER STARTUP
 // ==========================================
 async function startServer() {
-  let devPgStop: () => Promise<void> = async () => {};
-  let dbReady = isProd;
-  if (!isProd) {
-    try {
-      const devPg = await ensureDevPostgresRunning();
-      devPgStop = devPg.stop;
-      dbReady = true;
-    } catch (pgErr: any) {
-      console.warn('[PG-DEV] Embedded PostgreSQL auto-start warning (continuing with fallback):', pgErr?.message || pgErr);
-    }
-  }
+  const mysqlReady = await ensureMySqlSchemaInitialized();
+  const dbReady = mysqlReady || Boolean(getPrismaClient());
 
   if (dbReady) {
+    await seedCatalogIfEmpty();
     await Promise.allSettled([
       authStore.ensureProductionBootstrap(),
       authStore.hydrateSessionsFromDb(),
@@ -1047,12 +1040,11 @@ async function startServer() {
         const prisma = getPrismaClient();
         if (prisma) {
           await prisma.$disconnect();
-          console.log('[SERVER] Disconnected from PostgreSQL database.');
+          console.log('[SERVER] Disconnected from MySQL database.');
         }
       } catch (e) {
         console.warn('[SERVER] Error during Prisma disconnect:', e);
       }
-      await devPgStop();
       process.exit(0);
     });
 

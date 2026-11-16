@@ -54,9 +54,33 @@
       "lowStockAlert": false,
       "threshold": 5,
       "updatedAt": "2026-11-04T06:25:47.921Z"
+    },
+    {
+      "id": "inv-var-tori-shonen-02-washed-ash-L",
+      "variantId": "var-tori-shonen-02-washed-ash-L",
+      "sku": "SKU-M-02-L-WAS",
+      "quantityOnHand": 19,
+      "quantityReserved": 0,
+      "quantityAvailable": 19,
+      "lowStockAlert": false,
+      "threshold": 5,
+      "updatedAt": "2026-11-16T10:43:48.725Z"
     }
   ],
   "movements": [
+    {
+      "id": "mov-1794825828725-704",
+      "variantId": "var-tori-shonen-02-washed-ash-L",
+      "sku": "SKU-M-02-L-WAS",
+      "movementType": "ORDER_FULFILLMENT",
+      "quantityDelta": -1,
+      "previousQuantity": 20,
+      "newQuantity": 19,
+      "referenceId": "ORDER_DEDUCT_ord-1794825828724-be7px_var-tori-shonen-02-washed-ash-L",
+      "operatorId": "ord-1794825828724-be7px",
+      "reason": "COD Order TORI-20261116-M5GQ placed",
+      "createdAt": "2026-11-16T10:43:48.725Z"
+    },
     {
       "id": "mov-1794762818659-802",
       "variantId": "var-tori-shonen-02-S-was",
@@ -9002,5 +9026,5 @@
     }
   ],
   "reservations": [],
-  "lastUpdated": "2026-11-15T17:13:38.659Z"
+  "lastUpdated": "2026-11-16T10:43:48.725Z"
 }

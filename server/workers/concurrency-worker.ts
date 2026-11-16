@@ -1,32 +1,38 @@
 import { PrismaClient } from '@prisma/client';
+import { resolveMySqlConnectionConfig } from '../db/mysqlConfig';
 
-const databaseUrl = process.env.DATABASE_URL || 'postgresql://postgres:postgrespassword@127.0.0.1:5433/toriwear?schema=public&sslmode=disable';
-
-const prisma = new PrismaClient({
-  datasources: {
-    db: {
-      url: databaseUrl,
-    },
-  },
-});
+const cfg = resolveMySqlConnectionConfig();
+const prisma = new PrismaClient(
+  cfg.url
+    ? {
+        datasources: {
+          db: {
+            url: cfg.url,
+          },
+        },
+      }
+    : undefined
+);
 
 process.on('message', async (msg: any) => {
   const { id, action, variantId, quantity, orderId, ttlSeconds = 900 } = msg;
 
   if (action === 'reserve') {
     try {
-      // Execute PostgreSQL conditional atomic update
-      const updateResult: any[] = await prisma.$queryRaw`
-        UPDATE "inventory"
-        SET "quantityReserved" = "quantityReserved" + ${quantity},
-            "quantityAvailable" = "quantityAvailable" - ${quantity},
-            "updatedAt" = NOW()
-        WHERE "variantId" = ${variantId} AND "quantityAvailable" >= ${quantity}
-        RETURNING "id", "variantId", "quantityOnHand", "quantityReserved", "quantityAvailable"
+      // Execute MySQL conditional atomic update
+      const affectedRows = await prisma.$executeRaw`
+        UPDATE inventory
+        SET quantityReserved = quantityReserved + ${quantity},
+            quantityAvailable = quantityAvailable - ${quantity},
+            updatedAt = NOW(3)
+        WHERE variantId = ${variantId} AND quantityAvailable >= ${quantity}
       `;
 
-      if (updateResult && updateResult.length > 0) {
-        const row = updateResult[0];
+      if (Number(affectedRows) > 0) {
+        const row = await prisma.inventory.findUnique({
+          where: { variantId },
+          select: { id: true, variantId: true, quantityOnHand: true, quantityReserved: true, quantityAvailable: true },
+        });
         const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
 
         await prisma.stockReservation.create({
@@ -45,14 +51,15 @@ process.on('message', async (msg: any) => {
           success: true,
           variantId,
           orderId,
-          quantityAvailable: row.quantityAvailable,
-          quantityOnHand: row.quantityOnHand,
-          quantityReserved: row.quantityReserved,
+          quantityAvailable: row?.quantityAvailable ?? 0,
+          quantityOnHand: row?.quantityOnHand ?? 0,
+          quantityReserved: row?.quantityReserved ?? 0,
         });
       } else {
-        const [curr]: any[] = await prisma.$queryRaw`
-          SELECT "quantityAvailable", "quantityOnHand" FROM "inventory" WHERE "variantId" = ${variantId}
-        `;
+        const curr = await prisma.inventory.findUnique({
+          where: { variantId },
+          select: { quantityAvailable: true, quantityOnHand: true },
+        });
         process.send?.({
           id,
           success: false,

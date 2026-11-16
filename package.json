@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
+    "postinstall": "prisma generate",
+    "build": "prisma generate && vite build",
     "start": "tsx server.ts",
     "preview": "vite preview",
     "seed": "tsx server/db/seed.ts",
@@ -28,6 +29,7 @@
     "jsqr": "^1.4.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
+    "mysql2": "^3.24.6",
     "pg": "^8.23.1",
     "pg-mem": "^3.0.14",
     "pg-server": "^0.1.8",

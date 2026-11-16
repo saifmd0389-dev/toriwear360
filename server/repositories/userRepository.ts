@@ -195,7 +195,7 @@ export class UserRepository {
     if (prisma?.user) {
       try {
         const byEmp = await prisma.user.findFirst({
-          where: { employeeId: { equals: identifier.trim(), mode: 'insensitive' } },
+          where: { employeeId: identifier.trim() },
         });
         if (byEmp) return byEmp as UserRecord;
       } catch (err) {

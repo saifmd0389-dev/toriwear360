@@ -1,10 +1,10 @@
 /**
- * TORIWEAR Controlled Database Seed Script (PostgreSQL / Prisma)
- * 
+ * TORIWEAR Controlled Database Seed Script (MySQL / Prisma)
+ *
  * Non-destructive:
  * - Checks for existing records before upserting/inserting.
  * - Seeds users, categories, collections, products, variants, images, inventory.
- * - Safely handles missing DATABASE_URL.
+ * - Safely handles missing MySQL configuration in non-production.
  */
 
 import { getPrismaClient } from './prisma';
@@ -15,6 +15,200 @@ import { encryptSecret, hashRecoveryCode, generateBase32Secret } from '../servic
 
 function hashPassword(password: string, salt: string): string {
   return crypto.pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
+}
+
+export async function seedCatalogIfEmpty(): Promise<{ seeded: boolean; count: number }> {
+  const prisma = getPrismaClient();
+  if (!prisma?.product) {
+    return { seeded: false, count: 0 };
+  }
+
+  try {
+    const existingCount = await prisma.product.count();
+    if (existingCount > 0) {
+      return { seeded: false, count: existingCount };
+    }
+
+    // Categories (Worlds)
+    for (let i = 0; i < MEN_WORLDS.length; i++) {
+      const w = MEN_WORLDS[i];
+      if (!w) continue;
+      const slug = w.id.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      await prisma.category.upsert({
+        where: { slug },
+        create: {
+          id: `cat-men-${i + 1}`,
+          name: w.name,
+          slug,
+          department: 'MEN',
+          description: w.tagline,
+          image: w.heroImage,
+          bannerImage: w.heroImage,
+          displayOrder: i + 1,
+          isActive: true,
+        },
+        update: {},
+      });
+    }
+
+    for (let i = 0; i < KIDS_WORLDS.length; i++) {
+      const w = KIDS_WORLDS[i];
+      if (!w) continue;
+      const slug = w.id.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      await prisma.category.upsert({
+        where: { slug },
+        create: {
+          id: `cat-kids-${i + 1}`,
+          name: w.name,
+          slug,
+          department: 'KIDS',
+          description: w.tagline,
+          image: w.heroImage,
+          bannerImage: w.heroImage,
+          displayOrder: 10 + i + 1,
+          isActive: true,
+        },
+        update: {},
+      });
+    }
+
+    // Collections
+    const collections = [
+      { id: 'col-new-drop', name: 'New Drop & Chapter 01', slug: 'new-drop', displayOrder: 1 },
+      { id: 'col-bestsellers', name: 'Top Selling & Cult Favorites', slug: 'top-selling', displayOrder: 2 },
+      { id: 'col-trending', name: 'Trending Streetwear', slug: 'trending', displayOrder: 3 },
+    ];
+
+    for (const col of collections) {
+      await prisma.collection.upsert({
+        where: { slug: col.slug },
+        create: {
+          id: col.id,
+          name: col.name,
+          slug: col.slug,
+          isFeatured: true,
+          isActive: true,
+          displayOrder: col.displayOrder,
+        },
+        update: {},
+      });
+    }
+
+    // Products, Variants, Images, and Inventory
+    let productCount = 0;
+    for (const p of PRODUCTS) {
+      const isKids = p.department === 'KIDS';
+      const availableSizes = p.sizes && p.sizes.length > 0
+        ? p.sizes
+        : isKids
+          ? ['2–3Y', '4–5Y', '6–7Y', '8–9Y', '10–11Y', '12–13Y']
+          : ['S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
+
+      const availableColors = p.colors && p.colors.length > 0
+        ? p.colors
+        : [{ name: 'Void Black', hex: '#0f0f14' }];
+
+      const product = await prisma.product.upsert({
+        where: { catalogNumber: p.catalogNumber || p.id },
+        create: {
+          id: p.id,
+          catalogNumber: p.catalogNumber || p.id,
+          name: p.name,
+          slug: p.id.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+          department: p.department,
+          world: p.world,
+          franchise: p.franchise,
+          universe: p.universe || p.department,
+          fit: p.fit,
+          price: p.price,
+          originalPrice: p.originalPrice,
+          gsm: p.gsm || (isKids ? 180 : 240),
+          fabric: p.fabric || '100% Combed Heavyweight Cotton',
+          neck: p.neck || 'High-Ribbed Crewneck',
+          sleeves: p.sleeves || 'Drop Shoulder Half Sleeves',
+          print: p.print || 'High-Density Screen Print',
+          description: p.description,
+          storyQuote: p.storyQuote,
+          drop: p.drop || 'CHAPTER 01 — ORIGINALS',
+          rating: p.rating || 5.0,
+          reviewsCount: p.reviewsCount || 100,
+          isNewDrop: Boolean(p.isNewDrop ?? true),
+          isBestseller: Boolean(p.isBestseller),
+          isTrending: Boolean(p.isTrending),
+          inStock: true,
+          publishingStatus: 'PUBLISHED',
+        },
+        update: {},
+      });
+
+      for (const color of availableColors) {
+        for (const size of availableSizes) {
+          const cleanSize = size.replace(/[^a-zA-Z0-9]/g, '');
+          const sku = `SKU-${p.catalogNumber || p.id}-${cleanSize}-${color.name.slice(0, 3).toUpperCase()}`;
+          const variantId = `var-${p.id}-${cleanSize}-${color.name.slice(0, 3).toLowerCase()}`;
+
+          await prisma.productVariant.upsert({
+            where: { sku },
+            create: {
+              id: variantId,
+              productId: product.id,
+              sku,
+              size,
+              colorName: color.name,
+              colorHex: color.hex,
+              price: p.price,
+              originalPrice: p.originalPrice,
+              stock: 25,
+              reservedStock: 0,
+              isActive: true,
+            },
+            update: {},
+          });
+
+          await prisma.inventory.upsert({
+            where: { variantId },
+            create: {
+              variantId,
+              quantityOnHand: 25,
+              quantityReserved: 0,
+              quantityAvailable: 25,
+              safetyStock: 5,
+              reorderPoint: 15,
+            },
+            update: {},
+          });
+        }
+      }
+
+      if (p.images && p.images.length > 0) {
+        for (let imgIdx = 0; imgIdx < p.images.length; imgIdx++) {
+          const imgUrl = p.images[imgIdx];
+          const imgId = `img-${p.id}-${imgIdx + 1}`;
+          await prisma.productImage.upsert({
+            where: { id: imgId },
+            create: {
+              id: imgId,
+              productId: product.id,
+              url: imgUrl,
+              altText: `${p.name} - View ${imgIdx + 1}`,
+              displayOrder: imgIdx,
+              isPrimary: imgIdx === 0,
+              angle: imgIdx === 0 ? 'FRONT' : imgIdx === 1 ? 'BACK' : 'DETAIL',
+            },
+            update: {},
+          });
+        }
+      }
+
+      productCount++;
+    }
+
+    console.log(`[SEED] Seeded ${productCount} products into MySQL catalog.`);
+    return { seeded: true, count: productCount };
+  } catch (err: any) {
+    console.warn('[SEED] Catalog bootstrap note:', err?.message || err);
+    return { seeded: false, count: 0 };
+  }
 }
 
 export async function runDatabaseSeed(): Promise<{ success: boolean; message: string; count?: number }> {
@@ -38,7 +232,7 @@ export async function runDatabaseSeed(): Promise<{ success: boolean; message: st
     };
   }
 
-  console.log('[SEED] Starting non-destructive PostgreSQL seed...');
+  console.log('[SEED] Starting non-destructive MySQL seed...');
 
   try {
     // 1. Seed Initial Admin & Partner Users
@@ -408,14 +602,14 @@ export async function runDatabaseSeed(): Promise<{ success: boolean; message: st
       productCount++;
     }
 
-    console.log(`[SEED] Successfully seeded ${productCount} products into PostgreSQL.`);
+    console.log(`[SEED] Successfully seeded ${productCount} products into MySQL.`);
     return {
       success: true,
       message: `Database seeding completed successfully (${productCount} products seeded).`,
       count: productCount,
     };
   } catch (err: any) {
-    console.error('[SEED] Error running PostgreSQL seed:', err);
+    console.error('[SEED] Error running MySQL seed:', err);
     return {
       success: false,
       message: err.message || 'Error running database seed.',

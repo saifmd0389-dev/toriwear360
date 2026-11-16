@@ -1,13 +1,17 @@
 /**
- * TORIWEAR Database Abstraction Layer (PostgreSQL / Prisma ORM)
- * 
+ * TORIWEAR Database Abstraction Layer (MySQL / Prisma ORM)
+ *
  * SERVER-SIDE ONLY:
- * - Never expose DATABASE_URL or db credentials to the client/browser.
- * - Manages connection pooling, lifecycle hooks, and safe fallbacks when DATABASE_URL is not configured.
+ * - Never expose DATABASE_URL or DB credentials to the client/browser.
+ * - Supports GoDaddy Hosted MySQL env vars (DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
+ *   or standard mysql:// DATABASE_URL.
+ * - Manages connection pooling, lifecycle hooks, and safe non-production fallbacks.
  */
 
 import { createRequire } from 'module';
+import { AsyncLocalStorage } from 'async_hooks';
 import dotenv from 'dotenv';
+import { resolveMySqlConnectionConfig } from './mysqlConfig';
 
 dotenv.config();
 
@@ -15,7 +19,7 @@ const require = createRequire(import.meta.url);
 
 export interface DatabaseStatus {
   connected: boolean;
-  provider: 'postgresql' | 'memory-fallback';
+  provider: 'mysql' | 'postgresql' | 'memory-fallback';
   databaseUrlConfigured: boolean;
   poolActive: boolean;
   lastCheckedAt: string;
@@ -25,33 +29,40 @@ export interface DatabaseStatus {
 let prismaInstance: any = null;
 let isPrismaAvailable = false;
 
-// Attempt dynamic load of PrismaClient if generated
+const resolvedConfig = resolveMySqlConnectionConfig();
+
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { PrismaClient } = require('@prisma/client');
   if (PrismaClient) {
-    const databaseUrl = process.env.DATABASE_URL;
-    if (databaseUrl && databaseUrl.trim().length > 0 && !databaseUrl.includes('placeholder')) {
+    if (resolvedConfig.configured && resolvedConfig.url) {
       prismaInstance = new PrismaClient({
+        datasources: {
+          db: {
+            url: resolvedConfig.url,
+          },
+        },
         log: process.env.PRISMA_LOG_QUERIES === 'true' ? ['query', 'warn', 'error'] : ['warn', 'error'],
       });
       isPrismaAvailable = true;
-      console.log('[DATABASE] PostgreSQL PrismaClient successfully initialized with connection pooling.');
+      console.log(`[DATABASE] MySQL PrismaClient successfully initialized (${resolvedConfig.source}).`);
     } else {
       if (process.env.NODE_ENV === 'production') {
-        throw new Error('FATAL_PRODUCTION_DATABASE_ERROR: Production environment requires an active PostgreSQL DATABASE_URL. Silent fallback to JSON/memory storage is strictly disabled in production.');
+        throw new Error(
+          'FATAL_PRODUCTION_DATABASE_ERROR: Production environment requires MySQL credentials (DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD) or a mysql:// DATABASE_URL.'
+        );
       }
-      console.log('[DATABASE] DATABASE_URL is not set or using placeholder. Running in safe repository fallback mode.');
+      console.log('[DATABASE] MySQL credentials not configured for local dev. Running in safe repository fallback mode.');
     }
   }
 } catch (err: any) {
   if (process.env.NODE_ENV === 'production') {
-    throw new Error(`FATAL_PRODUCTION_DATABASE_ERROR: ${err?.message || 'Prisma client not generated or PostgreSQL connection failed.'}`);
+    throw new Error(
+      `FATAL_PRODUCTION_DATABASE_ERROR: ${err?.message || 'Prisma client not generated or MySQL connection failed.'}`
+    );
   }
   console.log('[DATABASE] PrismaClient runtime adapter note:', err?.message || 'Prisma client not yet generated.');
 }
-
-import { AsyncLocalStorage } from 'async_hooks';
 
 export const txStorage = new AsyncLocalStorage<any>();
 
@@ -70,27 +81,30 @@ export function getRawPrismaClient(): any {
   return prismaInstance;
 }
 
-export const prisma: any = new Proxy({}, {
-  get(_target, prop) {
-    const activeTx = txStorage.getStore();
-    const target = activeTx || prismaInstance;
-    return target ? target[prop] : undefined;
+export const prisma: any = new Proxy(
+  {},
+  {
+    get(_target, prop) {
+      const activeTx = txStorage.getStore();
+      const target = activeTx || prismaInstance;
+      return target ? target[prop] : undefined;
+    },
   }
-});
+);
 
 /**
  * Health check for database connectivity
  */
 export async function checkDatabaseHealth(): Promise<DatabaseStatus> {
-  const databaseUrlConfigured = Boolean(process.env.DATABASE_URL && !process.env.DATABASE_URL.includes('placeholder'));
-  
+  const cfg = resolveMySqlConnectionConfig();
+  const databaseUrlConfigured = cfg.configured;
+
   if (isPrismaAvailable && prismaInstance) {
     try {
-      // Simple raw ping
       await prismaInstance.$queryRaw`SELECT 1`;
       return {
         connected: true,
-        provider: 'postgresql',
+        provider: 'mysql',
         databaseUrlConfigured: true,
         poolActive: true,
         lastCheckedAt: new Date().toISOString(),
@@ -98,7 +112,7 @@ export async function checkDatabaseHealth(): Promise<DatabaseStatus> {
     } catch (err: any) {
       return {
         connected: false,
-        provider: 'postgresql',
+        provider: 'mysql',
         databaseUrlConfigured: true,
         poolActive: false,
         lastCheckedAt: new Date().toISOString(),
@@ -113,7 +127,9 @@ export async function checkDatabaseHealth(): Promise<DatabaseStatus> {
     databaseUrlConfigured,
     poolActive: false,
     lastCheckedAt: new Date().toISOString(),
-    error: databaseUrlConfigured ? 'Prisma client generation required' : 'DATABASE_URL not configured',
+    error: databaseUrlConfigured
+      ? 'Prisma client generation required'
+      : 'MySQL database environment variables (DB_HOST, DB_NAME, DB_USER, DB_PASSWORD) not configured',
   };
 }
 
@@ -124,9 +140,9 @@ export async function disconnectDatabase(): Promise<void> {
   if (prismaInstance && typeof prismaInstance.$disconnect === 'function') {
     try {
       await prismaInstance.$disconnect();
-      console.log('[DATABASE] PostgreSQL pool disconnected gracefully.');
+      console.log('[DATABASE] MySQL pool disconnected gracefully.');
     } catch (e) {
-      console.error('[DATABASE] Error disconnecting from PostgreSQL:', e);
+      console.error('[DATABASE] Error disconnecting from MySQL:', e);
     }
   }
 }

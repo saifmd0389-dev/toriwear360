@@ -123,8 +123,8 @@ export class ShippingRepository {
         const row = await prisma.shipment.findFirst({
           where: {
             OR: [
-              { trackingNumber: { equals: clean, mode: 'insensitive' } },
-              { shipmentNumber: { equals: clean, mode: 'insensitive' } },
+              { trackingNumber: clean },
+              { shipmentNumber: clean },
             ],
           },
         });

@@ -85,7 +85,7 @@
     "isTrending": true,
     "isBestseller": false,
     "inStock": true,
-    "stock": 231,
+    "stock": 230,
     "licenseType": "Original IP",
     "status": "PUBLISHED",
     "collectionSlugs": [
@@ -128,7 +128,7 @@
         "colorHex": "#1e1e26",
         "price": 1249,
         "originalPrice": 1699,
-        "stock": 20,
+        "stock": 19,
         "reservedStock": 0,
         "isActive": true
       },
@@ -251,7 +251,7 @@
       }
     ],
     "createdAt": "2026-10-22T04:55:19.721Z",
-    "updatedAt": "2026-11-09T05:27:34.317Z"
+    "updatedAt": "2026-11-16T10:43:48.735Z"
   },
   {
     "id": "tori-shonen-03",

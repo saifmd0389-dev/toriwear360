@@ -1,7 +1,6 @@
 datasource db {
-  provider = "postgresql"
+  provider = "mysql"
   url      = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
 }
 
 generator client {
@@ -49,7 +48,7 @@ model User {
   passwordHash                   String
   salt                           String
   name                           String
-  avatarUrl                      String?
+  avatarUrl                      String?        @db.Text
   role                           UserRoleType   @default(STORE_MANAGER)
   department                     String?
   employeeId                     String?        @unique
@@ -88,7 +87,7 @@ model Customer {
   email            String?         @unique
   phone            String?         @unique
   name             String?
-  avatarUrl        String?
+  avatarUrl        String?         @db.Text
   firebaseUid      String?         @unique
   isGuest          Boolean         @default(false)
   status           AccountStatus   @default(ACTIVE)
@@ -121,8 +120,8 @@ model Staff {
   department         String
   designation        String
   employeeNumber     String?   @unique
-  directReports      String?
-  permissionsSummary String?
+  directReports      String?   @db.Text
+  permissionsSummary String?   @db.Text
   joinedAt           DateTime  @default(now())
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
@@ -154,7 +153,7 @@ model Partner {
 model Role {
   id               String           @id @default(cuid())
   name             String           @unique
-  description      String?
+  description      String?          @db.Text
   isSystem         Boolean          @default(false)
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
@@ -169,7 +168,7 @@ model Permission {
   id               String           @id @default(cuid())
   code             String           @unique
   module           String
-  description      String?
+  description      String?          @db.Text
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
@@ -210,7 +209,7 @@ model Session {
   userId       String?
   customerId   String?
   ipAddress    String?
-  userAgent    String?
+  userAgent    String?   @db.Text
   device       String?
   browser      String?
   location     String?
@@ -278,11 +277,11 @@ model TwoFactorSetting {
   id               String    @id @default(cuid())
   userId           String    @unique
   isEnabled        Boolean   @default(false)
-  secret           String?   // AES-256-GCM encrypted TOTP secret
-  pendingSecret    String?   // AES-256-GCM encrypted pending secret during enrollment
+  secret           String?   @db.Text // AES-256-GCM encrypted TOTP secret
+  pendingSecret    String?   @db.Text // AES-256-GCM encrypted pending secret during enrollment
   pendingExpiresAt DateTime? // Expiration for pending enrollment
   lastAcceptedStep BigInt?   // RFC 6238 time step for cross-process replay prevention
-  backupCodes      String?   // JSON string of hashed backup codes
+  backupCodes      String?   @db.Text // JSON string of hashed backup codes
   verifiedAt       DateTime?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
@@ -300,10 +299,10 @@ model AuditLog {
   module         String
   action         String
   recordAffected String?
-  oldValue       String?
-  newValue       String?
+  oldValue       String?        @db.Text
+  newValue       String?        @db.Text
   ipAddress      String?
-  userAgent      String?
+  userAgent      String?        @db.Text
   severity       SeverityLevel  @default(INFO)
   timestamp      DateTime       @default(now())
   createdAt      DateTime       @default(now())
@@ -328,8 +327,8 @@ model CustomerProfile {
   gender            String?
   alternatePhone    String?
   companyName       String?
-  notes             String?
-  tags              String?   // JSON array string
+  notes             String?   @db.Text
+  tags              String?   @db.Text // JSON array string
   segment           String    @default("New Customers")
   totalOrders       Int       @default(0)
   totalSpent        Float     @default(0.0)
@@ -375,8 +374,8 @@ model CustomerPreference {
   whatsappNotifications Boolean   @default(true)
   dropAlerts            Boolean   @default(true)
   preferredDepartment   String?
-  preferredSizes        String?   // JSON array
-  preferredFits         String?   // JSON array
+  preferredSizes        String?   @db.Text // JSON array
+  preferredFits         String?   @db.Text // JSON array
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
@@ -403,9 +402,9 @@ model Category {
   name          String
   slug          String         @unique
   department    DepartmentType @default(MEN)
-  description   String?
-  image         String?
-  bannerImage   String?
+  description   String?        @db.Text
+  image         String?        @db.Text
+  bannerImage   String?        @db.Text
   displayOrder  Int            @default(0)
   isActive      Boolean        @default(true)
   createdAt     DateTime       @default(now())
@@ -424,8 +423,8 @@ model Subcategory {
   categoryId   String
   name         String
   slug         String    @unique
-  description  String?
-  image        String?
+  description  String?   @db.Text
+  image        String?   @db.Text
   displayOrder Int       @default(0)
   isActive     Boolean   @default(true)
   createdAt    DateTime  @default(now())
@@ -458,7 +457,7 @@ model Product {
   sleeves          String            @default("Drop Shoulder Half Sleeves")
   print            String            @default("High-Density Screen Print")
   description      String            @db.Text
-  storyQuote       String?
+  storyQuote       String?           @db.Text
   drop             String            @default("CHAPTER 01 — ORIGINALS")
   isBestseller     Boolean           @default(false)
   isNewDrop        Boolean           @default(true)
@@ -527,8 +526,8 @@ model ProductImage {
   id            String          @id @default(cuid())
   productId     String
   variantId     String?
-  url           String
-  altText       String?
+  url           String          @db.Text
+  altText       String?         @db.Text
   displayOrder  Int             @default(0)
   isPrimary     Boolean         @default(false)
   angle         String          @default("FRONT") // FRONT, BACK, DETAIL, MODEL
@@ -557,10 +556,10 @@ model Collection {
   id           String              @id @default(cuid())
   name         String
   slug         String              @unique
-  subtitle     String?
-  description  String?
-  bannerImage  String?
-  heroImage    String?
+  subtitle     String?             @db.Text
+  description  String?             @db.Text
+  bannerImage  String?             @db.Text
+  heroImage    String?             @db.Text
   season       String?
   isFeatured   Boolean             @default(false)
   isActive     Boolean             @default(true)
@@ -634,7 +633,7 @@ model InventoryMovement {
   balanceAfter       Int
   referenceType      String?               // ORDER, RETURN, ADMIN_ADJUSTMENT, INITIAL_STOCK
   referenceId        String?
-  reason             String?
+  reason             String?               @db.Text
   performedByUserId  String?
   timestamp          DateTime              @default(now())
   createdAt          DateTime              @default(now())
@@ -788,15 +787,15 @@ model Order {
   awbNumber              String?
   orderAccessToken       String?
   idempotencyKey         String?             @unique
-  cancellationReason     String?
+  cancellationReason     String?             @db.Text
   cancelledAt            DateTime?
   refundStatus           String?
   refundAmount           Float?
   estimatedDeliveryDate  DateTime?
-  deliveryNotes          String?
+  deliveryNotes          String?             @db.Text
   isGift                 Boolean             @default(false)
   ipAddress              String?
-  userAgent              String?
+  userAgent              String?             @db.Text
   createdAt              DateTime            @default(now())
   updatedAt              DateTime            @updatedAt
 
@@ -825,7 +824,7 @@ model OrderItem {
   productSku    String
   size          String
   color         String
-  image         String?
+  image         String?         @db.Text
   quantity      Int             @default(1)
   unitPrice     Float
   totalPrice    Float
@@ -870,7 +869,7 @@ model OrderStatusHistory {
   orderId         String
   fromStatus      OrderShippingStatus?
   toStatus        OrderShippingStatus
-  note            String?
+  note            String?             @db.Text
   updatedByUserId String?
   timestamp       DateTime            @default(now())
   createdAt       DateTime            @default(now())
@@ -896,8 +895,8 @@ model Payment {
   currency           String               @default("INR")
   status             PaymentStatus        @default(PENDING)
   paymentMethodType  String?              // UPI, CREDIT_CARD, NETBANKING, COD
-  errorMessage       String?
-  failureReason      String?
+  errorMessage       String?              @db.Text
+  failureReason      String?              @db.Text
   capturedAt         DateTime?
   refundedAt         DateTime?
   createdAt          DateTime             @default(now())
@@ -939,7 +938,7 @@ model PaymentWebhook {
   payload     String    @db.Text
   processed   Boolean   @default(false)
   processedAt DateTime?
-  error       String?
+  error       String?   @db.Text
   createdAt   DateTime  @default(now())
 
   @@index([provider, eventType])
@@ -973,8 +972,8 @@ model Shipment {
   courierPartner    String                  @default("Shiprocket")
   carrierShipmentId String?
   trackingNumber    String?
-  trackingUrl       String?
-  labelUrl          String?
+  trackingUrl       String?                 @db.Text
+  labelUrl          String?                 @db.Text
   status            String                  @default("LABEL_CREATED")
   weightGrams    Int                     @default(350)
   lengthCm       Float?
@@ -998,7 +997,7 @@ model ShipmentTrackingEvent {
   shipmentId          String
   status              String
   location            String?
-  activityDescription String
+  activityDescription String    @db.Text
   eventTimestamp      DateTime  @default(now())
   createdAt           DateTime  @default(now())
 
@@ -1020,7 +1019,7 @@ enum DiscountType {
 model Coupon {
   id            String         @id @default(cuid())
   code          String         @unique
-  description   String?
+  description   String?        @db.Text
   discountType  DiscountType   @default(PERCENTAGE)
   value         Float
   minOrderValue Float          @default(0.0)
@@ -1060,10 +1059,10 @@ model CouponUsage {
 model Banner {
   id             String    @id @default(cuid())
   title          String
-  subtitle       String?
-  imageUrl       String
-  mobileImageUrl String?
-  linkUrl        String?
+  subtitle       String?   @db.Text
+  imageUrl       String    @db.Text
+  mobileImageUrl String?   @db.Text
+  linkUrl        String?   @db.Text
   placement      String    @default("HOME_TOP")
   displayOrder   Int       @default(0)
   isActive       Boolean   @default(true)
@@ -1079,8 +1078,8 @@ model PromotionalCampaign {
   id                 String    @id @default(cuid())
   name               String
   slug               String    @unique
-  description        String?
-  bannerImage        String?
+  description        String?   @db.Text
+  bannerImage        String?   @db.Text
   discountPercentage Float?
   startsAt           DateTime  @default(now())
   endsAt             DateTime?
@@ -1129,8 +1128,8 @@ model Review {
 model ReviewImage {
   id        String   @id @default(cuid())
   reviewId  String
-  url       String
-  altText   String?
+  url       String   @db.Text
+  altText   String?  @db.Text
   createdAt DateTime @default(now())
 
   review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
@@ -1145,8 +1144,8 @@ model Notification {
   recipientId   String?
   type          String    // ORDER, INVENTORY, PAYMENT, SECURITY, PROMO
   title         String
-  message       String
-  linkUrl       String?
+  message       String    @db.Text
+  linkUrl       String?   @db.Text
   isRead        Boolean   @default(false)
   readAt        DateTime?
   createdAt     DateTime  @default(now())
@@ -1165,7 +1164,7 @@ model WebsiteSetting {
   key         String   @unique
   value       String   @db.Text
   group       String   @default("GENERAL") // GENERAL, SHIPPING, CHECKOUT, APPEARANCE
-  description String?
+  description String?  @db.Text
   isPublic    Boolean  @default(false)
   updatedAt   DateTime @updatedAt
 
@@ -1176,7 +1175,7 @@ model HomepageSection {
   id           String   @id @default(cuid())
   sectionKey   String   @unique
   title        String
-  subtitle     String?
+  subtitle     String?  @db.Text
   enabled      Boolean  @default(true)
   displayOrder Int      @default(0)
   configJson   String?  @db.Text
@@ -1189,10 +1188,10 @@ model WebsiteBanner {
   id          String   @id @default(cuid())
   bannerKey   String   @unique
   headline    String
-  subheadline String?
+  subheadline String?  @db.Text
   ctaText     String?
-  ctaLink     String?
-  bgImageUrl  String?
+  ctaLink     String?  @db.Text
+  bgImageUrl  String?  @db.Text
   isLive      Boolean  @default(true)
   priority    Int      @default(0)
   updatedAt   DateTime @updatedAt
@@ -1231,7 +1230,7 @@ model AIDesign {
   printReadiness     String             @default("GOOD")
   status             AIDesignStatus     @default(DRAFT)
   convertedProductId String?
-  primaryImageUrl    String
+  primaryImageUrl    String             @db.Text
   authorUserId       String?
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
@@ -1251,8 +1250,8 @@ model AIDesignVersion {
   designId       String
   versionNumber  Int       @default(1)
   prompt         String    @db.Text
-  imageUrl       String
-  changesSummary String?
+  imageUrl       String    @db.Text
+  changesSummary String?   @db.Text
   createdByUserId String?
   createdAt      DateTime  @default(now())
 
@@ -1270,10 +1269,10 @@ model AICharacter {
   archetype     String?
   department    DepartmentType @default(MEN)
   world         String
-  personality   String?        // JSON array or text
-  visualTraits  String?        // JSON or text
-  storyQuote    String?
-  avatarUrl     String?
+  personality   String?        @db.Text // JSON array or text
+  visualTraits  String?        @db.Text // JSON or text
+  storyQuote    String?        @db.Text
+  avatarUrl     String?        @db.Text
   isActive      Boolean        @default(true)
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
@@ -1288,8 +1287,8 @@ model AIWorld {
   department     DepartmentType @default(MEN)
   description    String?        @db.Text
   visualLanguage String?        @db.Text
-  colorPalette   String?        // JSON
-  heroImageUrl   String?
+  colorPalette   String?        @db.Text // JSON
+  heroImageUrl   String?        @db.Text
   isActive       Boolean        @default(true)
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
@@ -1303,8 +1302,8 @@ model AICollection {
   season     String?
   department DepartmentType @default(MEN)
   world      String?
-  theme      String?
-  bannerUrl  String?
+  theme      String?        @db.Text
+  bannerUrl  String?        @db.Text
   isActive   Boolean        @default(true)
   createdAt  DateTime       @default(now())
   updatedAt  DateTime       @updatedAt
@@ -1330,11 +1329,11 @@ model AIGenerationJob {
   id           String    @id @default(cuid())
   designId     String?
   modelUsed    String
-  promptSnippet String
+  promptSnippet String   @db.Text
   durationMs   Int
   status       String    @default("PENDING") // PENDING, PROCESSING, SUCCESS, FAILED
-  errorMessage String?
-  resultUrl    String?
+  errorMessage String?   @db.Text
+  resultUrl    String?   @db.Text
   startedAt    DateTime  @default(now())
   completedAt  DateTime?
 
@@ -1374,7 +1373,7 @@ model FinancialTransaction {
   currency          String            @default("INR")
   referenceType     String?           // ORDER, REFUND, PAYROLL, OPERATIONAL, PARTNER_PAYOUT
   referenceId       String?
-  description       String
+  description       String            @db.Text
   performedByUserId String?
   timestamp         DateTime          @default(now())
   createdAt         DateTime          @default(now())
@@ -1394,7 +1393,7 @@ model Expense {
   vendor           String?
   amount           Float
   currency         String    @default("INR")
-  invoiceUrl       String?
+  invoiceUrl       String?   @db.Text
   paymentMethod    String    @default("BANK_TRANSFER")
   status           String    @default("PENDING") // PENDING, PAID, REJECTED
   approvedByUserId String?
