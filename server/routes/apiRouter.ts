@@ -1069,6 +1069,9 @@ apiRouter.post('/v1/orders/quote', async (req: Request, res: Response) => {
     couponCode: req.body.couponCode,
     shippingPincode: req.body.shippingPincode,
     state: req.body.state,
+    customerId: req.body.customerId,
+    customerEmail: req.body.customerEmail,
+    customerPhone: req.body.customerPhone,
   });
 
   if (!result.success) {
@@ -2142,11 +2145,17 @@ apiRouter.post('/v1/shipping/webhook/:carrier', async (req: Request, res: Respon
 
 /**
  * Public Coupon Validation Endpoint
- * Validates active status, date range, min order value, and returns computed discount.
+ * Validates active status, date range, min order value, usage limits, and returns computed discount.
  */
 apiRouter.get('/v1/coupons/validate/:code', async (req: Request, res: Response) => {
   const subtotal = req.query.subtotal ? Number(req.query.subtotal) : 0;
-  const validation = await couponRepository.validate(String(req.params.code || ''), subtotal);
+  const validation = await couponRepository.validateWithContext({
+    code: String(req.params.code || ''),
+    subtotal,
+    customerId: typeof req.query.customerId === 'string' ? req.query.customerId : undefined,
+    customerEmail: typeof req.query.customerEmail === 'string' ? req.query.customerEmail : undefined,
+    customerPhone: typeof req.query.customerPhone === 'string' ? req.query.customerPhone : undefined,
+  });
   if (!validation.valid || !validation.coupon) {
     return res.status(400).json({
       success: false,
@@ -2162,6 +2171,12 @@ apiRouter.get('/v1/coupons/validate/:code', async (req: Request, res: Response) 
     value: c.value,
     maxDiscount: c.maxDiscount,
     minOrderValue: c.minOrderValue,
+    perUserLimit: c.perUserLimit,
+    eligibleCategories: c.eligibleCategories,
+    eligibleProductIds: c.eligibleProductIds,
+    excludeShipping: c.excludeShipping,
+    excludeTax: c.excludeTax,
+    eligibleSubtotal: validation.eligibleSubtotal,
     calculatedDiscount: validation.discount,
     discountAmount: validation.discount,
     description: c.description,
@@ -2169,12 +2184,45 @@ apiRouter.get('/v1/coupons/validate/:code', async (req: Request, res: Response) 
 });
 
 /**
- * Public Coupon Validation POST Endpoint (for checkout quotes and dynamic cart calculations)
+ * Public Coupon Validation POST Endpoint (supports cart items, eligibility & per-user limit verification)
  */
 apiRouter.post('/v1/coupons/validate', async (req: Request, res: Response) => {
-  const { code, subtotal } = req.body;
+  const { code, subtotal, items, customerId, customerEmail, customerPhone } = req.body || {};
   const numSubtotal = typeof subtotal === 'number' ? subtotal : Number(subtotal || 0);
-  const validation = await couponRepository.validate(code, numSubtotal);
+
+  // Enrich cart items from server catalog so client cannot spoof categories/prices
+  let enrichedItems: Array<{ productId: string; category?: string; world?: string; department?: string; lineTotal: number }> | undefined;
+  let serverSubtotal = numSubtotal;
+
+  if (Array.isArray(items) && items.length > 0) {
+    enrichedItems = [];
+    let computedSub = 0;
+    for (const rawIt of items) {
+      if (!rawIt?.productId) continue;
+      const product = await productRepository.findById(String(rawIt.productId)).catch(() => null);
+      const qty = Math.max(1, Number(rawIt.quantity || 1));
+      const unitPrice = product ? Number(product.price || 0) : Number(rawIt.unitPrice || 0);
+      const lineTotal = unitPrice * qty;
+      computedSub += lineTotal;
+      enrichedItems.push({
+        productId: String(rawIt.productId),
+        category: product?.categoryId || product?.franchise || rawIt.category,
+        world: product?.world || rawIt.world,
+        department: product?.department || rawIt.department,
+        lineTotal,
+      });
+    }
+    if (computedSub > 0) serverSubtotal = computedSub;
+  }
+
+  const validation = await couponRepository.validateWithContext({
+    code: String(code || ''),
+    subtotal: serverSubtotal,
+    items: enrichedItems,
+    customerId,
+    customerEmail,
+    customerPhone,
+  });
 
   if (!validation.valid || !validation.coupon) {
     return res.json({
@@ -2198,8 +2246,14 @@ apiRouter.post('/v1/coupons/validate', async (req: Request, res: Response) => {
       value: c.value,
       discountAmount: validation.discount,
       calculatedDiscount: validation.discount,
+      eligibleSubtotal: validation.eligibleSubtotal,
       minOrderValue: c.minOrderValue,
       maxDiscount: c.maxDiscount,
+      perUserLimit: c.perUserLimit,
+      eligibleCategories: c.eligibleCategories,
+      eligibleProductIds: c.eligibleProductIds,
+      excludeShipping: c.excludeShipping,
+      excludeTax: c.excludeTax,
       description: c.description,
     },
   });
@@ -2225,11 +2279,12 @@ apiRouter.post('/v1/admin/coupons', requireStaffPermission('marketing.edit'), as
     }
 
     const discountType = req.body.discountType === 'PERCENTAGE' ? 'PERCENTAGE' : 'FLAT';
-    const minOrderValue = req.body.minOrderValue !== undefined ? req.body.minOrderValue : (req.body.minOrder || 0);
+    const minOrderValue = req.body.minOrderValue !== undefined ? req.body.minOrderValue : (req.body.minOrder || req.body.minCartValue || 0);
     const maxDiscount = req.body.maxDiscount !== undefined ? req.body.maxDiscount : req.body.maxDiscountAmount;
     const usageLimit = req.body.usageLimit !== undefined ? req.body.usageLimit : req.body.usageLimitTotal;
+    const perUserLimit = req.body.perUserLimit !== undefined ? req.body.perUserLimit : (req.body.perCustomerLimit || 1);
     const startDate = req.body.startDate;
-    const expiryDate = req.body.expiryDate;
+    const expiryDate = req.body.expiryDate || req.body.endDate;
     const isActive = req.body.isActive !== undefined ? req.body.isActive : (req.body.active !== undefined ? req.body.active : true);
     const description = req.body.description || '';
 
@@ -2241,6 +2296,11 @@ apiRouter.post('/v1/admin/coupons', requireStaffPermission('marketing.edit'), as
         minOrderValue: Number(minOrderValue),
         maxDiscount: maxDiscount !== undefined ? Number(maxDiscount) : undefined,
         usageLimit: usageLimit !== undefined ? Number(usageLimit) : undefined,
+        perUserLimit: Number(perUserLimit || 1),
+        eligibleCategories: req.body.eligibleCategories,
+        eligibleProductIds: req.body.eligibleProductIds,
+        excludeShipping: req.body.excludeShipping !== false,
+        excludeTax: req.body.excludeTax !== false,
         startDate: startDate ? new Date(startDate) : new Date(),
         expiryDate: expiryDate ? new Date(expiryDate) : new Date('2026-12-31T23:59:59.000Z'),
         isActive: Boolean(isActive),
@@ -2268,7 +2328,18 @@ apiRouter.post('/v1/admin/coupons', requireStaffPermission('marketing.edit'), as
  */
 apiRouter.put('/v1/admin/coupons/:id', requireStaffPermission('marketing.edit'), async (req: Request, res: Response) => {
   try {
-    const updated = await couponRepository.update(String(req.params.id || ''), req.body, req.user?.id || 'ADMIN');
+    const body = req.body || {};
+    const updates: any = { ...body };
+    if (body.minCartValue !== undefined && body.minOrderValue === undefined) {
+      updates.minOrderValue = Number(body.minCartValue);
+    }
+    if (body.perCustomerLimit !== undefined && body.perUserLimit === undefined) {
+      updates.perUserLimit = Number(body.perCustomerLimit);
+    }
+    if (body.endDate !== undefined && body.expiryDate === undefined) {
+      updates.expiryDate = new Date(body.endDate);
+    }
+    const updated = await couponRepository.update(String(req.params.id || ''), updates, req.user?.id || 'ADMIN');
     if (!updated) {
       return res.status(404).json({ success: false, error: 'Coupon not found.' });
     }

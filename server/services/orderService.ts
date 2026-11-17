@@ -47,6 +47,9 @@ export interface CalculateQuoteInput {
   couponCode?: string;
   shippingPincode?: string;
   state?: string;
+  customerId?: string;
+  customerEmail?: string;
+  customerPhone?: string;
 }
 
 export interface VerifiedQuoteItem {
@@ -159,6 +162,14 @@ export class OrderService {
     let subtotal = 0;
     let canProceed = true;
 
+    const quoteProductsMeta: Array<{
+      productId: string;
+      category?: string;
+      world?: string;
+      department?: string;
+      lineTotal: number;
+    }> = [];
+
     for (const reqItem of input.items) {
       const product = await productRepository.findById(reqItem.productId);
       if (!product) {
@@ -204,6 +215,14 @@ export class OrderService {
       const itemSubtotal = unitPrice * reqItem.quantity;
       subtotal += itemSubtotal;
 
+      quoteProductsMeta.push({
+        productId: product.id,
+        category: product.categoryId || product.franchise,
+        world: product.world,
+        department: product.department,
+        lineTotal: itemSubtotal,
+      });
+
       verifiedItems.push({
         productId: product.id,
         productName: product.name,
@@ -220,27 +239,34 @@ export class OrderService {
       });
     }
 
-    // Coupon discount calculation
+    // Coupon discount calculation (strictly on eligible merchandise subtotal; never discounts shipping or tax)
     let discount = 0;
     let appliedCoupon: string | undefined = undefined;
 
     if (input.couponCode) {
-      const validation = await couponRepository.validate(input.couponCode, subtotal);
+      const validation = await couponRepository.validateWithContext({
+        code: input.couponCode,
+        subtotal,
+        items: quoteProductsMeta,
+        customerId: input.customerId,
+        customerEmail: input.customerEmail,
+        customerPhone: input.customerPhone,
+      });
       if (validation.valid && validation.coupon) {
-        discount = validation.discount;
+        discount = Math.min(validation.discount, subtotal);
         appliedCoupon = validation.coupon.code;
       } else {
         warnings.push(validation.reason || `Invalid promo code "${input.couponCode}".`);
       }
     }
 
-    // Free delivery threshold: ₹999
+    // Free delivery threshold: ₹999 (never discounted by coupon)
     const freeShippingThreshold = 999;
     const netSubtotal = Math.max(0, subtotal - discount);
     const shippingFee = netSubtotal >= freeShippingThreshold || subtotal === 0 ? 0 : 79;
     const amountNeededForFreeShipping = Math.max(0, freeShippingThreshold - netSubtotal);
 
-    // GST Calculation: 5% apparel tax included in total
+    // GST Calculation: 5% apparel tax included in net merchandise price
     const taxTotal = Math.round(netSubtotal * 0.05);
     const isInterState = input.state && input.state.toLowerCase() !== 'maharashtra';
     const taxBreakdown = !isInterState
@@ -257,7 +283,7 @@ export class OrderService {
           rate: 0.05,
         };
 
-    const total = Math.max(0, subtotal - discount + shippingFee);
+    const total = netSubtotal + shippingFee;
 
     return {
       success: true,
@@ -301,12 +327,15 @@ export class OrderService {
       }
     }
 
-    // 2. Calculate server-authoritative quote and check inventory
+    // 2. Calculate server-authoritative quote and check inventory + per-user coupon eligibility
     const quoteRes = await this.calculateQuote({
       items: input.items,
       couponCode: input.couponCode,
       shippingPincode: input.shippingAddress.pincode,
       state: input.shippingAddress.state,
+      customerId: input.customerId,
+      customerEmail: input.customerEmail,
+      customerPhone: input.customerPhone,
     });
 
     if (!quoteRes.success || !quoteRes.quote) {
@@ -394,9 +423,16 @@ export class OrderService {
           }
         }
 
-        // 6. Increment coupon usage if applied
+        // 6. Atomically record coupon redemption & per-user audit if applied
         if (quote.discountCode) {
-          await couponRepository.incrementUsage(quote.discountCode);
+          await couponRepository.recordRedemption({
+            code: quote.discountCode,
+            orderId,
+            customerId: input.customerId,
+            customerEmail: input.customerEmail,
+            customerPhone: input.customerPhone,
+            discountAmount: quote.discount,
+          });
         }
 
     // 7. Save address snapshot
@@ -555,7 +591,7 @@ export class OrderService {
         );
       }
       if (order.discountCode) {
-        await couponRepository.decrementUsage(order.discountCode);
+        await couponRepository.releaseRedemption(order.discountCode, order.id);
       }
     }
 
@@ -667,7 +703,7 @@ export class OrderService {
 
         // 2. Idempotently reverse coupon usage
         if (order.discountCode) {
-          await couponRepository.decrementUsage(order.discountCode);
+          await couponRepository.releaseRedemption(order.discountCode, order.id);
         }
 
         const isPaid = order.paymentStatus === 'PAID';

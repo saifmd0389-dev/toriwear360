@@ -240,6 +240,27 @@ export const INITIAL_CUSTOMERS: CustomerProfile[] = [];
 
 export const INITIAL_COUPONS: Coupon[] = [
   {
+    id: 'coup-1',
+    code: 'TORI100',
+    discountType: 'PERCENTAGE',
+    value: 100,
+    minCartValue: 999,
+    maxDiscount: 2500,
+    usageLimit: 100,
+    usageCount: 0,
+    perCustomerLimit: 1,
+    applicableFranchises: ['ALL'],
+    eligibleCategories: [],
+    eligibleProductIds: [],
+    excludeShipping: true,
+    excludeTax: true,
+    startDate: '2026-01-01',
+    endDate: '2026-12-31',
+    isActive: false,
+    description:
+      '100% Early Access launch benefit on eligible merchandise (up to ₹2,500 cap, min order ₹999, 1 per customer, excludes shipping & tax). Admin activation required.',
+  },
+  {
     id: 'coup-01',
     code: 'DROP2026',
     discountType: 'PERCENTAGE',

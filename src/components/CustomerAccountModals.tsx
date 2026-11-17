@@ -30,6 +30,7 @@ import { OrderDetails, CartItem } from '../types';
 import { PRODUCTS } from '../data/products';
 import { downloadInvoiceFile, printInvoiceDirectly } from '../utils/invoiceGenerator';
 import { ReturnExchangeModal, CustomerReturnRequest } from './ReturnExchangeModal';
+import { apiClient } from '../services/apiClient';
 
 export interface CustomerAccountModalsProps {
   onApplyCoupon?: (code: string) => void;
@@ -102,6 +103,50 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
   // Gift Card Redeem
   const [giftCardCode, setGiftCardCode] = useState('');
   const [giftCardMsg, setGiftCardMsg] = useState('');
+
+  // Server-checked coupons list when COUPONS modal is open
+  const [serverCoupons, setServerCoupons] = useState<Array<{
+    code: string;
+    title: string;
+    desc: string;
+    active: boolean;
+  }> | null>(null);
+
+  React.useEffect(() => {
+    if (activeAccountModal !== 'COUPONS') return;
+    let active = true;
+    const candidates = ['TORI100', 'DROP2026', 'TWIN10'];
+    Promise.all(
+      candidates.map(async (code) => {
+        const res = await apiClient.validateCoupon(code, 2500, {
+          customerId: customer?.id,
+          customerEmail: customer?.email,
+          customerPhone: customer?.phone,
+        });
+        if (!res.success) {
+          return null;
+        }
+        const label =
+          res.discountType === 'PERCENTAGE'
+            ? `${res.value}% Off${res.maxDiscount ? ` (Up to ₹${res.maxDiscount})` : ''}`
+            : `₹${res.value} Off`;
+        return {
+          code: res.code || code,
+          title: label,
+          desc:
+            res.description ||
+            `Valid on eligible merchandise${res.minOrderValue ? ` above ₹${res.minOrderValue}` : ''}`,
+          active: true,
+        };
+      })
+    ).then((results) => {
+      if (!active) return;
+      setServerCoupons(results.filter((r): r is NonNullable<typeof r> => Boolean(r)));
+    });
+    return () => {
+      active = false;
+    };
+  }, [activeAccountModal, customer?.id, customer?.email, customer?.phone]);
 
   // Sync edit profile form fields when customer changes
   React.useEffect(() => {
@@ -1123,41 +1168,47 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
              ======================================================== */}
           {activeAccountModal === 'COUPONS' && (
             <div className="space-y-3">
-              {[
-                { code: 'TORI100', title: '₹100 Instant Discount', desc: 'Valid on first streetwear drop order above ₹999' },
-                { code: 'DROP2026', title: '15% Off Cart', desc: 'Flat 15% discount on all original chapters & kids sets' },
-                { code: 'ANIME10', title: '10% Squad Discount', desc: 'Extra 10% off for verified anime community members' },
-              ].map((c) => (
-                <div key={c.code} className="p-3.5 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="px-2 py-0.5 rounded bg-red-600/20 text-[#FF2028] font-bold border border-red-500/30">
-                        {c.code}
-                      </span>
-                      <span className="text-white font-bold">{c.title}</span>
-                    </div>
-                    <p className="text-[11px] text-neutral-400 mt-1">{c.desc}</p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => handleCopyCoupon(c.code)}
-                    className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-white font-mono text-xs flex items-center gap-1 cursor-pointer shrink-0 transition"
-                  >
-                    {copiedCode === c.code ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        <span className="text-emerald-400">Copied!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3.5 h-3.5" />
-                        <span>Copy</span>
-                      </>
-                    )}
-                  </button>
+              {serverCoupons === null ? (
+                <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 text-xs text-neutral-400 font-mono">
+                  Checking active drop coupons...
                 </div>
-              ))}
+              ) : serverCoupons.length === 0 ? (
+                <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 text-xs text-neutral-400 font-mono">
+                  No active promo codes are currently unlocked for your account. Watch for drop launch announcements!
+                </div>
+              ) : (
+                serverCoupons.map((c) => (
+                  <div key={c.code} className="p-3.5 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 rounded bg-red-600/20 text-[#FF2028] font-bold border border-red-500/30">
+                          {c.code}
+                        </span>
+                        <span className="text-white font-bold">{c.title}</span>
+                      </div>
+                      <p className="text-[11px] text-neutral-400 mt-1">{c.desc}</p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleCopyCoupon(c.code)}
+                      className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-white font-mono text-xs flex items-center gap-1 cursor-pointer shrink-0 transition"
+                    >
+                      {copiedCode === c.code ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="text-emerald-400">Copied!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Copy</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
           )}
 

@@ -8,6 +8,7 @@ import {
   normalizeSocialUrl,
 } from '../utils/socialLinks';
 import { ShimmerImage, ToriFeedGridSkeleton } from './StorefrontSkeletons';
+import { apiClient } from '../services/apiClient';
 
 const FALLBACK_FEED_POSTS = [
   {
@@ -221,18 +222,50 @@ export const ToriFeed: React.FC<{ isLoading?: boolean }> = ({ isLoading = false 
 
 export const NewsletterSection: React.FC = () => {
   const [email, setEmail] = useState('');
-  const [submitted, setSubmitted] = useState(false);
+  const [emailConsent, setEmailConsent] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [confirmedData, setConfirmedData] = useState<{
+    message: string;
+    couponCode?: string | null;
+  } | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (email.trim()) {
-      setSubmitted(true);
+    setErrorMsg(null);
+    if (!email.trim()) {
+      setErrorMsg('Please enter your email address.');
+      return;
+    }
+    if (!emailConsent) {
+      setErrorMsg('Please check the email notification consent box before joining.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const res = await apiClient.subscribeNewsletter({
+        email: email.trim(),
+        emailConsent,
+        registrationSource: 'NEWSLETTER_SIGNUP',
+      });
+      if (!res.success) {
+        setErrorMsg(res.error || 'Could not complete newsletter registration right now.');
+        return;
+      }
+      setConfirmedData({
+        message: res.message || 'You are now registered on the TORIWEAR Access List.',
+        couponCode: res.coupon?.active && res.coupon?.eligible ? res.coupon.code : null,
+      });
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const handleCopyCode = () => {
-    navigator.clipboard?.writeText('TORI100');
+    if (!confirmedData?.couponCode) return;
+    navigator.clipboard?.writeText(confirmedData.couponCode);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -256,55 +289,77 @@ export const NewsletterSection: React.FC = () => {
         </p>
 
         <p className="mt-2 text-sm text-neutral-400 max-w-xl mx-auto font-sans leading-relaxed">
-          Sign up to receive private drop alerts, lore chapters, limited collector cards, and ₹100 off your very first order.
+          Sign up to receive private drop alerts, lore chapters, limited collector cards, and eligible early-access member benefits.
         </p>
 
-        {submitted ? (
+        {confirmedData ? (
           <div className="mt-8 p-6 rounded-2xl bg-neutral-900/90 border border-emerald-500/40 max-w-lg mx-auto animate-in fade-in">
             <div className="flex items-center justify-center gap-2 text-emerald-400 font-mono font-bold text-sm mb-2">
               <Check className="w-5 h-5" />
               <span>YOU ARE NOW ON THE ACCESS LIST</span>
             </div>
             <p className="text-xs text-neutral-300 font-sans">
-              Use your welcome code at checkout for ₹100 off any order above ₹999:
+              {confirmedData.message}
             </p>
-            <div className="mt-3 flex items-center justify-center gap-3">
-              <span className="font-mono text-xl font-black bg-black/60 px-4 py-1.5 rounded-lg border border-neutral-700 text-[#FF2028] tracking-widest">
-                TORI100
-              </span>
-              <button
-                onClick={handleCopyCode}
-                className="p-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-white transition text-xs font-mono flex items-center gap-1"
-              >
-                {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                <span>{copied ? 'COPIED' : 'COPY'}</span>
-              </button>
-            </div>
+            {confirmedData.couponCode && (
+              <div className="mt-3 flex items-center justify-center gap-3">
+                <span className="font-mono text-xl font-black bg-black/60 px-4 py-1.5 rounded-lg border border-neutral-700 text-[#FF2028] tracking-widest">
+                  {confirmedData.couponCode}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCopyCode}
+                  className="p-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-white transition text-xs font-mono flex items-center gap-1 cursor-pointer"
+                >
+                  {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                  <span>{copied ? 'COPIED' : 'COPY'}</span>
+                </button>
+              </div>
+            )}
           </div>
         ) : (
-          <form onSubmit={handleSubmit} className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3 max-w-lg mx-auto">
-            <input
-              type="email"
-              required
-              placeholder="Enter your email address..."
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full sm:flex-grow px-4 py-3.5 rounded-xl bg-neutral-900 border border-neutral-800 text-white placeholder-neutral-500 text-sm focus:outline-none focus:border-[#FF2028] transition"
-            />
-            <button
-              type="submit"
-              className="w-full sm:w-auto px-6 py-3.5 bg-[#FF2028] hover:bg-[#e02641] text-white font-mono text-xs font-bold uppercase tracking-wider rounded-xl transition shadow-lg shadow-[#FF2028]/25 active:scale-95 flex items-center justify-center gap-2 whitespace-nowrap"
-            >
-              <span>JOIN ACCESS LIST</span>
-              <Send className="w-4 h-4" />
-            </button>
+          <form onSubmit={handleSubmit} className="mt-8 max-w-lg mx-auto space-y-3">
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+              <input
+                type="email"
+                required
+                placeholder="Enter your email address..."
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                disabled={isSubmitting}
+                className="w-full sm:flex-grow px-4 py-3.5 rounded-xl bg-neutral-900 border border-neutral-800 text-white placeholder-neutral-500 text-sm focus:outline-none focus:border-[#FF2028] transition disabled:opacity-60"
+              />
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="w-full sm:w-auto px-6 py-3.5 bg-[#FF2028] hover:bg-[#e02641] text-white font-mono text-xs font-bold uppercase tracking-wider rounded-xl transition shadow-lg shadow-[#FF2028]/25 active:scale-95 flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer disabled:opacity-60"
+              >
+                <span>{isSubmitting ? 'SUBSCRIBING...' : 'JOIN ACCESS LIST'}</span>
+                <Send className="w-4 h-4" />
+              </button>
+            </div>
+            <label className="flex items-center justify-center gap-2 text-xs font-mono text-neutral-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={emailConsent}
+                onChange={(e) => setEmailConsent(e.target.checked)}
+                disabled={isSubmitting}
+                className="accent-[#FF2028] cursor-pointer"
+              />
+              <span>I consent to receive TORIWEAR drop alerts and launch emails.</span>
+            </label>
+            {errorMsg && (
+              <div className="text-xs font-mono text-red-400 bg-red-950/40 border border-red-500/30 rounded-xl px-3 py-2">
+                {errorMsg}
+              </div>
+            )}
           </form>
         )}
 
         <div className="mt-6 flex flex-wrap items-center justify-center gap-4 text-xs font-mono text-neutral-400">
           <span>✓ NO SPAM GUARANTEE</span>
           <span>•</span>
-          <span>✓ INSTANT ₹100 COUPON</span>
+          <span>✓ EARLY DROP ACCESS</span>
           <span>•</span>
           <span>✓ UNSUBSCRIBE ANYTIME</span>
         </div>

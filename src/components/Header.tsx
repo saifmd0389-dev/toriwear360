@@ -257,7 +257,7 @@ export const Header: React.FC<HeaderProps> = ({
               </span>
               <span className="hidden sm:inline text-neutral-600">|</span>
               <span className="inline-flex items-center gap-1.5 text-neutral-200">
-                Code <span className="text-red-500 font-bold">TORI100</span> for ₹100 off your first drop
+                Limited Drops <span className="text-red-500 font-bold">240+ GSM</span> Archival Streetwear
               </span>
               <span className="hidden md:inline text-neutral-600">|</span>
               <span className="hidden md:inline-flex text-neutral-400">

@@ -1017,23 +1017,27 @@ enum DiscountType {
 }
 
 model Coupon {
-  id            String         @id @default(cuid())
-  code          String         @unique
-  description   String?        @db.Text
-  discountType  DiscountType   @default(PERCENTAGE)
-  value         Float
-  minOrderValue Float          @default(0.0)
-  maxDiscount   Float?
-  usageLimit    Int?
-  usageCount    Int            @default(0)
-  perUserLimit  Int            @default(1)
-  isActive      Boolean        @default(true)
-  startsAt      DateTime       @default(now())
-  expiresAt     DateTime?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  id                 String         @id @default(cuid())
+  code               String         @unique
+  description        String?        @db.Text
+  discountType       DiscountType   @default(PERCENTAGE)
+  value              Float
+  minOrderValue      Float          @default(0.0)
+  maxDiscount        Float?
+  usageLimit         Int?
+  usageCount         Int            @default(0)
+  perUserLimit       Int            @default(1)
+  eligibleCategories String?        @db.Text
+  eligibleProductIds String?        @db.Text
+  excludeShipping    Boolean        @default(true)
+  excludeTax         Boolean        @default(true)
+  isActive           Boolean        @default(true)
+  startsAt           DateTime       @default(now())
+  expiresAt          DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 
-  usages        CouponUsage[]
+  usages             CouponUsage[]
 
   @@index([code])
   @@map("coupons")
@@ -1044,6 +1048,8 @@ model CouponUsage {
   couponId       String
   orderId        String
   customerId     String?
+  customerEmail  String?
+  customerPhone  String?
   discountAmount Float
   usedAt         DateTime  @default(now())
 
@@ -1053,6 +1059,9 @@ model CouponUsage {
 
   @@index([couponId])
   @@index([orderId])
+  @@index([couponId, customerId])
+  @@index([couponId, customerEmail])
+  @@index([couponId, customerPhone])
   @@map("coupon_usage")
 }
 
@@ -1436,3 +1445,139 @@ model PartnerAccount {
   @@index([partnerId])
   @@map("partner_accounts")
 }
+
+// ============================================================================
+// 14. EARLY ACCESS REGISTRATION & NOTIFICATION DISPATCH
+// ============================================================================
+
+enum EarlyAccessStatus {
+  ACTIVE
+  UNSUBSCRIBED
+  BOUNCED
+  BLOCKED
+}
+
+enum NotificationChannel {
+  EMAIL
+  WHATSAPP
+  BOTH
+}
+
+enum DeliveryChannel {
+  EMAIL
+  WHATSAPP
+}
+
+enum CampaignStatus {
+  DRAFT
+  CONFIRMED
+  SENDING
+  COMPLETED
+  PARTIAL_FAILURE
+  CANCELLED
+}
+
+enum DeliveryStatus {
+  PENDING
+  QUEUED
+  SENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  CANCELLED
+}
+
+model EarlyAccessSubscriber {
+  id                   String                 @id @default(cuid())
+  email                String?                @unique
+  whatsappNumber       String?                @unique
+  preferredChannel     NotificationChannel    @default(EMAIL)
+  emailConsent         Boolean                @default(false)
+  emailConsentAt       DateTime?
+  whatsappConsent      Boolean                @default(false)
+  whatsappConsentAt    DateTime?
+  registrationSource   String                 @default("MAINTENANCE_SCREEN")
+  status               EarlyAccessStatus      @default(ACTIVE)
+  unsubscribeTokenHash String?                @unique
+  unsubscribedAt       DateTime?
+  unsubscribeReason    String?                @db.Text
+  couponCode           String?
+  couponEligible       Boolean                @default(false)
+  couponRedeemedAt     DateTime?
+  lastNotifiedAt       DateTime?
+  metadataJson         String?                @db.Text
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+
+  deliveries           NotificationDelivery[]
+
+  @@index([status])
+  @@index([preferredChannel])
+  @@index([createdAt])
+  @@map("early_access_subscribers")
+}
+
+model NotificationCampaign {
+  id                    String                 @id @default(cuid())
+  name                  String
+  campaignType          String                 @default("LAUNCH_ANNOUNCEMENT")
+  subject               String?
+  emailHtml             String?                @db.LongText
+  emailText             String?                @db.Text
+  whatsappTemplateName  String?
+  whatsappTemplateLang  String?
+  whatsappVariablesJson String?                @db.Text
+  channels              NotificationChannel    @default(BOTH)
+  status                CampaignStatus         @default(DRAFT)
+  recipientCount        Int                    @default(0)
+  sentCount             Int                    @default(0)
+  deliveredCount        Int                    @default(0)
+  failedCount           Int                    @default(0)
+  createdByUserId       String?
+  confirmedByUserId     String?
+  confirmedAt           DateTime?
+  startedAt             DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  deliveries            NotificationDelivery[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("notification_campaigns")
+}
+
+model NotificationDelivery {
+  id                   String                @id @default(cuid())
+  subscriberId         String
+  campaignId           String?
+  eventType            String                @default("LAUNCH_ANNOUNCEMENT")
+  channel              DeliveryChannel
+  recipientMask        String
+  providerName         String
+  providerMessageId    String?
+  idempotencyKey       String                @unique
+  status               DeliveryStatus        @default(PENDING)
+  attemptCount         Int                   @default(0)
+  lastAttemptAt        DateTime?
+  sentAt               DateTime?
+  deliveredAt          DateTime?
+  readAt               DateTime?
+  failureReason        String?               @db.Text
+  providerResponseJson String?               @db.Text
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+
+  subscriber           EarlyAccessSubscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  campaign             NotificationCampaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+
+  @@unique([campaignId, subscriberId, channel])
+  @@index([providerMessageId])
+  @@index([status])
+  @@index([subscriberId])
+  @@index([campaignId])
+  @@map("notification_deliveries")
+}
+

@@ -85,6 +85,7 @@ export type AdminView =
   | 'CUSTOMERS'
   | 'PAYMENTS'
   | 'MARKETING'
+  | 'EARLY_ACCESS'
   | 'CATALOG'
   | 'WEBSITE'
   | 'SHIPPING'
@@ -186,7 +187,8 @@ interface AdminDataContextType {
   cancelOrder: (orderId: string, reason: string) => void;
   initiateRefund: (orderId: string, amount: number, reason: string) => void;
 
-  addCoupon: (coupon: Omit<Coupon, 'id' | 'usageCount'>) => void;
+  addCoupon: (coupon: Omit<Coupon, 'id' | 'usageCount'>) => Promise<void> | void;
+  updateCoupon: (id: string, updates: Partial<Coupon>) => Promise<boolean>;
   toggleCoupon: (id: string) => void;
   deleteCoupon: (id: string) => void;
 
@@ -841,14 +843,22 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           const mapped: Coupon[] = res.data.map((c: any) => ({
             id: c.id,
             code: c.code,
-            discountType: c.discountType,
+            discountType: c.discountType === 'PERCENTAGE' ? 'PERCENTAGE' : (c.discountType === 'FREE_SHIPPING' ? 'FREE_SHIPPING' : 'FIXED'),
             value: Number(c.value),
+            minCartValue: Number(c.minOrderValue || c.minCartValue || 0),
             minOrderValue: Number(c.minOrderValue || 0),
-            maxDiscount: c.maxDiscount ? Number(c.maxDiscount) : undefined,
-            usageLimit: c.usageLimit ? Number(c.usageLimit) : undefined,
+            maxDiscount: c.maxDiscount != null ? Number(c.maxDiscount) : undefined,
+            usageLimit: c.usageLimit != null ? Number(c.usageLimit) : 1000,
             usageCount: Number(c.usageCount || 0),
-            startDate: c.startDate ? new Date(c.startDate).toISOString().split('T')[0] : '2026-01-01',
-            expiryDate: c.expiryDate ? new Date(c.expiryDate).toISOString().split('T')[0] : '2026-12-31',
+            perCustomerLimit: Number(c.perUserLimit || c.perCustomerLimit || 1),
+            applicableFranchises: Array.isArray(c.applicableFranchises) ? c.applicableFranchises : ['ALL'],
+            eligibleCategories: Array.isArray(c.eligibleCategories) ? c.eligibleCategories : [],
+            eligibleProductIds: Array.isArray(c.eligibleProductIds) ? c.eligibleProductIds : [],
+            excludeShipping: c.excludeShipping !== false,
+            excludeTax: c.excludeTax !== false,
+            startDate: c.startDate ? (new Date(c.startDate).toISOString().split('T')[0] || '2026-01-01') : '2026-01-01',
+            endDate: c.expiryDate ? (new Date(c.expiryDate).toISOString().split('T')[0] || '2026-12-31') : '2026-12-31',
+            expiryDate: c.expiryDate ? (new Date(c.expiryDate).toISOString().split('T')[0] || '2026-12-31') : '2026-12-31',
             isActive: c.isActive !== false,
             description: c.description || '',
           }));
@@ -2083,7 +2093,12 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify(couponData),
+        body: JSON.stringify({
+          ...couponData,
+          minOrderValue: couponData.minCartValue ?? couponData.minOrderValue ?? 0,
+          perUserLimit: couponData.perCustomerLimit ?? 1,
+          expiryDate: couponData.endDate || couponData.expiryDate,
+        }),
       });
       const json = await res.json();
       if (json.success && json.data) {
@@ -2094,11 +2109,16 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           discountType: c.discountType === 'PERCENTAGE' ? 'PERCENTAGE' : (c.discountType === 'FREE_SHIPPING' ? 'FREE_SHIPPING' : 'FIXED'),
           value: Number(c.value),
           minCartValue: Number(c.minOrderValue || c.minCartValue || 0),
-          maxDiscount: c.maxDiscount ? Number(c.maxDiscount) : undefined,
+          minOrderValue: Number(c.minOrderValue || 0),
+          maxDiscount: c.maxDiscount != null ? Number(c.maxDiscount) : undefined,
           usageLimit: Number(c.usageLimit || 1000),
           usageCount: Number(c.usageCount || 0),
-          perCustomerLimit: Number(c.perCustomerLimit || 1),
+          perCustomerLimit: Number(c.perUserLimit || c.perCustomerLimit || 1),
           applicableFranchises: Array.isArray(c.applicableFranchises) ? c.applicableFranchises : ['ALL'],
+          eligibleCategories: Array.isArray(c.eligibleCategories) ? c.eligibleCategories : [],
+          eligibleProductIds: Array.isArray(c.eligibleProductIds) ? c.eligibleProductIds : [],
+          excludeShipping: c.excludeShipping !== false,
+          excludeTax: c.excludeTax !== false,
           startDate: c.startDate ? (new Date(c.startDate).toISOString().split('T')[0] || '2026-01-01') : '2026-01-01',
           endDate: c.expiryDate ? (new Date(c.expiryDate).toISOString().split('T')[0] || '2026-12-31') : (c.endDate || '2026-12-31'),
           isActive: c.isActive !== false,
@@ -2114,6 +2134,61 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     } catch (err: any) {
       console.warn('[AdminData] Error saving coupon to server:', err);
       showToast('Error communicating with backend.');
+    }
+  };
+
+  const updateCoupon = async (id: string, updates: Partial<Coupon>): Promise<boolean> => {
+    const token = getSessionToken();
+    try {
+      const payload: Record<string, any> = { ...updates };
+      if (updates.minCartValue !== undefined) payload.minOrderValue = Number(updates.minCartValue);
+      if (updates.perCustomerLimit !== undefined) payload.perUserLimit = Number(updates.perCustomerLimit);
+      if (updates.endDate !== undefined) payload.expiryDate = updates.endDate;
+      if (updates.discountType === 'FIXED') payload.discountType = 'FLAT';
+
+      const res = await fetch(`/api/v1/admin/coupons/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (json.success && json.data) {
+        const c = json.data;
+        const updatedCoupon: Coupon = {
+          id: c.id,
+          code: c.code,
+          discountType: c.discountType === 'PERCENTAGE' ? 'PERCENTAGE' : (c.discountType === 'FREE_SHIPPING' ? 'FREE_SHIPPING' : 'FIXED'),
+          value: Number(c.value),
+          minCartValue: Number(c.minOrderValue || 0),
+          minOrderValue: Number(c.minOrderValue || 0),
+          maxDiscount: c.maxDiscount != null ? Number(c.maxDiscount) : undefined,
+          usageLimit: Number(c.usageLimit || 1000),
+          usageCount: Number(c.usageCount || 0),
+          perCustomerLimit: Number(c.perUserLimit || 1),
+          applicableFranchises: ['ALL'],
+          eligibleCategories: Array.isArray(c.eligibleCategories) ? c.eligibleCategories : [],
+          eligibleProductIds: Array.isArray(c.eligibleProductIds) ? c.eligibleProductIds : [],
+          excludeShipping: c.excludeShipping !== false,
+          excludeTax: c.excludeTax !== false,
+          startDate: c.startDate ? (new Date(c.startDate).toISOString().split('T')[0] || '2026-01-01') : '2026-01-01',
+          endDate: c.expiryDate ? (new Date(c.expiryDate).toISOString().split('T')[0] || '2026-12-31') : '2026-12-31',
+          isActive: c.isActive !== false,
+          description: c.description || '',
+        };
+        setCoupons(prev => prev.map(item => item.id === id ? updatedCoupon : item));
+        logAction('COUPON_CREATED', `Coupon Code ${updatedCoupon.code}`, `Updated coupon settings (active=${updatedCoupon.isActive}, value=${updatedCoupon.value})`);
+        showToast(`Coupon "${updatedCoupon.code}" updated.`);
+        return true;
+      }
+      showToast(json.error || 'Failed to update coupon on server.');
+      return false;
+    } catch (err: any) {
+      console.warn('[AdminData] Error updating coupon:', err);
+      showToast('Error communicating with backend.');
+      return false;
     }
   };
 
@@ -2580,6 +2655,7 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         initiateRefund,
 
         addCoupon,
+        updateCoupon,
         toggleCoupon,
         deleteCoupon,
 

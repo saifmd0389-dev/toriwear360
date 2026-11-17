@@ -1,0 +1,120 @@
+[
+  {
+    "id": "appr-001",
+    "type": "PRICE_CHANGE",
+    "title": "Price Adjustment: Neo-Tokyo Streetwear Oversized Hoodie",
+    "description": "Proposed retail price reduction from ₹2,499 to ₹2,199 to increase velocity ahead of summer campaign.",
+    "amount": 2199,
+    "dataPayload": {
+      "productId": "prod-hoodie-01",
+      "productName": "Neo-Tokyo Streetwear Oversized Hoodie",
+      "oldPrice": 2499,
+      "newPrice": 2199
+    },
+    "status": "SUBMITTED",
+    "submittedBy": {
+      "userId": "usr-priya",
+      "name": "Priya Patel",
+      "role": "STAFF"
+    },
+    "submittedAt": "2026-11-14T12:41:41.297Z"
+  },
+  {
+    "id": "appr-002",
+    "type": "EXPENSE",
+    "title": "Screen Printing High-Density Inks Bulk Restock",
+    "description": "Order of 40kg Japanese plastisol inks (Matte Black, Crimson Red, Cyber White) for Tirupur facility.",
+    "amount": 34500,
+    "dataPayload": {
+      "vendor": "Apex Inks & Textiles Ltd.",
+      "facility": "Tirupur Hub",
+      "category": "Manufacturing Supplies"
+    },
+    "status": "APPROVED",
+    "submittedBy": {
+      "userId": "usr-simranjeet",
+      "name": "Simranjeet Singh",
+      "role": "PARTNER"
+    },
+    "submittedAt": "2026-11-13T16:41:41.297Z",
+    "reviewedBy": {
+      "userId": "usr-saif",
+      "name": "Mohammed Saif",
+      "role": "SUPER_ADMIN"
+    },
+    "reviewedAt": "2026-11-13T20:41:41.297Z",
+    "reviewComment": "Approved. Essential manufacturing supplies for upcoming drop."
+  },
+  {
+    "id": "appr-003",
+    "type": "REFUND",
+    "title": "Customer Refund: Order #TORI-10291 (Fabric Defect Claim)",
+    "description": "Customer requested 100% refund due to reported print misregistration on Shadow Monarch Tee.",
+    "amount": 1499,
+    "dataPayload": {
+      "orderId": "TORI-10291",
+      "customerName": "Aditya Sharma",
+      "method": "Razorpay UPI Return"
+    },
+    "status": "APPROVED",
+    "submittedBy": {
+      "userId": "usr-ananya",
+      "name": "Ananya Sharma",
+      "role": "STAFF"
+    },
+    "submittedAt": "2026-11-14T00:41:41.297Z",
+    "reviewedBy": {
+      "userId": "usr-saif",
+      "name": "Mohammed Saif",
+      "role": "SUPER_ADMIN"
+    },
+    "reviewedAt": "2026-11-14T04:41:41.297Z",
+    "reviewComment": "QC confirmed fabric defect. Process full refund immediately."
+  },
+  {
+    "id": "appr-004",
+    "type": "INVENTORY_ADJUSTMENT",
+    "title": "Inventory Shrinkage Write-off: Tirupur Wash Testing",
+    "description": "Write-off 12 units of Graphic Tee blank prototypes damaged during high-temperature shrinkage stress tests.",
+    "amount": 4200,
+    "dataPayload": {
+      "sku": "TORI-BLK-TEE-RAW",
+      "quantity": 12,
+      "unitCost": 350,
+      "reason": "QC Wash Stress Failure"
+    },
+    "status": "SUBMITTED",
+    "submittedBy": {
+      "userId": "usr-rahul",
+      "name": "Rahul Varma",
+      "role": "STAFF"
+    },
+    "submittedAt": "2026-11-14T14:41:41.297Z"
+  },
+  {
+    "id": "appr-005",
+    "type": "MARKETING_EXPENDITURE",
+    "title": "Instagram & Meta Reels Ad Spend (Batch 1)",
+    "description": "Targeted campaign budget for Cyber Ronin collection launch video across Mumbai & Bengaluru metro circles.",
+    "amount": 15000,
+    "dataPayload": {
+      "platform": "Meta Ads Manager",
+      "campaign": "Cyber Ronin V1 Drop",
+      "durationDays": 7
+    },
+    "status": "APPROVED",
+    "submittedBy": {
+      "userId": "usr-priya",
+      "name": "Priya Patel",
+      "role": "STAFF"
+    },
+    "submittedAt": "2026-11-13T04:41:41.297Z",
+    "reviewedBy": {
+      "userId": "usr-nagesh",
+      "name": "Nagesh M",
+      "role": "PARTNER"
+    },
+    "reviewedAt": "2026-11-13T10:41:41.297Z",
+    "reviewComment": "Approved. Growth metrics look sound."
+  }
+]

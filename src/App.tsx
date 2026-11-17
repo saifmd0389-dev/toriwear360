@@ -297,8 +297,8 @@ export default function App() {
         }
       })
       .catch((err) => {
-        console.error('[StorefrontCatalog] ❌ Error loading authoritative products:', err);
-        setStorefrontCatalog(getStorefrontCatalog(PRODUCTS));
+        console.warn('[StorefrontCatalog] ⚠️ Transient error loading authoritative products:', err?.message || err);
+        setStorefrontCatalog((prev) => (prev.length > 0 ? prev : getStorefrontCatalog(PRODUCTS)));
       })
       .finally(() => {
         hasLoadedCatalogRef.current = true;
@@ -450,7 +450,16 @@ export default function App() {
   });
 
   const [appliedCoupon, setAppliedCoupon] = useState<string | null>(null);
-  const [appliedCouponDetail, setAppliedCouponDetail] = useState<{ discountType: string; value: number; maxDiscount?: number } | null>(null);
+  const [appliedCouponDetail, setAppliedCouponDetail] = useState<{
+    discountType: string;
+    value: number;
+    maxDiscount?: number;
+    discountAmount?: number;
+    eligibleSubtotal?: number;
+    excludeShipping?: boolean;
+    excludeTax?: boolean;
+    description?: string;
+  } | null>(null);
 
   // Sync state with localStorage
   useEffect(() => {
@@ -742,68 +751,52 @@ export default function App() {
     showToast('Item removed from your bag.');
   };
 
-  const handleApplyCoupon = (code: string): boolean => {
+  const handleApplyCoupon = async (code: string): Promise<{ valid: boolean; reason?: string }> => {
     const clean = code.trim().toUpperCase();
-    if (!clean) return false;
-
-    const standardCodes = ['TORI100', 'ANIME100', 'TORI10', 'DROP2026', 'TWIN10', 'ANIME10'];
-    if (standardCodes.includes(clean)) {
-      setAppliedCoupon(clean);
-      setAppliedCouponDetail(null);
-      showToast(`Promo code "${clean}" applied!`);
-      apiClient.validateCoupon(clean, subtotal).then(res => {
-        if (res.success && res.code) {
-          setAppliedCouponDetail({
-            discountType: res.discountType,
-            value: res.value,
-            maxDiscount: res.maxDiscount,
-          });
-        }
-      }).catch(() => {});
-      return true;
+    if (!clean) {
+      return { valid: false, reason: 'Please enter a coupon code.' };
     }
 
-    // Try local storage cache
     try {
-      const stored = localStorage.getItem('tori_admin_coupons');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) {
-          const match = parsed.find((c: any) => c.code?.toUpperCase() === clean && c.isActive !== false);
-          if (match) {
-            setAppliedCoupon(clean);
-            setAppliedCouponDetail({
-              discountType: match.discountType,
-              value: match.value,
-              maxDiscount: match.maxDiscount,
-            });
-            showToast(`Promo code "${clean}" applied!`);
-            return true;
-          }
-        }
-      }
-    } catch {}
+      const res = await apiClient.validateCoupon(clean, subtotal, {
+        items: (cartItems || [])
+          .filter((it) => it?.product?.id)
+          .map((it) => ({
+            productId: it.product.id,
+            quantity: Number(it.quantity || 1),
+            unitPrice: typeof it.product.price === 'number' ? it.product.price : 0,
+          })),
+        customerId: customer?.id,
+        customerEmail: customer?.email,
+        customerPhone: customer?.phone,
+      });
 
-    // Server-authoritative coupon validation
-    apiClient.validateCoupon(clean, subtotal).then(res => {
       if (res.success && res.code) {
         setAppliedCoupon(res.code);
         setAppliedCouponDetail({
           discountType: res.discountType,
-          value: res.value,
-          maxDiscount: res.maxDiscount,
+          value: Number(res.value || 0),
+          maxDiscount: res.maxDiscount !== undefined ? Number(res.maxDiscount) : undefined,
+          discountAmount: res.discountAmount !== undefined ? Number(res.discountAmount) : undefined,
+          eligibleSubtotal: res.eligibleSubtotal !== undefined ? Number(res.eligibleSubtotal) : undefined,
+          excludeShipping: res.excludeShipping !== false,
+          excludeTax: res.excludeTax !== false,
+          description: res.description,
         });
         showToast(`Promo code "${res.code}" applied!`);
-      } else {
-        showToast(res.error || `Invalid promo code "${clean}"`);
-        setAppliedCoupon(null);
-        setAppliedCouponDetail(null);
+        return { valid: true };
       }
-    }).catch(() => {
-      showToast(`Invalid promo code "${clean}"`);
-    });
 
-    return true;
+      const reason = res.error || `Coupon "${clean}" is invalid or inactive.`;
+      setAppliedCoupon(null);
+      setAppliedCouponDetail(null);
+      showToast(reason);
+      return { valid: false, reason };
+    } catch {
+      const reason = `Unable to validate promo code "${clean}" right now.`;
+      showToast(reason);
+      return { valid: false, reason };
+    }
   };
 
   const handleRemoveCoupon = () => {
@@ -1187,39 +1180,72 @@ export default function App() {
   const standardFee = storeSettings?.standardShippingFee ?? 79;
 
   let discount = 0;
-  if (appliedCouponDetail && appliedCoupon) {
-    if (appliedCouponDetail.discountType === 'PERCENTAGE') {
+  if (appliedCouponDetail && appliedCoupon && subtotal > 0) {
+    if (typeof appliedCouponDetail.discountAmount === 'number') {
+      discount = Math.min(appliedCouponDetail.discountAmount, subtotal);
+    } else if (appliedCouponDetail.discountType === 'PERCENTAGE') {
       discount = Math.round(subtotal * (appliedCouponDetail.value / 100));
       if (appliedCouponDetail.maxDiscount) discount = Math.min(discount, appliedCouponDetail.maxDiscount);
+      discount = Math.min(discount, subtotal);
     } else {
-      discount = Math.min(appliedCouponDetail.value, subtotal);
+      discount = Math.min(appliedCouponDetail.value || 0, subtotal);
     }
-  } else if (appliedCoupon === 'TORI100' || appliedCoupon === 'ANIME100') {
-    discount = Math.min(100, subtotal);
-  } else if (appliedCoupon === 'TORI10' || appliedCoupon === 'TWIN10' || appliedCoupon === 'ANIME10') {
-    discount = Math.round(subtotal * 0.1);
-  } else if (appliedCoupon === 'DROP2026') {
-    discount = Math.round(subtotal * 0.15);
-  } else if (appliedCoupon) {
-    try {
-      const stored = localStorage.getItem('tori_admin_coupons');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        const match = parsed.find((c: any) => c.code?.toUpperCase() === appliedCoupon);
-        if (match) {
-          if (match.discountType === 'PERCENTAGE') {
-            discount = Math.round(subtotal * (match.value / 100));
-            if (match.maxDiscount) discount = Math.min(discount, match.maxDiscount);
-          } else {
-            discount = Math.min(match.value || 0, subtotal);
-          }
-        }
-      }
-    } catch {}
   }
 
+  useEffect(() => {
+    if (!appliedCoupon) return;
+    if (!cartItems || cartItems.length === 0) {
+      setAppliedCoupon(null);
+      setAppliedCouponDetail(null);
+      return;
+    }
+    let cancelled = false;
+    const currentSub = cartItems.reduce((sum, item) => {
+      const price = typeof item?.product?.price === 'number' ? item.product.price : 0;
+      const qty = typeof item?.quantity === 'number' && item.quantity > 0 ? item.quantity : 1;
+      return sum + price * qty;
+    }, 0);
+    apiClient
+      .validateCoupon(appliedCoupon, currentSub, {
+        items: cartItems
+          .filter((it) => it?.product?.id)
+          .map((it) => ({
+            productId: it.product.id,
+            quantity: Number(it.quantity || 1),
+            unitPrice: typeof it.product.price === 'number' ? it.product.price : 0,
+          })),
+        customerId: customer?.id,
+        customerEmail: customer?.email,
+        customerPhone: customer?.phone,
+      })
+      .then((res) => {
+        if (cancelled) return;
+        if (res.success && res.code) {
+          setAppliedCouponDetail({
+            discountType: res.discountType,
+            value: Number(res.value || 0),
+            maxDiscount: res.maxDiscount !== undefined ? Number(res.maxDiscount) : undefined,
+            discountAmount: res.discountAmount !== undefined ? Number(res.discountAmount) : undefined,
+            eligibleSubtotal: res.eligibleSubtotal !== undefined ? Number(res.eligibleSubtotal) : undefined,
+            excludeShipping: res.excludeShipping !== false,
+            excludeTax: res.excludeTax !== false,
+            description: res.description,
+          });
+        } else {
+          setAppliedCoupon(null);
+          setAppliedCouponDetail(null);
+          if (res.error) showToast(res.error);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [appliedCoupon, cartItems, customer?.id, customer?.email, customer?.phone]);
+
   const shipping = subtotal >= freeThreshold || subtotal === 0 ? 0 : standardFee;
-  const total = Math.max(0, subtotal - discount + shipping);
+  const total = Math.max(0, subtotal - discount) + shipping;
 
   // If Admin View is active, render full-fledged Admin Control Center
   if (isAdminView) {
@@ -1771,6 +1797,7 @@ export default function App() {
           setOrders((prev) => [order, ...prev]);
           setCartItems([]);
           setAppliedCoupon(null);
+          setAppliedCouponDetail(null);
           try {
             const adminOrdersRaw = localStorage.getItem('tori_admin_orders');
             const adminOrdersList = adminOrdersRaw ? JSON.parse(adminOrdersRaw) : [];

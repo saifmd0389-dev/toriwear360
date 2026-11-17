@@ -108,6 +108,82 @@ function getCustomerHeaders(orderKey?: string): Record<string, string> {
   return headers;
 }
 
+async function safeParseJson<T = any>(res: Response): Promise<{ okJson: boolean; data?: T; isHtml?: boolean; rawSnippet?: string }> {
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  const text = await res.text();
+  const trimmed = text.trim();
+  const looksHtml =
+    trimmed.startsWith('<!') ||
+    trimmed.startsWith('<html') ||
+    contentType.includes('text/html');
+
+  if (!trimmed) {
+    return { okJson: false, isHtml: looksHtml, rawSnippet: '' };
+  }
+
+  if (looksHtml) {
+    return { okJson: false, isHtml: true, rawSnippet: trimmed.slice(0, 120) };
+  }
+
+  try {
+    const parsed = JSON.parse(text) as T;
+    return { okJson: true, data: parsed };
+  } catch {
+    return { okJson: false, isHtml: false, rawSnippet: trimmed.slice(0, 120) };
+  }
+}
+
+async function fetchJsonWithRetry<T = any>(
+  url: string,
+  init: RequestInit = {},
+  retryDelaysMs: number[] = [450, 1100]
+): Promise<{ res: Response; json: T }> {
+  let lastError: Error | null = null;
+  const maxAttempts = retryDelaysMs.length + 1;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const headers = new Headers(init.headers || {});
+      if (!headers.has('Accept')) {
+        headers.set('Accept', 'application/json');
+      }
+
+      const res = await fetch(url, { ...init, headers });
+      const parsed = await safeParseJson<T>(res);
+
+      // Retry transient proxy/gateway/server-boot responses (502/503/504 or HTML interstitials)
+      if ((parsed.isHtml || !parsed.okJson || res.status === 502 || res.status === 503 || res.status === 504) && attempt < maxAttempts - 1) {
+        const delay = retryDelaysMs[attempt] ?? 600;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+
+      if (parsed.isHtml || !parsed.okJson) {
+        throw new Error(
+          parsed.isHtml
+            ? `Server returned an HTML splash/boot page instead of JSON (HTTP ${res.status})`
+            : `Server returned invalid JSON payload (HTTP ${res.status})`
+        );
+      }
+
+      if (!res.ok) {
+        throw new Error(`HTTP error ${res.status}`);
+      }
+
+      return { res, json: parsed.data as T };
+    } catch (err: any) {
+      lastError = err instanceof Error ? err : new Error(String(err || 'Network error'));
+      if (attempt < maxAttempts - 1) {
+        const delay = retryDelaysMs[attempt] ?? 600;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+    }
+  }
+
+  throw lastError || new Error('Failed to retrieve JSON from backend');
+}
+
 export const apiClient = {
   // ==========================================
   // Storefront Catalog APIs
@@ -136,50 +212,32 @@ export const apiClient = {
     });
 
     try {
-      const res = await fetch(endpointUrl);
-      if (!res.ok) {
-        console.error(`[apiClient.getProducts] ❌ Server returned HTTP ${res.status}:`, res.statusText);
-        throw new Error(`HTTP error ${res.status}`);
-      }
-
-      const json: ApiResponse<any[]> = await res.json();
+      const { json } = await fetchJsonWithRetry<ApiResponse<any[]>>(endpointUrl);
       const rawProducts = (json.data as Product[]) || [];
 
       console.log('[apiClient.getProducts] ✅ Backend response received:', {
         success: json.success,
         count: json.count ?? rawProducts.length,
         receivedCount: rawProducts.length,
-        items: rawProducts.map((p: any) => ({
-          id: p.id,
-          name: p.name,
-          catalogNumber: p.catalogNumber,
-          sku: p.sku,
-          status: p.status,
-          publishingStatus: p.publishingStatus,
-          department: p.department,
-          world: p.world,
-          imagesCount: Array.isArray(p.images) ? p.images.length : 0,
-          firstImage: Array.isArray(p.images) && p.images[0] ? p.images[0].substring(0, 60) + '...' : null,
-          inStock: p.inStock,
-          stock: p.stock,
-        })),
       });
 
       return rawProducts;
     } catch (err: any) {
-      console.error('[apiClient.getProducts] 💥 Network/Fetch failure retrieving products from backend:', {
+      console.warn('[apiClient.getProducts] ⚠️ Transient failure retrieving products from backend:', {
         error: err.message,
         endpoint: endpointUrl,
       });
-      return [];
+      throw err;
     }
   },
 
   async getProductByIdOrSlug(identifier: string): Promise<Product | null> {
     try {
-      const res = await fetch(`${API_BASE}/products/${encodeURIComponent(identifier)}`);
-      if (!res.ok) return null;
-      const json: ApiResponse<Product> = await res.json();
+      const { json } = await fetchJsonWithRetry<ApiResponse<Product>>(
+        `${API_BASE}/products/${encodeURIComponent(identifier)}`,
+        {},
+        [400]
+      );
       return json.data || null;
     } catch (err) {
       console.warn('[API Client] Error fetching product:', err);
@@ -189,9 +247,7 @@ export const apiClient = {
 
   async getFeaturedProducts(): Promise<Product[]> {
     try {
-      const res = await fetch(`${API_BASE}/products/featured`);
-      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-      const json: ApiResponse<Product[]> = await res.json();
+      const { json } = await fetchJsonWithRetry<ApiResponse<Product[]>>(`${API_BASE}/products/featured`, {}, [400]);
       return json.data || [];
     } catch {
       return [];
@@ -201,9 +257,7 @@ export const apiClient = {
   async getNewArrivals(department?: string): Promise<Product[]> {
     try {
       const q = department && department !== 'ALL' ? `?department=${department}` : '';
-      const res = await fetch(`${API_BASE}/products/new-arrivals${q}`);
-      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-      const json: ApiResponse<Product[]> = await res.json();
+      const { json } = await fetchJsonWithRetry<ApiResponse<Product[]>>(`${API_BASE}/products/new-arrivals${q}`, {}, [400]);
       return json.data || [];
     } catch {
       return [];
@@ -213,9 +267,7 @@ export const apiClient = {
   async getTopSelling(department?: string): Promise<Product[]> {
     try {
       const q = department && department !== 'ALL' ? `?department=${department}` : '';
-      const res = await fetch(`${API_BASE}/products/top-selling${q}`);
-      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-      const json: ApiResponse<Product[]> = await res.json();
+      const { json } = await fetchJsonWithRetry<ApiResponse<Product[]>>(`${API_BASE}/products/top-selling${q}`, {}, [400]);
       return json.data || [];
     } catch {
       return [];
@@ -225,9 +277,7 @@ export const apiClient = {
   async getCategories(department?: string): Promise<any[]> {
     try {
       const q = department && department !== 'ALL' ? `?department=${department}` : '';
-      const res = await fetch(`${API_BASE}/categories${q}`);
-      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-      const json: ApiResponse<any[]> = await res.json();
+      const { json } = await fetchJsonWithRetry<ApiResponse<any[]>>(`${API_BASE}/categories${q}`, {}, [400]);
       return json.data || [];
     } catch {
       return [];
@@ -236,9 +286,7 @@ export const apiClient = {
 
   async getCollections(): Promise<any[]> {
     try {
-      const res = await fetch(`${API_BASE}/collections`);
-      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-      const json: ApiResponse<any[]> = await res.json();
+      const { json } = await fetchJsonWithRetry<ApiResponse<any[]>>(`${API_BASE}/collections`, {}, [400]);
       return json.data || [];
     } catch {
       return [];
@@ -635,15 +683,281 @@ export const apiClient = {
     }
   },
 
-  async validateCoupon(code: string, subtotal?: number): Promise<ApiResponse<any>> {
+  async validateCoupon(
+    code: string,
+    subtotal?: number,
+    context?: {
+      items?: Array<{ productId: string; quantity: number; unitPrice?: number }>;
+      customerId?: string;
+      customerEmail?: string;
+      customerPhone?: string;
+    }
+  ): Promise<ApiResponse<any>> {
     try {
-      const url = subtotal !== undefined && subtotal > 0
-        ? `${API_BASE}/coupons/validate/${encodeURIComponent(code)}?subtotal=${encodeURIComponent(subtotal)}`
-        : `${API_BASE}/coupons/validate/${encodeURIComponent(code)}`;
-      const res = await fetch(url);
+      const res = await fetch(`${API_BASE}/coupons/validate`, {
+        method: 'POST',
+        headers: getCustomerHeaders(),
+        body: JSON.stringify({
+          code: String(code || '').trim().toUpperCase(),
+          subtotal: subtotal ?? 0,
+          items: context?.items,
+          customerId: context?.customerId,
+          customerEmail: context?.customerEmail,
+          customerPhone: context?.customerPhone,
+        }),
+      });
+      const parsed = await safeParseJson<any>(res);
+      const json = parsed.data;
+      if (!parsed.okJson || !json) {
+        return {
+          success: false,
+          valid: false,
+          error: 'Promo validation service temporarily unavailable. Please try again.',
+        };
+      }
+      if (json?.data) {
+        return {
+          success: Boolean(json.data.valid),
+          valid: Boolean(json.data.valid),
+          code: json.data.code,
+          discountType: json.data.discountType,
+          value: json.data.value,
+          maxDiscount: json.data.maxDiscount,
+          minOrderValue: json.data.minOrderValue,
+          discountAmount: json.data.discountAmount ?? json.data.calculatedDiscount ?? 0,
+          calculatedDiscount: json.data.calculatedDiscount ?? json.data.discountAmount ?? 0,
+          eligibleSubtotal: json.data.eligibleSubtotal,
+          excludeShipping: json.data.excludeShipping,
+          excludeTax: json.data.excludeTax,
+          description: json.data.description,
+          error: json.data.reason,
+          data: json.data,
+        };
+      }
+      return json;
+    } catch (err: any) {
+      return { success: false, valid: false, error: err.message || 'Coupon validation failed' };
+    }
+  },
+
+  // ==========================================
+  // Early Access Registration & Notifications
+  // ==========================================
+  async registerEarlyAccess(payload: {
+    email?: string;
+    whatsappNumber?: string;
+    channel: 'EMAIL' | 'WHATSAPP' | 'BOTH';
+    emailConsent: boolean;
+    whatsappConsent: boolean;
+    registrationSource?: string;
+  }): Promise<ApiResponse<any> & { statusCode?: number; code?: string }> {
+    try {
+      const res = await fetch(`${API_BASE}/early-access/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json().catch(() => ({}));
+      return {
+        success: Boolean(res.ok && json?.success),
+        statusCode: res.status,
+        ...json,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        statusCode: 503,
+        code: 'NETWORK_ERROR',
+        error: err?.message || 'Unable to reach server. Please check your connection and try again.',
+      };
+    }
+  },
+
+  async subscribeNewsletter(payload: {
+    email: string;
+    emailConsent: boolean;
+    registrationSource?: string;
+  }): Promise<ApiResponse<any> & { statusCode?: number; code?: string }> {
+    try {
+      const res = await fetch(`${API_BASE}/early-access/newsletter`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json().catch(() => ({}));
+      return {
+        success: Boolean(res.ok && json?.success),
+        statusCode: res.status,
+        ...json,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        statusCode: 503,
+        code: 'NETWORK_ERROR',
+        error: err?.message || 'Unable to reach server. Please check your connection and try again.',
+      };
+    }
+  },
+
+  async getEarlyAccessStats(): Promise<ApiResponse<any> & { statusCode?: number; dbReady?: boolean; providers?: any }> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/early-access/stats`, {
+        headers: getAuthHeaders(),
+      });
+      const json = await res.json().catch(() => ({}));
+      return { statusCode: res.status, ...json };
+    } catch (err: any) {
+      return { success: false, statusCode: 503, dbReady: false, error: err?.message || 'Request failed' };
+    }
+  },
+
+  async getEarlyAccessSubscribers(params?: {
+    search?: string;
+    channel?: string;
+    status?: string;
+    page?: number;
+    limit?: number;
+  }): Promise<ApiResponse<any> & { statusCode?: number }> {
+    try {
+      const q = new URLSearchParams();
+      if (params?.search) q.set('search', params.search);
+      if (params?.channel && params.channel !== 'ALL') q.set('channel', params.channel);
+      if (params?.status && params.status !== 'ALL') q.set('status', params.status);
+      if (params?.page) q.set('page', String(params.page));
+      if (params?.limit) q.set('limit', String(params.limit));
+      const res = await fetch(`${API_BASE}/admin/early-access/subscribers?${q.toString()}`, {
+        headers: getAuthHeaders(),
+      });
+      const json = await res.json().catch(() => ({}));
+      return { statusCode: res.status, ...json };
+    } catch (err: any) {
+      return { success: false, statusCode: 503, error: err?.message || 'Failed to fetch subscribers' };
+    }
+  },
+
+  async exportEarlyAccessCsv(params?: { search?: string; channel?: string; status?: string }): Promise<{
+    success: boolean;
+    csv?: string;
+    error?: string;
+  }> {
+    try {
+      const q = new URLSearchParams();
+      if (params?.search) q.set('search', params.search);
+      if (params?.channel && params.channel !== 'ALL') q.set('channel', params.channel);
+      if (params?.status && params.status !== 'ALL') q.set('status', params.status);
+      const res = await fetch(`${API_BASE}/admin/early-access/subscribers/export?${q.toString()}`, {
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        return { success: false, error: json?.error || `Export failed (HTTP ${res.status})` };
+      }
+      const csv = await res.text();
+      return { success: true, csv };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Export request failed' };
+    }
+  },
+
+  async getEarlyAccessCampaigns(): Promise<ApiResponse<any[]>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/early-access/campaigns`, {
+        headers: getAuthHeaders(),
+      });
       return await res.json();
     } catch (err: any) {
-      return { success: false, error: err.message || 'Coupon validation failed' };
+      return { success: false, error: err?.message || 'Failed to load campaigns', data: [] };
+    }
+  },
+
+  async createEarlyAccessCampaign(payload: {
+    name: string;
+    channels: 'EMAIL' | 'WHATSAPP' | 'BOTH';
+    subject?: string;
+    emailText?: string;
+    emailHtml?: string;
+    whatsappTemplateName?: string;
+    whatsappTemplateLang?: string;
+    whatsappVariables?: string[];
+  }): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/early-access/campaigns`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to create campaign draft' };
+    }
+  },
+
+  async sendTestEarlyAccessCampaign(
+    campaignId: string,
+    payload: { testEmail?: string; testWhatsappNumber?: string }
+  ): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/early-access/campaigns/${encodeURIComponent(campaignId)}/test`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Test send failed' };
+    }
+  },
+
+  async confirmSendEarlyAccessCampaign(campaignId: string): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(
+        `${API_BASE}/admin/early-access/campaigns/${encodeURIComponent(campaignId)}/confirm-send`,
+        {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({ confirmSend: true }),
+        }
+      );
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to start campaign send' };
+    }
+  },
+
+  async retryFailedEarlyAccessCampaign(campaignId: string): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(
+        `${API_BASE}/admin/early-access/campaigns/${encodeURIComponent(campaignId)}/retry-failed`,
+        {
+          method: 'POST',
+          headers: getAuthHeaders(),
+        }
+      );
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to retry campaign deliveries' };
+    }
+  },
+
+  async getEarlyAccessDeliveries(params?: {
+    campaignId?: string;
+    status?: string;
+    channel?: string;
+    page?: number;
+  }): Promise<ApiResponse<any>> {
+    try {
+      const q = new URLSearchParams();
+      if (params?.campaignId) q.set('campaignId', params.campaignId);
+      if (params?.status && params.status !== 'ALL') q.set('status', params.status);
+      if (params?.channel && params.channel !== 'ALL') q.set('channel', params.channel);
+      if (params?.page) q.set('page', String(params.page));
+      const res = await fetch(`${API_BASE}/admin/early-access/deliveries?${q.toString()}`, {
+        headers: getAuthHeaders(),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to load deliveries' };
     }
   },
 };

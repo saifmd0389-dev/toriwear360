@@ -161,6 +161,163 @@ export function requirePermission(permissionCode: string) {
   };
 }
 
+const ROLE_PERMISSION_FALLBACKS: Record<string, Record<string, string[]>> = {
+  STORE_MANAGER: {
+    dashboard: ['view'],
+    products: ['view', 'create', 'edit'],
+    inventory: ['view', 'create', 'edit'],
+    orders: ['view', 'create', 'edit', 'approve'],
+    customers: ['view', 'create', 'edit'],
+    marketing: ['view', 'create', 'edit'],
+    catalog: ['view', 'create', 'edit'],
+    shipping: ['view', 'create', 'edit'],
+    finance: ['view'],
+    superAdmin: ['view'],
+  },
+  INVENTORY_MANAGER: {
+    dashboard: ['view'],
+    products: ['view', 'create', 'edit'],
+    inventory: ['view', 'create', 'edit', 'delete'],
+    catalog: ['view', 'edit'],
+    orders: ['view'],
+  },
+  FULFILLMENT_STAFF: {
+    dashboard: ['view'],
+    orders: ['view', 'edit'],
+    shipping: ['view', 'create', 'edit'],
+    inventory: ['view'],
+  },
+  DESIGNER: {
+    dashboard: ['view'],
+    products: ['view', 'create', 'edit'],
+    catalog: ['view'],
+    aiDesignLab: ['view', 'create', 'edit'],
+  },
+  SUPPORT_STAFF: {
+    dashboard: ['view'],
+    orders: ['view'],
+    customers: ['view', 'edit'],
+    customerSupport: ['view', 'edit'],
+  },
+  VIEWER: {
+    dashboard: ['view'],
+    products: ['view'],
+    inventory: ['view'],
+    orders: ['view'],
+    customers: ['view'],
+  },
+};
+
+export function hasStaffPermission(user: any, permissionName?: string): boolean {
+  if (!user) return false;
+  const role = String(user.role || '').toUpperCase();
+  if (role === 'CUSTOMER') return false;
+  if (role === 'SUPER_ADMIN') return true;
+  if (!permissionName) return true;
+
+  const [rawModule, rawAction = 'view'] = permissionName.split('.');
+  let targetModule = rawModule;
+  let targetAction = rawAction;
+
+  if (rawModule === 'settings') {
+    targetModule = 'settings';
+  } else if (rawModule === 'payments') {
+    targetModule = 'finance';
+  } else if (rawModule === 'refunds') {
+    targetModule = 'finance';
+    targetAction = 'approve';
+  }
+  if (rawAction === 'archive') {
+    targetAction = 'delete';
+  }
+
+  const perms = user.permissions;
+  if (role === 'PARTNER') {
+    if (rawModule === 'settings') {
+      return Boolean(
+        perms?.settings?.includes(targetAction) || perms?.superAdmin?.includes(targetAction)
+      );
+    }
+    return true;
+  }
+
+  if (perms && typeof perms === 'object') {
+    const allowed: string[] = perms[targetModule] || [];
+    if (allowed.includes(targetAction)) return true;
+    if (
+      rawModule === 'settings' &&
+      (perms.superAdmin?.includes(targetAction) ||
+        (rawAction === 'view' && (perms.shipping?.includes('view') || perms.orders?.includes('view'))))
+    ) {
+      return true;
+    }
+    if (rawModule === 'refunds' && perms.orders?.includes('approve')) {
+      return true;
+    }
+    return false;
+  }
+
+  const roleDefaults = ROLE_PERMISSION_FALLBACKS[role];
+  if (roleDefaults) {
+    return Boolean(roleDefaults[targetModule]?.includes(targetAction));
+  }
+  return false;
+}
+
+export function requireStaffPermission(permissionName?: string) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const token = extractSessionToken(req);
+
+    if (token) {
+      let resolvedUser: any = null;
+      const session = await userService.validateSession(token);
+      if (session) {
+        const storeUser = userStore.getUserById(session.user.id);
+        resolvedUser = {
+          id: session.user.id,
+          email: session.user.email,
+          name: session.user.name,
+          role: session.user.role,
+          permissions: storeUser?.permissions,
+          department: session.user.department,
+        };
+      } else {
+        const legacyUser = await authStore.getUserByTokenAsync(token);
+        if (legacyUser) {
+          resolvedUser = {
+            id: legacyUser.id,
+            email: legacyUser.email,
+            name: legacyUser.name,
+            role: legacyUser.role,
+            permissions: legacyUser.permissions,
+            department: legacyUser.department,
+          };
+        }
+      }
+
+      if (resolvedUser) {
+        if (!hasStaffPermission(resolvedUser, permissionName)) {
+          res.status(403).json({
+            success: false,
+            code: 'FORBIDDEN',
+            error: `Access denied: Missing required permission (${permissionName || 'staff'}).`,
+          });
+          return;
+        }
+        req.user = resolvedUser;
+        req.sessionToken = token;
+        return next();
+      }
+    }
+
+    res.status(401).json({
+      success: false,
+      code: 'UNAUTHENTICATED',
+      error: 'Admin authentication required to perform this operation.',
+    });
+  };
+}
+
 /**
  * isProductionMode: checks if app is running in production
  */

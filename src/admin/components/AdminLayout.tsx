@@ -31,6 +31,7 @@ import {
   KeyRound,
   Trash2,
   FileSpreadsheet,
+  BellRing,
 } from 'lucide-react';
 
 import { useFinance } from '../context/FinanceContext';
@@ -46,6 +47,7 @@ import { OrdersView } from './OrdersView';
 import { PaymentsView } from './PaymentsView';
 import { CustomersView } from './CustomersView';
 import { MarketingView } from './MarketingView';
+import { EarlyAccessView } from './EarlyAccessView';
 import { WebsiteCMSView } from './WebsiteCMSView';
 import { CatalogView } from './CatalogView';
 import { ShippingReturnsView } from './ShippingReturnsView';
@@ -160,6 +162,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
     { id: 'PAYMENTS', label: 'Payments & UPI', icon: CreditCard, permission: 'payments.view' },
     { id: 'CUSTOMERS', label: 'Customer CRM', icon: Users, permission: 'customers.view' },
     { id: 'MARKETING', label: 'Promotions & Ads', icon: Megaphone, permission: 'marketing.create' },
+    { id: 'EARLY_ACCESS', label: 'Early Access & Drops', icon: BellRing, permission: 'marketing.create' },
     { id: 'WEBSITE', label: 'Storefront CMS', icon: Layout, permission: 'website.edit' },
     { id: 'CATALOG', label: 'Digital Line Sheet', icon: FileText, permission: 'products.view' },
     { id: 'SHIPPING', label: 'Logistics & Returns', icon: Truck, permission: 'orders.edit', badge: activeReturnsCount },
@@ -485,6 +488,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
           {currentView === 'PAYMENTS' && <PaymentsView />}
           {currentView === 'CUSTOMERS' && <CustomersView />}
           {currentView === 'MARKETING' && <MarketingView />}
+          {currentView === 'EARLY_ACCESS' && <EarlyAccessView />}
           {currentView === 'WEBSITE' && <WebsiteCMSView />}
           {currentView === 'CATALOG' && <CatalogView />}
           {currentView === 'SHIPPING' && <ShippingReturnsView />}

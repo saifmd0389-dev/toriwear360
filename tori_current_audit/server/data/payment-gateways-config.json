@@ -1,0 +1,62 @@
+{
+  "enabled": false,
+  "environment": "test",
+  "defaultGatewayId": "gw-razorpay",
+  "gateways": [
+    {
+      "id": "gw-razorpay",
+      "provider": "RAZORPAY",
+      "name": "Razorpay Standard Checkout",
+      "environment": "TEST",
+      "isEnabled": false,
+      "isDefault": true,
+      "keyId": "",
+      "keySecretEncrypted": "",
+      "webhookSecretEncrypted": "",
+      "status": "NOT_CONFIGURED",
+      "createdAt": "2026-09-01T00:00:00.000Z",
+      "updatedAt": "2026-11-15T17:12:00.000Z"
+    },
+    {
+      "id": "gw-cashfree",
+      "provider": "CASHFREE",
+      "name": "Cashfree Payment Gateway",
+      "environment": "TEST",
+      "isEnabled": false,
+      "isDefault": false,
+      "keyId": "",
+      "keySecretEncrypted": "",
+      "webhookSecretEncrypted": "",
+      "status": "NOT_CONFIGURED",
+      "createdAt": "2026-09-01T00:00:00.000Z",
+      "updatedAt": "2026-11-15T17:12:00.000Z"
+    },
+    {
+      "id": "gw-stripe",
+      "provider": "STRIPE",
+      "name": "Stripe International Gateway",
+      "environment": "TEST",
+      "isEnabled": false,
+      "isDefault": false,
+      "keyId": "",
+      "keySecretEncrypted": "",
+      "webhookSecretEncrypted": "",
+      "status": "NOT_CONFIGURED",
+      "createdAt": "2026-09-01T00:00:00.000Z",
+      "updatedAt": "2026-11-15T17:12:00.000Z"
+    }
+  ],
+  "testConfig": {
+    "keyId": "",
+    "keySecretEncrypted": "",
+    "webhookSecretEncrypted": "",
+    "status": "NOT_CONFIGURED"
+  },
+  "liveConfig": {
+    "keyId": "",
+    "keySecretEncrypted": "",
+    "webhookSecretEncrypted": "",
+    "status": "NOT_CONFIGURED"
+  },
+  "updatedAt": "2026-11-15T19:36:40.878Z"
+}

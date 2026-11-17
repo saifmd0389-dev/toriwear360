@@ -11,6 +11,7 @@ import { platformRouter } from './server/internalPlatformRouter';
 import { apiRouter } from './server/routes/apiRouter';
 import { financeRouter } from './server/routes/financeRouter';
 import { cmsRouter } from './server/routes/cmsRouter';
+import { earlyAccessRouter } from './server/routes/earlyAccessRouter';
 import { cmsRepository } from './server/repositories/cmsRepository';
 import { setupRealtimeWebSocket } from './server/realtimeSocket';
 import { getPrismaClient } from './server/db/prisma';
@@ -864,15 +865,16 @@ app.use('/api/admin/cms', cmsRouter);
 app.use('/api/v1/cms', cmsRouter);
 app.use('/api/cms', cmsRouter);
 app.use('/api', cmsRouter);
+app.use('/api', earlyAccessRouter);
 app.use('/api', apiRouter);
 app.use('/v1', apiRouter);
 app.use('/api/platform', platformRouter);
 app.use('/api', platformRouter);
 
 // ==========================================
-// 7. CATCH-ALL FOR UNMATCHED /api/* (PREVENTS HTML FALLBACK)
+// 7. CATCH-ALL FOR UNMATCHED /api/* & /v1/* (PREVENTS HTML FALLBACK)
 // ==========================================
-app.all('/api/*', (req: Request, res: Response) => {
+app.all(['/api/*', '/v1/*'], (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   return res.status(404).json({
     success: false,
@@ -961,9 +963,15 @@ async function startServer() {
       },
       appType: 'spa',
     });
-    // Never allow Vite's HTML fallback to intercept /api, /generated-assets, /assets, or /models requests
+    // Never allow Vite's HTML fallback to intercept /api, /v1, /generated-assets, /assets, or /models requests
     app.use((req: Request, res: Response, next: NextFunction) => {
-      if (req.originalUrl.startsWith('/api') || req.originalUrl.startsWith('/generated-assets') || req.originalUrl.startsWith('/assets') || req.originalUrl.startsWith('/models')) {
+      if (
+        req.originalUrl.startsWith('/api') ||
+        req.originalUrl.startsWith('/v1') ||
+        req.originalUrl.startsWith('/generated-assets') ||
+        req.originalUrl.startsWith('/assets') ||
+        req.originalUrl.startsWith('/models')
+      ) {
         return next();
       }
       vite.middlewares(req, res, next);
@@ -1014,7 +1022,13 @@ async function startServer() {
     app.get(adminRoutePatterns, sendSpaHtml);
 
     app.get('*', (req: Request, res: Response) => {
-      if (req.originalUrl.startsWith('/api') || req.originalUrl.startsWith('/generated-assets') || req.originalUrl.startsWith('/assets') || req.originalUrl.startsWith('/models')) {
+      if (
+        req.originalUrl.startsWith('/api') ||
+        req.originalUrl.startsWith('/v1') ||
+        req.originalUrl.startsWith('/generated-assets') ||
+        req.originalUrl.startsWith('/assets') ||
+        req.originalUrl.startsWith('/models')
+      ) {
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         return res.status(404).json({
           success: false,

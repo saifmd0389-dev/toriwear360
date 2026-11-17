@@ -7,12 +7,16 @@ import {
   Plus,
   Trash2,
   X,
+  Pencil,
+  ShieldCheck,
 } from 'lucide-react';
+import { Coupon } from '../types';
 
 export const MarketingView: React.FC = () => {
   const { 
     coupons, 
     addCoupon, 
+    updateCoupon,
     toggleCoupon, 
     deleteCoupon, 
     ads, 
@@ -24,14 +28,23 @@ export const MarketingView: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<'ADS' | 'COUPONS' | 'FLASH' | 'CAMPAIGNS'>('COUPONS');
   
-  // Create Coupon Modal
+  // Create / Edit Coupon Modal
   const [showCouponModal, setShowCouponModal] = useState(false);
+  const [editingCouponId, setEditingCouponId] = useState<string | null>(null);
   const [couponCode, setCouponCode] = useState('');
   const [discountType, setDiscountType] = useState<'PERCENTAGE' | 'FIXED' | 'FREE_SHIPPING'>('PERCENTAGE');
   const [couponValue, setCouponValue] = useState(20);
   const [minOrder, setMinOrder] = useState(1499);
-  const [maxDiscount] = useState(500);
+  const [maxDiscount, setMaxDiscount] = useState<number>(500);
   const [maxUsage, setMaxUsage] = useState(500);
+  const [perCustomerLimit, setPerCustomerLimit] = useState(1);
+  const [endDate, setEndDate] = useState('2026-12-31');
+  const [eligibleCategoriesText, setEligibleCategoriesText] = useState('');
+  const [eligibleProductIdsText, setEligibleProductIdsText] = useState('');
+  const [excludeShipping, setExcludeShipping] = useState(true);
+  const [excludeTax, setExcludeTax] = useState(true);
+  const [couponActive, setCouponActive] = useState(true);
+  const [couponDescription, setCouponDescription] = useState('');
 
   // Create Ad Modal
   const [showAdModal, setShowAdModal] = useState(false);
@@ -42,22 +55,83 @@ export const MarketingView: React.FC = () => {
   const [adCtaLink] = useState('/#catalogue');
   const [adImageUrl, setAdImageUrl] = useState('https://images.unsplash.com/photo-1578632767115-351597cf2477?w=1200&auto=format&fit=crop&q=80');
 
-  const handleCreateCoupon = (e: React.FormEvent) => {
+  const openCreateCouponModal = () => {
+    setEditingCouponId(null);
+    setCouponCode('');
+    setDiscountType('PERCENTAGE');
+    setCouponValue(20);
+    setMinOrder(1499);
+    setMaxDiscount(500);
+    setMaxUsage(500);
+    setPerCustomerLimit(1);
+    setEndDate('2026-12-31');
+    setEligibleCategoriesText('');
+    setEligibleProductIdsText('');
+    setExcludeShipping(true);
+    setExcludeTax(true);
+    setCouponActive(true);
+    setCouponDescription('');
+    setShowCouponModal(true);
+  };
+
+  const openEditCouponModal = (coupon: Coupon) => {
+    setEditingCouponId(coupon.id);
+    setCouponCode(coupon.code);
+    setDiscountType(coupon.discountType);
+    setCouponValue(coupon.value);
+    setMinOrder(coupon.minCartValue ?? coupon.minOrderValue ?? 0);
+    setMaxDiscount(coupon.maxDiscount ?? 0);
+    setMaxUsage(coupon.usageLimit ?? 100);
+    setPerCustomerLimit(coupon.perCustomerLimit ?? 1);
+    setEndDate(coupon.endDate || coupon.expiryDate || '2026-12-31');
+    setEligibleCategoriesText((coupon.eligibleCategories || []).join(', '));
+    setEligibleProductIdsText((coupon.eligibleProductIds || []).join(', '));
+    setExcludeShipping(coupon.excludeShipping !== false);
+    setExcludeTax(coupon.excludeTax !== false);
+    setCouponActive(coupon.isActive !== false);
+    setCouponDescription(coupon.description || '');
+    setShowCouponModal(true);
+  };
+
+  const handleSaveCoupon = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!couponCode) return;
-    addCoupon({
+
+    const parseCsv = (str: string) =>
+      str
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    const payload = {
       code: couponCode.toUpperCase().trim(),
       discountType,
       value: Number(couponValue),
       minCartValue: Number(minOrder),
-      maxDiscount: maxDiscount ? Number(maxDiscount) : undefined,
+      maxDiscount: maxDiscount > 0 ? Number(maxDiscount) : undefined,
       usageLimit: Number(maxUsage),
-      perCustomerLimit: 1,
+      perCustomerLimit: Math.max(1, Number(perCustomerLimit || 1)),
       applicableFranchises: ['ALL'],
-      startDate: '2026-09-01',
-      endDate: '2026-12-31',
-      isActive: true,
-    });
+      eligibleCategories: parseCsv(eligibleCategoriesText),
+      eligibleProductIds: parseCsv(eligibleProductIdsText),
+      excludeShipping,
+      excludeTax,
+      startDate: '2026-01-01',
+      endDate: endDate || '2026-12-31',
+      isActive: couponActive,
+      description: couponDescription.trim(),
+    };
+
+    if (editingCouponId) {
+      const ok = await updateCoupon(editingCouponId, payload);
+      if (ok) {
+        setShowCouponModal(false);
+        setEditingCouponId(null);
+      }
+      return;
+    }
+
+    await addCoupon(payload);
     setShowCouponModal(false);
     setCouponCode('');
   };
@@ -102,8 +176,8 @@ export const MarketingView: React.FC = () => {
         <div className="flex items-center gap-2">
           {activeTab === 'COUPONS' && (
             <button
-              onClick={() => setShowCouponModal(true)}
-              className="px-3.5 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white font-semibold text-xs transition-colors flex items-center gap-1.5 shadow-md shadow-red-600/20 cursor-pointer"
+              onClick={openCreateCouponModal}
+              className="px-3.5 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white font-semibold text-xs transition-colors flex items-center gap-1.5 shadow-md shadow-red-600/20 cursor-pointer whitespace-nowrap shrink-0"
             >
               <Plus className="w-4 h-4" />
               <span>Create Coupon</span>
@@ -182,23 +256,35 @@ export const MarketingView: React.FC = () => {
                   {coupons.map((c) => (
                     <tr key={c.id} className="hover:bg-neutral-800/40 transition-colors">
                       <td className="p-3.5 pl-4">
-                        <span className="font-mono font-bold text-yellow-400 bg-yellow-400/10 px-2.5 py-1 rounded border border-yellow-400/20 text-xs">
-                          {c.code}
-                        </span>
+                        <div className="flex flex-col gap-1">
+                          <span className="font-mono font-bold text-yellow-400 bg-yellow-400/10 px-2.5 py-1 rounded border border-yellow-400/20 text-xs w-max">
+                            {c.code}
+                          </span>
+                          <div className="flex flex-wrap gap-1 text-[10px] font-mono text-neutral-400">
+                            <span>Limit {c.perCustomerLimit || 1}/customer</span>
+                            {c.excludeShipping !== false && <span>• Excl. shipping & tax</span>}
+                            {(c.eligibleCategories?.length || 0) > 0 && (
+                              <span className="text-sky-400">• {c.eligibleCategories?.length} categories</span>
+                            )}
+                            {(c.eligibleProductIds?.length || 0) > 0 && (
+                              <span className="text-purple-400">• {c.eligibleProductIds?.length} SKUs</span>
+                            )}
+                          </div>
+                        </div>
                       </td>
                       <td className="p-3.5 font-mono font-bold text-white">
                         {c.discountType === 'PERCENTAGE' 
-                          ? `${c.value}% OFF (Up to ₹${c.maxDiscount || 500})` 
+                          ? `${c.value}% OFF${c.maxDiscount ? ` (Cap ₹${c.maxDiscount})` : ''}` 
                           : c.discountType === 'FIXED' 
                           ? `₹${c.value} FLAT OFF` 
                           : 'FREE SHIPPING'}
                       </td>
                       <td className="p-3.5 font-mono text-neutral-300">
-                        ₹{c.minCartValue}
+                        ₹{c.minCartValue ?? c.minOrderValue ?? 0}
                       </td>
                       <td className="p-3.5 font-mono">
                         <span className="text-white font-bold">{c.usageCount}</span>
-                        <span className="text-neutral-500"> / {c.usageLimit}</span>
+                        <span className="text-neutral-500"> / {c.usageLimit ?? '∞'}</span>
                       </td>
                       <td className="p-3.5">
                         <button
@@ -206,7 +292,7 @@ export const MarketingView: React.FC = () => {
                           className={`px-2.5 py-0.5 rounded text-[10px] font-mono uppercase font-semibold cursor-pointer ${
                             c.isActive 
                               ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
-                              : 'bg-neutral-800 text-neutral-400'
+                              : 'bg-neutral-800 text-neutral-400 border border-neutral-700'
                           }`}
                         >
                           {c.isActive ? 'ACTIVE' : 'PAUSED'}
@@ -216,15 +302,28 @@ export const MarketingView: React.FC = () => {
                         Until {c.endDate}
                       </td>
                       <td className="p-3.5 text-right pr-4">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteCoupon(c.id);
-                          }}
-                          className="p-1.5 text-neutral-500 hover:text-red-400 cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openEditCouponModal(c);
+                            }}
+                            title="Edit coupon limits & rules"
+                            className="p-1.5 text-neutral-400 hover:text-white cursor-pointer"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteCoupon(c.id);
+                            }}
+                            title="Delete coupon"
+                            className="p-1.5 text-neutral-500 hover:text-red-400 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -329,33 +428,54 @@ export const MarketingView: React.FC = () => {
         </div>
       )}
 
-      {/* Modal: Create Coupon */}
+      {/* Modal: Create / Edit Coupon */}
       {showCouponModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-[#14141c] border border-neutral-700 rounded-2xl p-6 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="w-full max-w-lg bg-[#14141c] border border-neutral-700 rounded-2xl p-6 shadow-2xl space-y-4 my-6">
             <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
-              <h3 className="text-sm font-bold text-white">Create Promotional Discount Coupon</h3>
-              <button onClick={() => setShowCouponModal(false)} className="text-neutral-400 hover:text-white">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <h3 className="text-sm font-bold text-white">
+                  {editingCouponId ? `Edit Coupon: ${couponCode}` : 'Create Promotional Discount Coupon'}
+                </h3>
+              </div>
+              <button onClick={() => setShowCouponModal(false)} className="text-neutral-400 hover:text-white cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleCreateCoupon} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
-                  Coupon Promo Code *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. SHINOBI20"
-                  value={couponCode}
-                  onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
-                  className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-white font-mono uppercase focus:outline-none focus:border-red-500"
-                />
+            <form onSubmit={handleSaveCoupon} className="space-y-3.5">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
+                    Coupon Promo Code *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    disabled={Boolean(editingCouponId)}
+                    placeholder="e.g. SHINOBI20"
+                    value={couponCode}
+                    onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
+                    className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-white font-mono uppercase focus:outline-none focus:border-red-500 disabled:opacity-60"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
+                    Expiry Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-white font-mono focus:outline-none focus:border-red-500"
+                  />
+                </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
                     Discount Type
@@ -367,31 +487,47 @@ export const MarketingView: React.FC = () => {
                   >
                     <option value="PERCENTAGE">Percentage (%)</option>
                     <option value="FIXED">Fixed Amount (₹)</option>
-                    <option value="FREE_SHIPPING">Free Shipping</option>
                   </select>
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
-                    Discount Value ({discountType === 'PERCENTAGE' ? '%' : '₹'})
+                    Value ({discountType === 'PERCENTAGE' ? '%' : '₹'})
                   </label>
                   <input
                     type="number"
+                    min={1}
+                    max={discountType === 'PERCENTAGE' ? 100 : 100000}
                     required
                     value={couponValue}
                     onChange={(e) => setCouponValue(Number(e.target.value))}
                     className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-white font-mono focus:outline-none focus:border-red-500"
                   />
                 </div>
-              </div>
 
-              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
-                    Min Order Value (₹)
+                    Max Discount Cap (₹)
                   </label>
                   <input
                     type="number"
+                    min={0}
+                    placeholder="2500"
+                    value={maxDiscount}
+                    onChange={(e) => setMaxDiscount(Number(e.target.value))}
+                    className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-white font-mono focus:outline-none focus:border-red-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
+                    Min Order (₹)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
                     value={minOrder}
                     onChange={(e) => setMinOrder(Number(e.target.value))}
                     className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-white font-mono focus:outline-none focus:border-red-500"
@@ -400,18 +536,104 @@ export const MarketingView: React.FC = () => {
 
                 <div>
                   <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
-                    Usage Cap Limit
+                    Global Usage Cap
                   </label>
                   <input
                     type="number"
+                    min={1}
                     value={maxUsage}
                     onChange={(e) => setMaxUsage(Number(e.target.value))}
                     className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-white font-mono focus:outline-none focus:border-red-500"
                   />
                 </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
+                    Per-Customer Limit
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={perCustomerLimit}
+                    onChange={(e) => setPerCustomerLimit(Number(e.target.value))}
+                    className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-white font-mono focus:outline-none focus:border-red-500"
+                  />
+                </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-2">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
+                    Eligible Categories (CSV, optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Oversized Tees, MEN"
+                    value={eligibleCategoriesText}
+                    onChange={(e) => setEligibleCategoriesText(e.target.value)}
+                    className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-white font-mono focus:outline-none focus:border-red-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
+                    Eligible Product IDs (CSV, optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. tori-01, tori-03"
+                    value={eligibleProductIdsText}
+                    onChange={(e) => setEligibleProductIdsText(e.target.value)}
+                    className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-white font-mono focus:outline-none focus:border-red-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">
+                  Description / Terms
+                </label>
+                <input
+                  type="text"
+                  placeholder="Customer-facing eligibility description"
+                  value={couponDescription}
+                  onChange={(e) => setCouponDescription(e.target.value)}
+                  className="w-full px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-white focus:outline-none focus:border-red-500"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4 pt-1 text-xs text-neutral-300">
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={excludeShipping}
+                    onChange={(e) => setExcludeShipping(e.target.checked)}
+                    className="rounded border-neutral-600 accent-red-600"
+                  />
+                  <span>Exclude shipping from discount</span>
+                </label>
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={excludeTax}
+                    onChange={(e) => setExcludeTax(e.target.checked)}
+                    className="rounded border-neutral-600 accent-red-600"
+                  />
+                  <span>Exclude tax from discount</span>
+                </label>
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={couponActive}
+                    onChange={(e) => setCouponActive(e.target.checked)}
+                    className="rounded border-neutral-600 accent-emerald-500"
+                  />
+                  <span className={couponActive ? 'text-emerald-400 font-semibold' : 'text-neutral-400'}>
+                    Active (Live at Checkout)
+                  </span>
+                </label>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-neutral-800">
                 <button
                   type="button"
                   onClick={() => setShowCouponModal(false)}
@@ -423,7 +645,7 @@ export const MarketingView: React.FC = () => {
                   type="submit"
                   className="px-4 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-semibold shadow-md shadow-red-600/20 cursor-pointer"
                 >
-                  Publish Coupon
+                  {editingCouponId ? 'Save Changes' : 'Publish Coupon'}
                 </button>
               </div>
             </form>

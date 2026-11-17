@@ -10,7 +10,7 @@ interface CartDrawerProps {
   onUpdateQuantity: (index: number, newQty: number) => void;
   onRemoveItem: (index: number) => void;
   appliedCoupon: string | null;
-  onApplyCoupon: (code: string) => boolean;
+  onApplyCoupon: (code: string) => Promise<{ valid: boolean; reason?: string }> | boolean;
   onRemoveCoupon: () => void;
   onProceedToCheckout: () => void;
   onContinueShopping: () => void;
@@ -38,6 +38,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
 }) => {
   const [couponInput, setCouponInput] = useState('');
   const [couponError, setCouponError] = useState<string | null>(null);
+  const [isApplyingCoupon, setIsApplyingCoupon] = useState(false);
 
   // Keyboard shortcut (Escape) to close drawer - must be before any return to respect React Rules of Hooks
   useEffect(() => {
@@ -88,55 +89,43 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   );
 
   let discount = propsDiscount !== undefined ? propsDiscount : 0;
-  if (propsDiscount === undefined) {
-    if (appliedCouponDetail) {
-      if (appliedCouponDetail.discountType === 'PERCENTAGE') {
-        discount = Math.round(subtotal * (appliedCouponDetail.value / 100));
-        if (appliedCouponDetail.maxDiscount) discount = Math.min(discount, appliedCouponDetail.maxDiscount);
-      } else {
-        discount = Math.min(appliedCouponDetail.value || 0, subtotal);
-      }
-    } else if (appliedCoupon === 'TORI100' || appliedCoupon === 'ANIME100') {
-      discount = Math.min(100, subtotal);
-    } else if (appliedCoupon === 'TORI10' || appliedCoupon === 'TWIN10' || appliedCoupon === 'ANIME10') {
-      discount = Math.round(subtotal * 0.1);
-    } else if (appliedCoupon === 'DROP2026') {
-      discount = Math.round(subtotal * 0.15);
-    } else if (appliedCoupon) {
-      try {
-        const stored = localStorage.getItem('tori_admin_coupons');
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          const match = parsed.find((c: any) => c.code?.toUpperCase() === appliedCoupon);
-          if (match) {
-            if (match.discountType === 'PERCENTAGE') {
-              discount = Math.round(subtotal * (match.value / 100));
-              if (match.maxDiscount) discount = Math.min(discount, match.maxDiscount);
-            } else {
-              discount = Math.min(match.value || 0, subtotal);
-            }
-          }
-        }
-      } catch {}
+  if (propsDiscount === undefined && appliedCouponDetail) {
+    if (typeof appliedCouponDetail.discountAmount === 'number') {
+      discount = Math.min(appliedCouponDetail.discountAmount, subtotal);
+    } else if (appliedCouponDetail.discountType === 'PERCENTAGE') {
+      discount = Math.round(subtotal * (appliedCouponDetail.value / 100));
+      if (appliedCouponDetail.maxDiscount) discount = Math.min(discount, appliedCouponDetail.maxDiscount);
+      discount = Math.min(discount, subtotal);
+    } else {
+      discount = Math.min(appliedCouponDetail.value || 0, subtotal);
     }
   }
 
   const shipping = subtotal >= FREE_SHIPPING_THRESHOLD || subtotal === 0 ? 0 : STANDARD_SHIPPING_FEE;
-  const total = Math.max(0, subtotal - discount + shipping);
+  const total = Math.max(0, subtotal - discount) + shipping;
 
   const amountNeededForFreeShipping = Math.max(0, FREE_SHIPPING_THRESHOLD - subtotal);
   const freeShippingProgress = Math.min(100, Math.round((subtotal / FREE_SHIPPING_THRESHOLD) * 100));
 
-  const handleApplyCoupon = (e: React.FormEvent) => {
+  const handleApplyCoupon = async (e: React.FormEvent) => {
     e.preventDefault();
     setCouponError(null);
     const code = couponInput.trim().toUpperCase();
     if (!code) return;
-    const success = onApplyCoupon(code);
-    if (success) {
-      setCouponInput('');
-    } else {
-      setCouponError('Invalid promo code. Try "TORI100" or "TORI10"');
+    setIsApplyingCoupon(true);
+    try {
+      const outcome = await onApplyCoupon(code);
+      const isValid = typeof outcome === 'boolean' ? outcome : Boolean(outcome?.valid);
+      if (isValid) {
+        setCouponInput('');
+      } else {
+        setCouponError(
+          (typeof outcome === 'object' && outcome?.reason) ||
+            'Coupon code is invalid, inactive, or does not meet eligibility criteria.'
+        );
+      }
+    } finally {
+      setIsApplyingCoupon(false);
     }
   };
 
@@ -345,14 +334,16 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                     type="text"
                     value={couponInput}
                     onChange={(e) => setCouponInput(e.target.value)}
-                    placeholder="Discount code (e.g. ANIME100)"
-                    className="flex-1 bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#FF2028] font-mono uppercase"
+                    disabled={isApplyingCoupon}
+                    placeholder="Enter promo code"
+                    className="flex-1 bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#FF2028] font-mono uppercase disabled:opacity-60"
                   />
                   <button
                     type="submit"
-                    className="px-3.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-xs font-mono font-bold rounded-lg transition uppercase cursor-pointer"
+                    disabled={isApplyingCoupon}
+                    className="px-3.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-xs font-mono font-bold rounded-lg transition uppercase cursor-pointer disabled:opacity-60"
                   >
-                    Apply
+                    {isApplyingCoupon ? 'Checking...' : 'Apply'}
                   </button>
                 </form>
               )}

@@ -348,8 +348,13 @@ export interface Coupon {
   usageCount: number;
   perCustomerLimit: number;
   applicableFranchises: string[];
+  eligibleCategories?: string[];
+  eligibleProductIds?: string[];
+  excludeShipping?: boolean;
+  excludeTax?: boolean;
   startDate: string;
   endDate: string;
+  expiryDate?: string;
   isActive: boolean;
   description?: string;
   minOrderValue?: number;

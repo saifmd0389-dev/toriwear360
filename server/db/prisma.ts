@@ -65,6 +65,15 @@ try {
 }
 
 export const txStorage = new AsyncLocalStorage<any>();
+let prismaTestOverride: any = null;
+
+/**
+ * Automated unit-test hook to inject a mocked Prisma client.
+ * Never used in production or storefront/admin runtime flows.
+ */
+export function setPrismaClientOverrideForTests(client: any): void {
+  prismaTestOverride = client;
+}
 
 /**
  * Returns the active Prisma instance or the current interactive transaction client if inside withTransaction
@@ -74,11 +83,14 @@ export function getPrismaClient(): any {
   if (activeTx) {
     return activeTx;
   }
+  if (prismaTestOverride) {
+    return prismaTestOverride;
+  }
   return prismaInstance;
 }
 
 export function getRawPrismaClient(): any {
-  return prismaInstance;
+  return prismaTestOverride || prismaInstance;
 }
 
 export const prisma: any = new Proxy(
@@ -86,7 +98,7 @@ export const prisma: any = new Proxy(
   {
     get(_target, prop) {
       const activeTx = txStorage.getStore();
-      const target = activeTx || prismaInstance;
+      const target = activeTx || prismaTestOverride || prismaInstance;
       return target ? target[prop] : undefined;
     },
   }
