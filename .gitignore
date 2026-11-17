@@ -7,3 +7,6 @@ coverage/
 .env
 .env.*
 !.env.example
+server/runtime-data/
+server/data/.auth-*
+server/data/.partner-permissions.json

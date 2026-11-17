@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { encryptSecret, decryptSecret } from './totpService';
 import { getPrismaClient } from '../db/prisma';
+import { resolveSecureStorePath } from '../utils/storageHelper';
 
 export interface PaymentGatewayRecord {
   id: string; // e.g. 'gw-razorpay', 'gw-cashfree', 'gw-stripe', 'gw-custom'
@@ -88,8 +89,8 @@ export interface RazorpayPublicConfig {
   webhookUrl: string;
 }
 
-// Protected storage outside of public directory
-const CONFIG_FILE = path.resolve(process.cwd(), 'server/data/payment-gateways-config.json');
+// Protected runtime storage outside of public & git-tracked directories
+const CONFIG_FILE = resolveSecureStorePath('payment-gateways-config.json', '.payment-gateway-config.json');
 const LEGACY_CONFIG_FILE = path.resolve(process.cwd(), '.payment-gateway-config.json');
 
 const INITIAL_GATEWAYS: PaymentGatewayRecord[] = [

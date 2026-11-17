@@ -11,11 +11,25 @@ const ENC_PREFIX = 'enc:v1:';
  * deleting the legacy exposed file so it is never served publicly.
  */
 export function resolveSecureStorePath(filename: string, ...legacyRelativePaths: string[]): string {
-  const dataDir = path.resolve(process.cwd(), 'server/data');
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
+  const runtimeDir = process.env.TORI_RUNTIME_DATA_DIR
+    ? path.resolve(process.env.TORI_RUNTIME_DATA_DIR)
+    : path.resolve(process.cwd(), 'server/runtime-data');
+  if (!fs.existsSync(runtimeDir)) {
+    fs.mkdirSync(runtimeDir, { recursive: true });
   }
-  const targetPath = path.join(dataDir, filename);
+  const targetPath = path.join(runtimeDir, filename);
+
+  // If runtime copy does not exist yet, seed from read-only repo seed in server/data/
+  if (!fs.existsSync(targetPath)) {
+    const repoSeedPath = path.resolve(process.cwd(), 'server/data', filename);
+    if (repoSeedPath !== targetPath && fs.existsSync(repoSeedPath)) {
+      try {
+        fs.copyFileSync(repoSeedPath, targetPath);
+      } catch (err) {
+        console.warn(`[STORAGE] Seed copy note for server/data/${filename}:`, err);
+      }
+    }
+  }
 
   for (const rel of legacyRelativePaths) {
     if (!rel) continue;
@@ -26,8 +40,10 @@ export function resolveSecureStorePath(filename: string, ...legacyRelativePaths:
         if (!fs.existsSync(targetPath)) {
           fs.copyFileSync(legacyPath, targetPath);
         }
-        fs.unlinkSync(legacyPath);
-        console.log(`[STORAGE] Migrated & removed exposed store file: ${rel} -> server/data/${filename}`);
+        // Only remove untracked dotfiles in root; never delete repo-tracked paths that could break git pull
+        if (path.basename(legacyPath).startsWith('.') && path.dirname(legacyPath) === process.cwd()) {
+          fs.unlinkSync(legacyPath);
+        }
       }
     } catch (err) {
       console.warn(`[STORAGE] Migration note for ${rel}:`, err);
