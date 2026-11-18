@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   CheckCircle2,
   ArrowRight,
@@ -11,8 +11,10 @@ import {
 } from 'lucide-react';
 import { OfficialToriwearLogo } from './OfficialToriwearLogo';
 import { InstagramIcon, WhatsAppIcon, XTwitterIcon } from './SocialIcons';
-import { getAuthoritativeInstagramUrl } from '../utils/socialLinks';
+import { getAuthoritativeInstagramUrl, normalizeSocialUrl } from '../utils/socialLinks';
 import { apiClient } from '../services/apiClient';
+import { StoreContactConfig } from '../types';
+import { buildWhatsAppHref, renderSocialChannelIcon } from './ContactSupportModal';
 
 interface StorefrontMaintenanceScreenProps {
   onEnterAdmin?: () => void;
@@ -34,6 +36,22 @@ export const StorefrontMaintenanceScreen: React.FC<StorefrontMaintenanceScreenPr
   onBypassForStaff,
   isStaffUser = false,
 }) => {
+  const [contactConfig, setContactConfig] = useState<StoreContactConfig | null>(null);
+  useEffect(() => {
+    let mounted = true;
+    const load = () => {
+      apiClient.getStoreContact().then((res) => {
+        if (mounted && res.success && res.data) setContactConfig(res.data);
+      }).catch(() => {});
+    };
+    load();
+    window.addEventListener('tori_contact_updated', load);
+    return () => {
+      mounted = false;
+      window.removeEventListener('tori_contact_updated', load);
+    };
+  }, []);
+
   const [channel, setChannel] = useState<'EMAIL' | 'WHATSAPP' | 'BOTH'>('EMAIL');
   const [email, setEmail] = useState('');
   const [countryCode, setCountryCode] = useState('+91');
@@ -400,33 +418,54 @@ export const StorefrontMaintenanceScreen: React.FC<StorefrontMaintenanceScreenPr
 
         {/* Social Links */}
         <div className="flex items-center gap-3">
-          <a
-            href={getAuthoritativeInstagramUrl()}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-400 hover:text-white hover:border-red-500 transition"
-            aria-label="Instagram"
-          >
-            <InstagramIcon className="w-3.5 h-3.5" />
-          </a>
-          <a
-            href="https://wa.me/919876543210?text=Hi%20TORIWEAR%20Support"
-            target="_blank"
-            rel="noreferrer"
-            className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-400 hover:text-[#25D366] hover:border-[#25D366] transition"
-            aria-label="WhatsApp"
-          >
-            <WhatsAppIcon className="w-3.5 h-3.5" />
-          </a>
-          <a
-            href="https://twitter.com/toriwear"
-            target="_blank"
-            rel="noreferrer"
-            className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-400 hover:text-white hover:border-red-500 transition"
-            aria-label="Twitter"
-          >
-            <XTwitterIcon className="w-3.5 h-3.5" />
-          </a>
+          {(() => {
+            const waHref = buildWhatsAppHref(contactConfig);
+            const activeChannels = (contactConfig?.channels || []).filter(
+              (c) => c.enabled !== false && Boolean(c.url?.trim())
+            );
+            if (activeChannels.length > 0) {
+              return activeChannels.map((ch) => {
+                const isWa = (ch.platform || '').toLowerCase().includes('whatsapp');
+                const href = isWa && waHref ? waHref : normalizeSocialUrl(ch.url, ch.url);
+                return (
+                  <a
+                    key={ch.id || ch.platform}
+                    href={href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-400 hover:text-white hover:border-red-500 transition"
+                    aria-label={ch.label || ch.platform}
+                  >
+                    {renderSocialChannelIcon(ch.platform, 'w-3.5 h-3.5')}
+                  </a>
+                );
+              });
+            }
+            return (
+              <>
+                <a
+                  href={getAuthoritativeInstagramUrl()}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-400 hover:text-white hover:border-red-500 transition"
+                  aria-label="Instagram"
+                >
+                  <InstagramIcon className="w-3.5 h-3.5" />
+                </a>
+                {waHref && (
+                  <a
+                    href={waHref}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-400 hover:text-[#25D366] hover:border-[#25D366] transition"
+                    aria-label="WhatsApp"
+                  >
+                    <WhatsAppIcon className="w-3.5 h-3.5" />
+                  </a>
+                )}
+              </>
+            );
+          })()}
         </div>
       </footer>
     </div>

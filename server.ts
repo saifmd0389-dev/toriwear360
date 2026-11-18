@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import http from 'http';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import { GEMINI_TEXT_MODEL } from './server/geminiImageService';
@@ -13,6 +12,7 @@ import { financeRouter } from './server/routes/financeRouter';
 import { cmsRouter } from './server/routes/cmsRouter';
 import { earlyAccessRouter } from './server/routes/earlyAccessRouter';
 import { cmsRepository } from './server/repositories/cmsRepository';
+import { productRepository } from './server/repositories/productRepository';
 import { setupRealtimeWebSocket } from './server/realtimeSocket';
 import { getPrismaClient } from './server/db/prisma';
 import { ensureMySqlSchemaInitialized } from './server/db/init-mysql';
@@ -71,17 +71,18 @@ app.use(express.urlencoded({ extended: true, limit: '30mb' }));
 app.use((_req: Request, res: Response, next: NextFunction) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
   res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   if (isProd) {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
-  // Explicitly permit camera, disallow microphone entirely
-  res.setHeader('Permissions-Policy', 'camera=*, microphone=(), geolocation=()');
-  // Content Security Policy permitting local WASM workers, fonts, images and self
+  // Disallow camera, microphone, and geolocation across the entire application
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  // Content Security Policy permitting local WASM workers, fonts, images, Google Auth, Razorpay, and Meta Pixel
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://fonts.googleapis.com https://cdn.jsdelivr.net https://checkout.razorpay.com https://apis.google.com https://www.gstatic.com https://accounts.google.com; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://checkout.razorpay.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://api.razorpay.com https://checkout.razorpay.com; media-src 'self' data: blob: https:; connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://cdn.jsdelivr.net https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://accounts.google.com https://apis.google.com https://firebase.googleapis.com https://firebaseinstallations.googleapis.com https://api.razorpay.com https://lumberjack.razorpay.com https://checkout.razorpay.com ws: wss:;"
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://fonts.googleapis.com https://cdn.jsdelivr.net https://checkout.razorpay.com https://apis.google.com https://www.gstatic.com https://accounts.google.com https://connect.facebook.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://checkout.razorpay.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https: https://www.facebook.com; frame-src 'self' https://*.firebaseapp.com https://*.web.app https://accounts.google.com https://api.razorpay.com https://checkout.razorpay.com https://www.facebook.com; media-src 'self' data: blob: https:; connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://cdn.jsdelivr.net https://*.firebaseapp.com https://*.web.app https://www.gstatic.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://accounts.google.com https://apis.google.com https://firebase.googleapis.com https://firebaseinstallations.googleapis.com https://api.razorpay.com https://lumberjack.razorpay.com https://checkout.razorpay.com https://connect.facebook.net https://www.facebook.com ws: wss:;"
   );
   next();
 });
@@ -856,6 +857,189 @@ app.get('/api/ai/usage', requireStaffAuth, (_req: Request, res: Response) => {
 });
 
 // ==========================================
+// 5B. SEO: ROBOTS.TXT, SITEMAP.XML & META CATALOG FEEDS
+// ==========================================
+const CANONICAL_SITE_ORIGIN = (process.env.SITE_URL || 'https://thetoriwearstore.in').replace(/\/+$/, '');
+
+function escapeXml(val: string): string {
+  return String(val || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function toAbsoluteAssetUrl(url: string | undefined, origin = CANONICAL_SITE_ORIGIN): string {
+  if (!url) return `${origin}/logo-192.png`;
+  if (/^https?:\/\//i.test(url)) return url;
+  return `${origin}${url.startsWith('/') ? url : `/${url}`}`;
+}
+
+function resolveConfiguredAdminPath(): string {
+  const rawAdminEnv = process.env.VITE_ADMIN_PATH || process.env.ADMIN_PATH || '';
+  let val = String(rawAdminEnv).trim().replace(/^['"]+|['"]+$/g, '').trim();
+  if (/^https?:\/\//i.test(val)) {
+    try {
+      val = new URL(val).pathname;
+    } catch {
+      val = '';
+    }
+  }
+  val = (val.split('?')[0]?.split('#')[0] || '').trim();
+  if (val) {
+    val = (val.startsWith('/') ? val : `/${val}`).replace(/\/+/g, '/').replace(/\/+$/, '');
+    for (const suffix of ['/login', '/gateway', '/dashboard', '/forgot-password', '/reset-password', '/account/security']) {
+      if (val.toLowerCase().endsWith(suffix) && val.length > suffix.length) {
+        val = val.slice(0, val.length - suffix.length).replace(/\/+$/, '');
+        break;
+      }
+    }
+    if (val && val !== '/' && val.toLowerCase() !== '/admin') {
+      return val;
+    }
+  }
+  return '/tori-ops-gateway';
+}
+
+app.get('/robots.txt', (_req: Request, res: Response) => {
+  const adminPath = resolveConfiguredAdminPath();
+  const lines = [
+    'User-agent: *',
+    'Allow: /',
+    'Disallow: /admin',
+    'Disallow: /tori-ops-gateway',
+    ...(adminPath !== '/tori-ops-gateway' ? [`Disallow: ${adminPath}`] : []),
+    'Disallow: /api/',
+    'Disallow: /v1/',
+    `Sitemap: ${CANONICAL_SITE_ORIGIN}/sitemap.xml`,
+    '',
+  ];
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  return res.send(lines.join('\n'));
+});
+
+app.get('/sitemap.xml', async (_req: Request, res: Response) => {
+  try {
+    const [categories, products] = await Promise.all([
+      productRepository.getCategories(undefined, false),
+      productRepository.getAll({ status: 'PUBLISHED' }),
+    ]);
+
+    const today = new Date().toISOString().split('T')[0];
+    const staticUrls = [
+      { loc: `${CANONICAL_SITE_ORIGIN}/`, changefreq: 'daily', priority: '1.0' },
+      { loc: `${CANONICAL_SITE_ORIGIN}/men`, changefreq: 'daily', priority: '0.9' },
+      { loc: `${CANONICAL_SITE_ORIGIN}/kids`, changefreq: 'daily', priority: '0.9' },
+      { loc: `${CANONICAL_SITE_ORIGIN}/catalog`, changefreq: 'daily', priority: '0.9' },
+      { loc: `${CANONICAL_SITE_ORIGIN}/track`, changefreq: 'weekly', priority: '0.6' },
+    ];
+
+    const categoryUrls = categories.map((cat) => ({
+      loc: `${CANONICAL_SITE_ORIGIN}/category/${encodeURIComponent(cat.slug)}`,
+      changefreq: 'weekly',
+      priority: '0.8',
+    }));
+
+    const productUrls = products.map((p) => ({
+      loc: `${CANONICAL_SITE_ORIGIN}/product/${encodeURIComponent(p.slug || p.id)}`,
+      lastmod: p.updatedAt ? new Date(p.updatedAt).toISOString().split('T')[0] : today,
+      changefreq: 'weekly',
+      priority: '0.8',
+    }));
+
+    const allEntries = [...staticUrls, ...categoryUrls, ...productUrls];
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${allEntries
+      .map(
+        (u: any) =>
+          `  <url>\n    <loc>${escapeXml(u.loc)}</loc>\n    <lastmod>${u.lastmod || today}</lastmod>\n    <changefreq>${u.changefreq}</changefreq>\n    <priority>${u.priority}</priority>\n  </url>`
+      )
+      .join('\n')}\n</urlset>\n`;
+
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=1800');
+    return res.send(xml);
+  } catch (err: any) {
+    return res.status(500).type('text/plain').send('Failed to generate sitemap.');
+  }
+});
+
+app.get(['/api/v1/catalog/feed.json', '/v1/catalog/feed.json'], async (_req: Request, res: Response) => {
+  try {
+    const products = await productRepository.getAll({ status: 'PUBLISHED' });
+    const items = products.map((p) => {
+      const slug = encodeURIComponent(p.slug || p.id);
+      const isAvailable = p.inStock && p.stock > 0;
+      return {
+        id: p.sku || p.id,
+        item_group_id: p.id,
+        title: p.name,
+        description: p.description || `${p.name} — Heavyweight ${p.gsm || 240} GSM ${p.fabric || 'cotton'} streetwear by TORI-WEAR.`,
+        availability: isAvailable ? 'in stock' : 'out of stock',
+        condition: 'new',
+        price: `${Number(p.originalPrice || p.price).toFixed(2)} INR`,
+        sale_price: p.originalPrice && p.originalPrice > p.price ? `${Number(p.price).toFixed(2)} INR` : undefined,
+        link: `${CANONICAL_SITE_ORIGIN}/product/${slug}`,
+        image_link: toAbsoluteAssetUrl(p.images?.[0]),
+        additional_image_link: (p.images || []).slice(1, 5).map((img) => toAbsoluteAssetUrl(img)),
+        brand: 'TORI-WEAR',
+        google_product_category: 'Apparel & Accessories > Clothing > Shirts & Tops',
+        gender: p.department === 'KIDS' ? 'kids' : 'unisex',
+        material: `${p.gsm || 240} GSM ${p.fabric || '100% Combed Cotton'}`,
+      };
+    });
+    res.setHeader('Cache-Control', 'public, max-age=900');
+    return res.json({
+      success: true,
+      brand: 'TORI-WEAR',
+      website: CANONICAL_SITE_ORIGIN,
+      currency: 'INR',
+      generatedAt: new Date().toISOString(),
+      count: items.length,
+      items,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to generate catalog JSON feed.' });
+  }
+});
+
+app.get(['/api/v1/catalog/feed.xml', '/v1/catalog/feed.xml'], async (_req: Request, res: Response) => {
+  try {
+    const products = await productRepository.getAll({ status: 'PUBLISHED' });
+    const itemsXml = products
+      .map((p) => {
+        const slug = encodeURIComponent(p.slug || p.id);
+        const isAvailable = p.inStock && p.stock > 0;
+        const desc = p.description || `${p.name} — Heavyweight ${p.gsm || 240} GSM ${p.fabric || 'cotton'} streetwear by TORI-WEAR.`;
+        const regularPrice = `${Number(p.originalPrice || p.price).toFixed(2)} INR`;
+        const salePrice = p.originalPrice && p.originalPrice > p.price ? `${Number(p.price).toFixed(2)} INR` : '';
+        return `    <item>
+      <g:id>${escapeXml(p.sku || p.id)}</g:id>
+      <g:item_group_id>${escapeXml(p.id)}</g:item_group_id>
+      <g:title>${escapeXml(p.name)}</g:title>
+      <g:description>${escapeXml(desc)}</g:description>
+      <g:link>${escapeXml(`${CANONICAL_SITE_ORIGIN}/product/${slug}`)}</g:link>
+      <g:image_link>${escapeXml(toAbsoluteAssetUrl(p.images?.[0]))}</g:image_link>
+      <g:brand>TORI-WEAR</g:brand>
+      <g:condition>new</g:condition>
+      <g:availability>${isAvailable ? 'in stock' : 'out of stock'}</g:availability>
+      <g:price>${escapeXml(regularPrice)}</g:price>${salePrice ? `\n      <g:sale_price>${escapeXml(salePrice)}</g:sale_price>` : ''}
+      <g:google_product_category>${escapeXml('Apparel & Accessories > Clothing > Shirts & Tops')}</g:google_product_category>
+    </item>`;
+      })
+      .join('\n');
+
+    const rss = `<?xml version="1.0" encoding="UTF-8"?>\n<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">\n  <channel>\n    <title>TORI-WEAR Product Catalog</title>\n    <link>${CANONICAL_SITE_ORIGIN}</link>\n    <description>Original anime-inspired heavyweight 240 GSM streetwear by TORI-WEAR.</description>\n${itemsXml}\n  </channel>\n</rss>\n`;
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=900');
+    return res.send(rss);
+  } catch (err: any) {
+    return res.status(500).type('text/plain').send('Failed to generate catalog XML feed.');
+  }
+});
+
+// ==========================================
 // 6. INTERNAL BUSINESS MANAGEMENT PLATFORM API & PERSISTENCE SERVICES
 // ==========================================
 app.use('/api/v1/admin/finance', financeRouter);
@@ -928,33 +1112,10 @@ async function startServer() {
   // Initialize Realtime WebSocket & WebRTC Signaling
   setupRealtimeWebSocket(httpServer);
 
-  const rawAdminEnv = process.env.VITE_ADMIN_PATH || process.env.ADMIN_PATH || '';
-  const serverAdminPath = (() => {
-    let val = String(rawAdminEnv).trim().replace(/^['"]+|['"]+$/g, '').trim();
-    if (/^https?:\/\//i.test(val)) {
-      try {
-        val = new URL(val).pathname;
-      } catch {
-        val = '';
-      }
-    }
-    val = (val.split('?')[0]?.split('#')[0] || '').trim();
-    if (val) {
-      val = (val.startsWith('/') ? val : `/${val}`).replace(/\/+/g, '/').replace(/\/+$/, '');
-      for (const suffix of ['/login', '/gateway', '/dashboard', '/forgot-password', '/reset-password', '/account/security']) {
-        if (val.toLowerCase().endsWith(suffix) && val.length > suffix.length) {
-          val = val.slice(0, val.length - suffix.length).replace(/\/+$/, '');
-          break;
-        }
-      }
-      if (val && val !== '/' && val.toLowerCase() !== '/admin') {
-        return val;
-      }
-    }
-    return '/tori-ops-gateway';
-  })();
+  const serverAdminPath = resolveConfiguredAdminPath();
 
   if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -963,14 +1124,16 @@ async function startServer() {
       },
       appType: 'spa',
     });
-    // Never allow Vite's HTML fallback to intercept /api, /v1, /generated-assets, /assets, or /models requests
+    // Never allow Vite's HTML fallback to intercept /api, /v1, /generated-assets, /assets, /models, /robots.txt, or /sitemap.xml
     app.use((req: Request, res: Response, next: NextFunction) => {
       if (
         req.originalUrl.startsWith('/api') ||
         req.originalUrl.startsWith('/v1') ||
         req.originalUrl.startsWith('/generated-assets') ||
         req.originalUrl.startsWith('/assets') ||
-        req.originalUrl.startsWith('/models')
+        req.originalUrl.startsWith('/models') ||
+        req.path === '/robots.txt' ||
+        req.path === '/sitemap.xml'
       ) {
         return next();
       }
@@ -980,22 +1143,35 @@ async function startServer() {
     const candidateDistDirs = [
       path.resolve(process.cwd(), 'dist'),
       path.resolve(import.meta.dirname || process.cwd(), 'dist'),
+      path.resolve(import.meta.dirname || process.cwd(), '..', 'dist'),
     ];
     const distDir = candidateDistDirs.find((d) => fs.existsSync(path.join(d, 'index.html'))) || candidateDistDirs[0]!;
     const indexHtmlPath = path.join(distDir, 'index.html');
 
-    const getRuntimeSpaHtml = (): string | null => {
+    const getRuntimeSpaHtml = async (): Promise<string | null> => {
       if (!fs.existsSync(indexHtmlPath)) return null;
       const rawHtml = fs.readFileSync(indexHtmlPath, 'utf8');
-      const runtimeScript = `<script>window.__TORI_RUNTIME_CONFIG__=${JSON.stringify({ adminPath: serverAdminPath })};</script>`;
-      if (rawHtml.includes('</head>')) {
-        return rawHtml.replace('</head>', `    ${runtimeScript}\n  </head>`);
+      let metaDomainCode = '';
+      let metaPixelId = '';
+      try {
+        const settings = await cmsRepository.getStoreSettings();
+        metaDomainCode = String(settings?.metaBusiness?.domainVerificationCode || '').trim();
+        metaPixelId = String(settings?.metaBusiness?.pixelId || '').trim();
+      } catch {
+        // Fallback safely without blocking HTML response
       }
-      return `${runtimeScript}${rawHtml}`;
+      const metaTag = metaDomainCode
+        ? `<meta name="facebook-domain-verification" content="${metaDomainCode.replace(/"/g, '&quot;')}" />\n    `
+        : '';
+      const runtimeScript = `<script>window.__TORI_RUNTIME_CONFIG__=${JSON.stringify({ adminPath: serverAdminPath, metaPixelId })};</script>`;
+      if (rawHtml.includes('</head>')) {
+        return rawHtml.replace('</head>', `    ${metaTag}${runtimeScript}\n  </head>`);
+      }
+      return `${metaTag}${runtimeScript}${rawHtml}`;
     };
 
-    const sendSpaHtml = (_req: Request, res: Response) => {
-      const html = getRuntimeSpaHtml();
+    const sendSpaHtml = async (_req: Request, res: Response) => {
+      const html = await getRuntimeSpaHtml();
       if (!html) {
         return res.status(503).send('Production frontend build (dist/index.html) not found. Run npm run build.');
       }

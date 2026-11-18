@@ -19,6 +19,9 @@ declare global {
   interface Window {
     __TORI_RUNTIME_CONFIG__?: {
       adminPath?: string;
+      metaPixelId?: string;
+      metaDomainVerification?: string;
+      metaCapiEnabled?: boolean;
     };
   }
 }

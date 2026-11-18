@@ -22,15 +22,69 @@ import {
   Clock,
   AlertCircle,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   RotateCw,
   RotateCcw,
 } from 'lucide-react';
 import { useCustomerAuth, CustomerAccountModalType } from '../context/CustomerAuthContext';
-import { OrderDetails, CartItem } from '../types';
+import { OrderDetails, CartItem, OrderTimelineEntry } from '../types';
 import { PRODUCTS } from '../data/products';
 import { downloadInvoiceFile, printInvoiceDirectly } from '../utils/invoiceGenerator';
-import { ReturnExchangeModal, CustomerReturnRequest } from './ReturnExchangeModal';
+import { ReturnExchangeModal, CustomerReturnRequest, mapServerReturnToCustomerReturn, isOrderWithinReturnWindow } from './ReturnExchangeModal';
 import { apiClient } from '../services/apiClient';
+
+const AuthProofThumbnail: React.FC<{ url: string; index: number }> = ({ url, index }) => {
+  const [blobSrc, setBlobSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  React.useEffect(() => {
+    let active = true;
+    let createdObjectUrl: string | null = null;
+    setBlobSrc(null);
+    setFailed(false);
+
+    apiClient.fetchReturnProofBlobUrl(url, false).then((resolved) => {
+      if (!active) {
+        if (resolved && resolved.startsWith('blob:')) URL.revokeObjectURL(resolved);
+        return;
+      }
+      if (!resolved) {
+        setFailed(true);
+      } else {
+        if (resolved.startsWith('blob:')) createdObjectUrl = resolved;
+        setBlobSrc(resolved);
+      }
+    });
+
+    return () => {
+      active = false;
+      if (createdObjectUrl) URL.revokeObjectURL(createdObjectUrl);
+    };
+  }, [url]);
+
+  if (failed) {
+    return (
+      <div className="aspect-square rounded-lg border border-neutral-800 bg-neutral-950 flex items-center justify-center text-[10px] text-neutral-500 p-2 text-center">
+        Proof #{index + 1} unavailable
+      </div>
+    );
+  }
+
+  if (!blobSrc) {
+    return (
+      <div className="aspect-square rounded-lg border border-neutral-800 bg-neutral-900 animate-pulse flex items-center justify-center text-[10px] text-neutral-500">
+        Loading...
+      </div>
+    );
+  }
+
+  return (
+    <div className="aspect-square rounded-lg overflow-hidden border border-neutral-700 bg-neutral-900">
+      <img src={blobSrc} alt={`Proof ${index + 1}`} className="w-full h-full object-cover" />
+    </div>
+  );
+};
 
 export interface CustomerAccountModalsProps {
   onApplyCoupon?: (code: string) => void;
@@ -66,19 +120,16 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
   // Order History Filter and Search
   const [orderFilter, setOrderFilter] = useState<'ALL' | 'ACTIVE' | 'DELIVERED' | 'CANCELLED' | 'RETURNS'>('ALL');
   const [orderSearchQuery, setOrderSearchQuery] = useState('');
+  const [expandedTimelines, setExpandedTimelines] = useState<Record<string, boolean>>({});
+  const [fetchedTimelines, setFetchedTimelines] = useState<Record<string, OrderTimelineEntry[]>>({});
+  const [loadingTimelineId, setLoadingTimelineId] = useState<string | null>(null);
 
   // Return & Exchange State
   const [returnModalOpen, setReturnModalOpen] = useState(false);
   const [selectedReturnOrder, setSelectedReturnOrder] = useState<OrderDetails | null>(null);
   const [selectedReturnItem, setSelectedReturnItem] = useState<any | null>(null);
-  const [customerReturns, setCustomerReturns] = useState<CustomerReturnRequest[]>(() => {
-    try {
-      const saved = localStorage.getItem('toriwear_customer_returns');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [customerReturns, setCustomerReturns] = useState<CustomerReturnRequest[]>([]);
+  const [returnWindowDays, setReturnWindowDays] = useState<number>(7);
   const [viewingReturnStatus, setViewingReturnStatus] = useState<CustomerReturnRequest | null>(null);
 
   // New VPA
@@ -200,6 +251,31 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
     }
     return list;
   }, [propOrders, customer]);
+
+  // Load authoritative return window days and customer returns when Order History opens
+  React.useEffect(() => {
+    if (activeAccountModal !== 'ORDER_HISTORY') return;
+    let active = true;
+
+    apiClient.getStoreContact().then((res) => {
+      if (active && res.success && res.data?.returnWindowDays) {
+        setReturnWindowDays(Math.max(1, Number(res.data.returnWindowDays) || 7));
+      }
+    }).catch(() => {});
+
+    const orderIds = loadedOrders.map((o) => o.orderId).filter(Boolean);
+    if (customer || orderIds.length > 0) {
+      apiClient.getMyReturns(orderIds).then((res) => {
+        if (active && res.success && Array.isArray(res.data)) {
+          setCustomerReturns(res.data.map(mapServerReturnToCustomerReturn));
+        }
+      }).catch(() => {});
+    }
+
+    return () => {
+      active = false;
+    };
+  }, [activeAccountModal, customer?.id, loadedOrders]);
 
   // Filtered orders
   const filteredOrders = useMemo(() => {
@@ -349,31 +425,11 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
   };
 
   const handleReturnSuccess = (newReturn: CustomerReturnRequest) => {
-    setCustomerReturns((prev) => [newReturn, ...prev]);
-    setInvoiceToast(`${newReturn.type === 'EXCHANGE' ? 'Exchange' : 'Return'} request #${newReturn.id} confirmed!`);
+    setCustomerReturns((prev) => [newReturn, ...prev.filter((r) => r.id !== newReturn.id)]);
+    setInvoiceToast(
+      `${newReturn.type === 'EXCHANGE' ? 'Exchange' : 'Return'} request #${newReturn.returnNumber || newReturn.id} confirmed!`
+    );
     setTimeout(() => setInvoiceToast(null), 4000);
-  };
-
-  const handleCancelCustomerReturn = (returnId: string) => {
-    setCustomerReturns((prev) => {
-      const updated = prev.filter((r) => r.id !== returnId);
-      try {
-        localStorage.setItem('toriwear_customer_returns', JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
-
-    try {
-      const storedAdmin = localStorage.getItem('returnRequests');
-      if (storedAdmin) {
-        const list = JSON.parse(storedAdmin).filter((r: any) => r.id !== returnId);
-        localStorage.setItem('returnRequests', JSON.stringify(list));
-      }
-    } catch {}
-
-    setViewingReturnStatus(null);
-    setInvoiceToast(`Return request #${returnId} has been cancelled.`);
-    setTimeout(() => setInvoiceToast(null), 3000);
   };
 
   const handleAddVpa = (e: React.FormEvent) => {
@@ -636,6 +692,7 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
                     const isDelivered = status === 'Delivered';
                     const isCancelled = status === 'Cancelled';
                     const isShipped = status === 'Shipped' || status === 'Out for Delivery';
+                    const isWindowOpen = isOrderWithinReturnWindow(order, returnWindowDays);
 
                     return (
                       <div 
@@ -775,6 +832,101 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
                               </div>
                             </div>
                           )}
+
+                          {/* Expandable Order Activity Timeline */}
+                          <div className="mt-3 pt-2.5 border-t border-neutral-800/70">
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const nextOpen = !expandedTimelines[order.orderId];
+                                setExpandedTimelines((prev) => ({ ...prev, [order.orderId]: nextOpen }));
+                                if (nextOpen && (!order.timeline || order.timeline.length === 0) && !fetchedTimelines[order.orderId]) {
+                                  setLoadingTimelineId(order.orderId);
+                                  const res = await apiClient.trackOrder(order.orderId, {
+                                    phone: order.shippingAddress?.phone || customer?.phone,
+                                    email: order.shippingAddress?.email || customer?.email,
+                                  });
+                                  setLoadingTimelineId(null);
+                                  if (res.success && Array.isArray(res.tracking?.timeline)) {
+                                    setFetchedTimelines((prev) => ({ ...prev, [order.orderId]: res.tracking.timeline }));
+                                  }
+                                }
+                              }}
+                              className="w-full flex items-center justify-between text-[11px] font-mono text-neutral-300 hover:text-white cursor-pointer py-1"
+                            >
+                              <span className="flex items-center gap-1.5 font-semibold">
+                                <Clock className="w-3.5 h-3.5 text-red-400" />
+                                <span>
+                                  Order Activity Timeline (
+                                  {(fetchedTimelines[order.orderId] || order.timeline || []).length || 1}
+                                  )
+                                </span>
+                              </span>
+                              {expandedTimelines[order.orderId] ? (
+                                <ChevronUp className="w-3.5 h-3.5 text-neutral-400" />
+                              ) : (
+                                <ChevronDown className="w-3.5 h-3.5 text-neutral-400" />
+                              )}
+                            </button>
+
+                            {expandedTimelines[order.orderId] && (
+                              <div className="mt-2.5 pl-3 ml-1.5 border-l border-neutral-800 space-y-2.5">
+                                {loadingTimelineId === order.orderId ? (
+                                  <div className="text-[11px] font-mono text-neutral-400 py-1">Loading timeline...</div>
+                                ) : (
+                                  (() => {
+                                    const entries =
+                                      fetchedTimelines[order.orderId] && fetchedTimelines[order.orderId].length > 0
+                                        ? fetchedTimelines[order.orderId]
+                                        : order.timeline && order.timeline.length > 0
+                                        ? order.timeline
+                                        : [
+                                            {
+                                              title: `Order ${status}`,
+                                              timestamp: order.date,
+                                              note: isCancelled
+                                                ? order.cancellationReason || 'Order cancelled.'
+                                                : 'Order confirmed in fulfillment queue.',
+                                            },
+                                          ];
+
+                                    return entries.map((ev, eIdx) => {
+                                      const parsedDate = ev.timestamp ? new Date(ev.timestamp) : null;
+                                      const formattedTs =
+                                        parsedDate && !Number.isNaN(parsedDate.getTime())
+                                          ? parsedDate.toLocaleString('en-IN', {
+                                              day: 'numeric',
+                                              month: 'short',
+                                              year: 'numeric',
+                                              hour: '2-digit',
+                                              minute: '2-digit',
+                                            })
+                                          : ev.timestamp || '';
+                                      const isLatest = eIdx === entries.length - 1;
+                                      return (
+                                        <div key={eIdx} className="relative pl-2">
+                                          <span
+                                            className={`absolute -left-[18px] top-1.5 w-2.5 h-2.5 rounded-full ${
+                                              isLatest ? 'bg-emerald-500' : 'bg-red-500'
+                                            }`}
+                                          />
+                                          <div className="text-xs font-semibold text-white">{ev.title}</div>
+                                          {formattedTs && (
+                                            <div className="text-[10px] font-mono text-neutral-400 tabular-nums mt-0.5">
+                                              {formattedTs}
+                                            </div>
+                                          )}
+                                          {ev.note && ev.note !== ev.title && (
+                                            <div className="text-[11px] text-neutral-300 mt-0.5">{ev.note}</div>
+                                          )}
+                                        </div>
+                                      );
+                                    });
+                                  })()
+                                )}
+                              </div>
+                            )}
+                          </div>
                         </div>
 
                         {/* Active Return/Exchange Banner if present */}
@@ -793,14 +945,15 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
                                       <div className="flex items-center gap-2 text-white font-bold flex-wrap">
                                         <span>{ret.type === 'EXCHANGE' ? 'Exchange Requested' : 'Return Requested'}</span>
                                         <span className="text-[10px] text-amber-300 bg-amber-950 px-2 py-0.5 rounded border border-amber-800">
-                                          {ret.id}
+                                          {ret.returnNumber || ret.id}
                                         </span>
                                         <span className="text-[10px] text-emerald-400 font-bold">
-                                          {ret.status}
+                                          {ret.status.replace(/_/g, ' ')}
                                         </span>
                                       </div>
                                       <div className="text-neutral-400 text-[11px] mt-0.5">
-                                        Pickup: <span className="text-neutral-200">{ret.estimatedPickupDate}</span> • Reason: {ret.reason}
+                                        {ret.pickupCourier ? `Pickup: ${ret.pickupCourier}` : 'Pickup pending review'}
+                                        {ret.pickupAwb ? ` (AWB: ${ret.pickupAwb})` : ''} • Reason: {ret.reason}
                                         {ret.exchangeDetails?.newSize && ` • Replacement Size: ${ret.exchangeDetails.newSize}`}
                                       </div>
                                     </div>
@@ -933,12 +1086,12 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
                                               setViewingReturnStatus(itemReturn);
                                             }}
                                             className="px-2.5 py-1.5 rounded-lg bg-amber-950/80 hover:bg-amber-900 border border-amber-600/80 text-amber-300 hover:text-white transition flex items-center gap-1.5 text-[11px] font-mono font-bold cursor-pointer shrink-0 shadow-sm"
-                                            title={`View return status for ${item.product?.name || 'this item'} (${itemReturn.id})`}
+                                            title={`View return status for ${item.product?.name || 'this item'} (${itemReturn.returnNumber || itemReturn.id})`}
                                           >
                                             <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
-                                            <span>Return: {itemReturn.status === 'REQUESTED' ? 'Scheduled' : itemReturn.status}</span>
+                                            <span>Return: {itemReturn.status.replace(/_/g, ' ')}</span>
                                           </button>
-                                        ) : (
+                                        ) : isWindowOpen ? (
                                           <button
                                             type="button"
                                             onClick={(e) => {
@@ -946,12 +1099,12 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
                                               handleOpenReturnModal(order, item);
                                             }}
                                             className="px-2.5 py-1.5 rounded-lg bg-neutral-800/90 hover:bg-neutral-700 text-amber-400 hover:text-amber-300 border border-neutral-700/80 transition flex items-center gap-1.5 text-[11px] font-mono font-bold cursor-pointer shrink-0 shadow-sm"
-                                            title={`Initiate 7-day Return or Exchange with photo proof for ${item.product?.name || 'this item'}`}
+                                            title={`Initiate ${returnWindowDays}-day Return or Exchange with photo proof for ${item.product?.name || 'this item'}`}
                                           >
                                             <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
                                             <span>Return / Exchange</span>
                                           </button>
-                                        )
+                                        ) : null
                                       )}
                                     </div>
                                   </div>
@@ -993,17 +1146,22 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
 
                           {/* Action Buttons: Reorder, Download Invoice, Print/Save PDF, Track, Return */}
                           <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-neutral-800/60 font-mono text-xs">
-                            {/* Return / Exchange Button for Delivered Orders */}
-                            {isDelivered && !isCancelled && (
+                            {/* Return / Exchange Button for Delivered Orders within returnWindowDays */}
+                            {isDelivered && !isCancelled && isWindowOpen && (
                               <button
                                 type="button"
                                 onClick={() => handleOpenReturnModal(order)}
                                 className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-amber-400 hover:text-amber-300 font-bold transition cursor-pointer flex items-center gap-1.5"
-                                title="Initiate Return or Exchange request for items in this order"
+                                title={`Initiate Return or Exchange within ${returnWindowDays} days of delivery`}
                               >
                                 <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
                                 <span>Return / Exchange</span>
                               </button>
+                            )}
+                            {isDelivered && !isCancelled && !isWindowOpen && !customerReturns.some((r) => r.orderId === order.orderId) && (
+                              <span className="px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-500 text-[11px]">
+                                {returnWindowDays}-day return window closed
+                              </span>
                             )}
 
                             {/* Reorder Button for Completed/Non-Cancelled Orders */}
@@ -1439,7 +1597,7 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
         </div>
       </div>
 
-      {/* Return & Exchange Request Wizard Modal (With Camera Support) */}
+      {/* Return & Exchange Request Wizard Modal */}
       <ReturnExchangeModal
         isOpen={returnModalOpen}
         onClose={() => {
@@ -1471,10 +1629,10 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
                   <RotateCcw className="w-4 h-4" />
                 </div>
                 <div>
-                  <div className="text-white text-base font-bold font-sans flex items-center gap-2">
+                  <div className="text-white text-base font-bold font-sans flex items-center gap-2 flex-wrap">
                     <span>{viewingReturnStatus.type === 'EXCHANGE' ? 'Exchange Status' : 'Return Status'}</span>
                     <span className="text-xs text-amber-400 bg-amber-950 px-2 py-0.5 rounded border border-amber-800">
-                      {viewingReturnStatus.id}
+                      {viewingReturnStatus.returnNumber || viewingReturnStatus.id}
                     </span>
                   </div>
                   <div className="text-[11px] text-neutral-400 mt-0.5">
@@ -1495,28 +1653,67 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
 
             {/* Body */}
             <div className="p-4 sm:p-5 space-y-4 max-h-[75vh] overflow-y-auto">
-              {/* Stepper Status Bar */}
-              <div className="p-3 rounded-xl bg-neutral-900/60 border border-neutral-800">
-                <div className="text-[10px] text-neutral-400 font-bold uppercase mb-2">Reverse Progress</div>
-                <div className="flex items-center justify-between text-center">
-                  {[
-                    { label: 'Requested', done: true },
-                    { label: 'Pickup Ready', done: viewingReturnStatus.status !== 'REQUESTED' },
-                    { label: 'QC Passed', done: viewingReturnStatus.status === 'QC_PASSED' || viewingReturnStatus.status === 'REFUNDED' || viewingReturnStatus.status === 'EXCHANGED' },
-                    { label: viewingReturnStatus.type === 'EXCHANGE' ? 'Replaced' : 'Refunded', done: viewingReturnStatus.status === 'REFUNDED' || viewingReturnStatus.status === 'EXCHANGED' }
-                  ].map((step, sIdx) => (
-                    <div key={sIdx} className="flex-1 flex flex-col items-center">
-                      <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                        step.done ? 'bg-amber-500 text-black shadow-sm shadow-amber-500/30' : 'bg-neutral-800 text-neutral-500'
-                      }`}>
-                        {step.done ? '✓' : sIdx + 1}
-                      </div>
-                      <div className={`text-[10px] mt-1 ${step.done ? 'text-white font-bold' : 'text-neutral-500'}`}>
-                        {step.label}
-                      </div>
-                    </div>
-                  ))}
+              {/* Current Status Pill & Milestone Summary */}
+              <div className="p-3 rounded-xl bg-neutral-900/60 border border-neutral-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-neutral-400 font-bold uppercase">Current Stage</span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                    viewingReturnStatus.status === 'REJECTED'
+                      ? 'bg-red-950 text-red-400 border border-red-800'
+                      : viewingReturnStatus.status === 'REFUNDED' || viewingReturnStatus.status === 'REFUND_COMPLETED' || viewingReturnStatus.status === 'CLOSED'
+                        ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                        : 'bg-amber-950 text-amber-300 border border-amber-800'
+                  }`}>
+                    {viewingReturnStatus.status.replace(/_/g, ' ')}
+                  </span>
                 </div>
+
+                {viewingReturnStatus.status !== 'REJECTED' && (
+                  <div className="flex items-center justify-between text-center">
+                    {[
+                      { label: 'Requested', done: true },
+                      {
+                        label: 'Approved',
+                        done: [
+                          'APPROVED',
+                          'PICKUP_SCHEDULED',
+                          'IN_TRANSIT',
+                          'RETURNED_TO_WAREHOUSE',
+                          'REFUND_PROCESSING',
+                          'REFUNDED',
+                          'CLOSED',
+                        ].includes(viewingReturnStatus.status),
+                      },
+                      {
+                        label: 'Warehouse QC',
+                        done: ['RETURNED_TO_WAREHOUSE', 'REFUND_PROCESSING', 'REFUNDED', 'CLOSED'].includes(
+                          viewingReturnStatus.status
+                        ),
+                      },
+                      {
+                        label: viewingReturnStatus.type === 'EXCHANGE' ? 'Resolved' : 'Refunded',
+                        done: ['REFUNDED', 'REFUND_COMPLETED', 'CLOSED'].includes(viewingReturnStatus.status),
+                      },
+                    ].map((step, sIdx) => (
+                      <div key={sIdx} className="flex-1 flex flex-col items-center">
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                          step.done ? 'bg-amber-500 text-black shadow-sm shadow-amber-500/30' : 'bg-neutral-800 text-neutral-500'
+                        }`}>
+                          {step.done ? '✓' : sIdx + 1}
+                        </div>
+                        <div className={`text-[10px] mt-1 ${step.done ? 'text-white font-bold' : 'text-neutral-500'}`}>
+                          {step.label}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {viewingReturnStatus.rejectionReason && (
+                  <div className="p-2.5 rounded-lg bg-red-950/60 border border-red-800 text-red-200 text-[11px]">
+                    <span className="font-bold">Rejection Reason:</span> {viewingReturnStatus.rejectionReason}
+                  </div>
+                )}
               </div>
 
               {/* Item Card */}
@@ -1563,55 +1760,71 @@ export const CustomerAccountModals: React.FC<CustomerAccountModalsProps> = ({
                 )}
               </div>
 
-              {/* Uploaded / Snapped Photos Preview */}
-              {viewingReturnStatus.photos && viewingReturnStatus.photos.length > 0 && (
+              {/* Auth-gated Uploaded Photos Preview */}
+              {(viewingReturnStatus.proofUrls || viewingReturnStatus.photos || []).length > 0 && (
                 <div className="space-y-1.5">
                   <div className="text-[10px] text-neutral-400 font-bold uppercase">
-                    Photos Attached ({viewingReturnStatus.photos.length})
+                    Proof Photos Attached ({(viewingReturnStatus.proofUrls || viewingReturnStatus.photos || []).length})
                   </div>
                   <div className="grid grid-cols-3 gap-2">
-                    {viewingReturnStatus.photos.map((p, pIdx) => (
-                      <div key={pIdx} className="aspect-square rounded-lg overflow-hidden border border-neutral-700 bg-neutral-900">
-                        <img src={p} alt={`Proof ${pIdx + 1}`} className="w-full h-full object-cover" />
-                      </div>
+                    {(viewingReturnStatus.proofUrls || viewingReturnStatus.photos || []).map((p, pIdx) => (
+                      <AuthProofThumbnail key={pIdx} url={p} index={pIdx} />
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* Pickup Courier & Address */}
+              {/* Reverse Pickup & Refund Details */}
               <div className="p-3 rounded-xl bg-neutral-900/40 border border-neutral-800 space-y-1.5 text-[11px]">
                 <div className="flex items-center justify-between">
-                  <span className="text-neutral-400">Pickup Date:</span>
-                  <span className="text-neutral-200">{viewingReturnStatus.estimatedPickupDate}</span>
-                </div>
-                <div className="flex items-center justify-between">
                   <span className="text-neutral-400">Reverse Courier:</span>
-                  <span className="text-blue-400 font-bold">BlueDart Express Reverse</span>
+                  <span className="text-blue-400 font-bold">{viewingReturnStatus.pickupCourier || 'Pending Assignment'}</span>
                 </div>
-                <div className="flex items-start justify-between pt-1 border-t border-neutral-800/80">
-                  <span className="text-neutral-400 shrink-0">Pickup At:</span>
-                  <span className="text-neutral-300 text-right truncate max-w-[240px]">
-                    {viewingReturnStatus.pickupAddress.addressLine1}, {viewingReturnStatus.pickupAddress.city} - {viewingReturnStatus.pickupAddress.pincode}
-                  </span>
-                </div>
+                {viewingReturnStatus.pickupAwb && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-neutral-400">Pickup AWB:</span>
+                    <span className="text-white font-bold">{viewingReturnStatus.pickupAwb}</span>
+                  </div>
+                )}
+                {viewingReturnStatus.refundStatus && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-neutral-400">Refund Status:</span>
+                    <span className="text-emerald-400 font-bold">
+                      {viewingReturnStatus.refundStatus.replace(/_/g, ' ')}
+                      {viewingReturnStatus.refundedAmount ? ` (₹${viewingReturnStatus.refundedAmount.toLocaleString('en-IN')})` : ''}
+                    </span>
+                  </div>
+                )}
+                {viewingReturnStatus.refundTransactionId && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-neutral-400">Refund Ref / ID:</span>
+                    <span className="text-neutral-200 font-bold">{viewingReturnStatus.refundTransactionId}</span>
+                  </div>
+                )}
               </div>
+
+              {/* Full Status History Timeline */}
+              {viewingReturnStatus.statusHistory && viewingReturnStatus.statusHistory.length > 0 && (
+                <div className="p-3 rounded-xl bg-neutral-900/40 border border-neutral-800 space-y-2">
+                  <div className="text-[10px] text-neutral-400 font-bold uppercase">Activity Timeline</div>
+                  <div className="space-y-2 border-l border-neutral-800 pl-3 ml-1">
+                    {viewingReturnStatus.statusHistory.map((h, hIdx) => (
+                      <div key={h.id || hIdx} className="relative">
+                        <span className="absolute -left-[16px] top-1.5 w-2 h-2 rounded-full bg-amber-400" />
+                        <div className="text-white font-bold text-[11px]">{h.status.replace(/_/g, ' ')}</div>
+                        {h.note && <div className="text-neutral-300 text-[11px]">{h.note}</div>}
+                        <div className="text-[10px] text-neutral-500">
+                          {new Date(h.createdAt).toLocaleString('en-IN')} {h.actorName ? `• ${h.actorName}` : ''}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Footer */}
-            <div className="p-4 border-t border-neutral-800 bg-neutral-950/80 flex items-center justify-between">
-              {viewingReturnStatus.status === 'REQUESTED' ? (
-                <button
-                  type="button"
-                  onClick={() => handleCancelCustomerReturn(viewingReturnStatus.id)}
-                  className="px-3 py-1.5 rounded-lg bg-neutral-900 hover:bg-red-950 text-red-400 border border-red-900/60 font-bold transition cursor-pointer text-xs"
-                >
-                  Cancel Return Request
-                </button>
-              ) : (
-                <div />
-              )}
-
+            <div className="p-4 border-t border-neutral-800 bg-neutral-950/80 flex items-center justify-end">
               <button
                 type="button"
                 onClick={() => setViewingReturnStatus(null)}

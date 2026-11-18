@@ -19,6 +19,7 @@ import {
   Printer,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
+import { trackMetaEvent } from '../utils/metaPixel';
 
 interface CheckoutModalProps {
   isOpen: boolean;
@@ -200,6 +201,15 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       onOrderPlaced(order);
       setStep('confirmed');
 
+      trackMetaEvent('Purchase', {
+        orderId: cleanOrderId,
+        value: Number(order.total || 0),
+        currency: 'INR',
+        contentIds: items.map((it) => it.product.id),
+        numItems: items.reduce((s, it) => s + (it.quantity || 1), 0),
+        userData: { email: address.email, phone: address.phone },
+      });
+
       // Trigger celebration confetti
       try {
         confetti({
@@ -356,6 +366,15 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
             setConfirmedOrder(confirmed);
             onOrderPlaced(confirmed);
             setStep('confirmed');
+
+            trackMetaEvent('Purchase', {
+              orderId: cleanOrderId,
+              value: Number(confirmed.total || 0),
+              currency: 'INR',
+              contentIds: items.map((it) => it.product.id),
+              numItems: items.reduce((s, it) => s + (it.quantity || 1), 0),
+              userData: { email: address.email, phone: address.phone },
+            });
 
             try {
               confetti({

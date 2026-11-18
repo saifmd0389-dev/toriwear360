@@ -13,6 +13,7 @@ import { resolveMySqlConnectionConfig } from './mysqlConfig';
 function resolveMigrationSqlPath(relativePath: string): string | null {
   const candidates = [
     path.resolve(process.cwd(), relativePath),
+    path.resolve(import.meta.dirname || process.cwd(), '..', relativePath),
     path.resolve(import.meta.dirname || process.cwd(), '../..', relativePath),
   ];
   for (const candidate of candidates) {
@@ -116,6 +117,32 @@ export async function ensureMySqlSchemaInitialized(): Promise<boolean> {
         console.log('[MYSQL-INIT] Applying additive Early Access & Coupon schema updates...');
         await applyStatementsIdempotently(connection, additiveSql);
         console.log('[MYSQL-INIT] Additive Early Access & Coupon schema verified.');
+      }
+    }
+
+    // Check additive Master Update columns & Return tables idempotently
+    const [retRows]: any = await connection.query(
+      "SELECT COUNT(*) AS tableCount FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('return_requests', 'return_items', 'return_status_history')"
+    );
+    const existingRetTables = Number(retRows?.[0]?.tableCount || 0);
+
+    const [catColRows]: any = await connection.query(
+      "SELECT COUNT(*) AS colCount FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'categories' AND column_name = 'seoTitle'"
+    );
+    const hasCatCols = Number(catColRows?.[0]?.colCount || 0) >= 1;
+
+    const [prodCatColRows]: any = await connection.query(
+      "SELECT COUNT(*) AS colCount FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'products' AND column_name = 'categoryIdsJson'"
+    );
+    const hasProdCatCols = Number(prodCatColRows?.[0]?.colCount || 0) >= 1;
+
+    if (existingRetTables < 3 || !hasCatCols || !hasProdCatCols) {
+      const masterPath = resolveMigrationSqlPath('prisma/migrations/20261118_master_update/migration.sql');
+      if (masterPath) {
+        const masterSql = fs.readFileSync(masterPath, 'utf8');
+        console.log('[MYSQL-INIT] Applying additive Master Update schema (Categories & Returns/Refunds)...');
+        await applyStatementsIdempotently(connection, masterSql);
+        console.log('[MYSQL-INIT] Additive Master Update schema verified.');
       }
     }
 

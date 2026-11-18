@@ -6,11 +6,11 @@
   "scripts": {
     "dev": "tsx server.ts",
     "postinstall": "prisma generate",
-    "build": "prisma generate && vite build",
-    "start": "tsx server.ts",
+    "build": "prisma generate && vite build && esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/server.mjs",
+    "start": "node code.js",
     "preview": "vite preview",
     "seed": "tsx server/db/seed.ts",
-    "clean": "rm -rf dist server.js",
+    "clean": "rm -rf dist dist-server server.js",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAdmin } from '../AdminDataContext';
 import { AdminProduct, AdminProductVariant, LicenseRightsStatus, PublishingStatus } from '../types';
-import { AnimeFranchise, PopUniverse, FitType } from '../../types';
+import { AnimeFranchise, PopUniverse, FitType, StoreCategory } from '../../types';
+import { apiClient } from '../../services/apiClient';
 import { isValidProductImageUrl } from '../../utils/productFilters';
 import { MEN_WORLDS, KIDS_WORLDS } from '../../data/constants';
 import { uploadCmsImageAsset } from '../data/frontPageCmsData';
@@ -93,6 +94,13 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
   const [defaultWeightGrams, setDefaultWeightGrams] = useState(340);
   const [customVariantSize, setCustomVariantSize] = useState('');
   const [customVariantStock, setCustomVariantStock] = useState(25);
+  const [availableCategories, setAvailableCategories] = useState<StoreCategory[]>([]);
+  const [categoryIds, setCategoryIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    apiClient.getCategories('ALL', true).then((list) => setAvailableCategories(list)).catch(() => {});
+  }, [isOpen]);
 
   useEffect(() => {
     if (product) {
@@ -123,6 +131,7 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
       );
       setNewImageUrlInput('');
       setPublishingStatus(product.publishingStatus);
+      setCategoryIds(Array.isArray(product.categoryIds) ? product.categoryIds : []);
       const initialVariants = product.variants || [];
       setVariants(initialVariants);
       const firstVariant = initialVariants[0];
@@ -162,6 +171,7 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
       setDefaultWeightGrams(340);
       setCustomVariantSize('');
       setCustomVariantStock(25);
+      setCategoryIds([]);
       setVariants([
         { id: `var-s-${Date.now()}`, sku: `${generatedSku}-S`, size: 'S', colorName: 'Obsidian Black', colorHex: '#111115', price: 1199, stock: 20, reserved: 0, barcode: '8901001', weightGrams: 320 },
         { id: `var-m-${Date.now()}`, sku: `${generatedSku}-M`, size: 'M', colorName: 'Obsidian Black', colorHex: '#111115', price: 1199, stock: 35, reserved: 0, barcode: '8901002', weightGrams: 340 },
@@ -318,6 +328,7 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
       licenseRightsStatus,
       images: finalImages,
       publishingStatus,
+      categoryIds,
       variants: finalVariants,
       colors: derivedColors,
       sizes: derivedSizes,
@@ -827,6 +838,40 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
                 />
               </div>
             </div>
+
+            {/* Multi-Category Assignment */}
+            {availableCategories.length > 0 && (
+              <div>
+                <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1.5">
+                  Storefront Categories (Multi-Select)
+                </label>
+                <div className="flex flex-wrap gap-1.5 p-3 rounded-xl bg-neutral-900 border border-neutral-800">
+                  {availableCategories.map((cat) => {
+                    const selected = categoryIds.includes(cat.id);
+                    return (
+                      <button
+                        key={cat.id}
+                        type="button"
+                        onClick={() =>
+                          setCategoryIds((prev) =>
+                            prev.includes(cat.id) ? prev.filter((id) => id !== cat.id) : [...prev, cat.id]
+                          )
+                        }
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer flex items-center gap-1 ${
+                          selected
+                            ? 'bg-red-600/20 border-red-500 text-white'
+                            : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-white'
+                        }`}
+                      >
+                        {selected && <Check className="w-3 h-3 text-red-400" />}
+                        <span>{cat.name}</span>
+                        <span className="text-[9px] font-mono text-neutral-500 uppercase">({cat.department})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-semibold text-neutral-300 uppercase tracking-wider mb-1">

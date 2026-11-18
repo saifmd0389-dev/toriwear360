@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import { Product } from '../types';
 import {
   X,
@@ -14,15 +14,13 @@ import {
   ChevronRight,
   Share2,
   Link,
-  ZoomIn,
-  Maximize2,
   Minimize2,
-  Move,
 } from 'lucide-react';
 import { WhatsAppIcon, InstagramIcon, FacebookIcon, XTwitterIcon } from './SocialIcons';
 import { TwinningBadgeButton } from './TwinningBadgeButton';
 import { WishlistHeartIcon } from './WishlistHeartIcon';
 import { getAuthoritativeInstagramUrl } from '../utils/socialLinks';
+import { ProductZoomViewer } from './ProductZoomViewer';
 
 interface ProductGalleryModalProps {
   product: Product | null;
@@ -57,23 +55,11 @@ export const ProductGalleryModal: React.FC<ProductGalleryModalProps> = ({
   const [deliveryResult, setDeliveryResult] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'DETAILS' | 'STORY' | 'SHIPPING'>('DETAILS');
   const [copiedLink, setCopiedLink] = useState(false);
-
-  // 100% Zoom and Pan state
-  const [zoomScale, setZoomScale] = useState<number>(1);
-  const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isFullscreenZoom, setIsFullscreenZoom] = useState(false);
 
-  // Touch handling for phone
-  const touchStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  const touchDistRef = useRef<number | null>(null);
-
-  // Reset selected image index and zoom when switching products
+  // Reset selected image index when switching products
   React.useEffect(() => {
     setSelectedImgIndex(0);
-    setZoomScale(1);
-    setPanOffset({ x: 0, y: 0 });
     setIsFullscreenZoom(false);
   }, [product?.id, isOpen]);
 
@@ -84,7 +70,6 @@ export const ProductGalleryModal: React.FC<ProductGalleryModalProps> = ({
       if (e.key === 'Escape') {
         if (isFullscreenZoom) {
           setIsFullscreenZoom(false);
-          handleResetZoom();
         } else {
           onClose();
         }
@@ -108,105 +93,14 @@ export const ProductGalleryModal: React.FC<ProductGalleryModalProps> = ({
 
   const imagesCount = product.images?.length || 1;
 
-  // Enhance image URL for high resolution when zooming
-  const getHighResImageUrl = (url: string, isZoomed: boolean) => {
-    if (!url) return '';
-    // Unsplash high quality parameter boost
-    if (isZoomed && url.includes('images.unsplash.com')) {
-      return url.replace(/w=\d+/, 'w=2400').replace(/q=\d+/, 'q=95');
-    }
-    return url;
-  };
-
-  const handlePrevImage = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    handleResetZoom();
+  const handlePrevImage = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
     setSelectedImgIndex((prev) => (prev === 0 ? imagesCount - 1 : prev - 1));
   };
 
-  const handleNextImage = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    handleResetZoom();
-    setSelectedImgIndex((prev) => (prev === imagesCount - 1 ? 0 : prev + 1));
-  };
-
-  const handleResetZoom = () => {
-    setZoomScale(1);
-    setPanOffset({ x: 0, y: 0 });
-    setIsDragging(false);
-  };
-
-  const handleToggle100Zoom = (e?: React.MouseEvent) => {
+  const handleNextImage = (e?: React.MouseEvent) => {
     e?.stopPropagation();
-    if (zoomScale === 1) {
-      setZoomScale(2); // 100% native pixel inspect
-      setPanOffset({ x: 0, y: 0 });
-    } else if (zoomScale === 2) {
-      setZoomScale(3); // 200% extreme detail
-      setPanOffset({ x: 0, y: 0 });
-    } else {
-      handleResetZoom();
-    }
-  };
-
-  // Mouse pan handlers (Desktop)
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (zoomScale <= 1) return;
-    e.preventDefault();
-    setIsDragging(true);
-    setDragStart({ x: e.clientX - panOffset.x, y: e.clientY - panOffset.y });
-  };
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDragging || zoomScale <= 1) return;
-    const maxPan = (zoomScale - 1) * 220;
-    const newX = Math.max(-maxPan, Math.min(maxPan, e.clientX - dragStart.x));
-    const newY = Math.max(-maxPan, Math.min(maxPan, e.clientY - dragStart.y));
-    setPanOffset({ x: newX, y: newY });
-  };
-
-  const handleMouseUp = () => {
-    setIsDragging(false);
-  };
-
-  // Touch pan & pinch handlers (Phone / Mobile)
-  const handleTouchStart = (e: React.TouchEvent) => {
-    const t0 = e.touches[0];
-    const t1 = e.touches[1];
-    if (e.touches.length === 1 && zoomScale > 1 && t0) {
-      touchStartRef.current = {
-        x: t0.clientX - panOffset.x,
-        y: t0.clientY - panOffset.y,
-      };
-    } else if (e.touches.length === 2 && t0 && t1) {
-      const dx = t0.clientX - t1.clientX;
-      const dy = t0.clientY - t1.clientY;
-      touchDistRef.current = Math.hypot(dx, dy);
-    }
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    const t0 = e.touches[0];
-    const t1 = e.touches[1];
-    if (e.touches.length === 1 && zoomScale > 1 && t0) {
-      const maxPan = (zoomScale - 1) * 200;
-      const newX = Math.max(-maxPan, Math.min(maxPan, t0.clientX - touchStartRef.current.x));
-      const newY = Math.max(-maxPan, Math.min(maxPan, t0.clientY - touchStartRef.current.y));
-      setPanOffset({ x: newX, y: newY });
-    } else if (e.touches.length === 2 && touchDistRef.current !== null && t0 && t1) {
-      const dx = t0.clientX - t1.clientX;
-      const dy = t0.clientY - t1.clientY;
-      const dist = Math.hypot(dx, dy);
-      const diff = dist - touchDistRef.current;
-      if (Math.abs(diff) > 12) {
-        if (diff > 0 && zoomScale < 3) {
-          setZoomScale((prev) => Math.min(3, prev + 0.5));
-        } else if (diff < 0 && zoomScale > 1) {
-          setZoomScale((prev) => Math.max(1, prev - 0.5));
-        }
-        touchDistRef.current = dist;
-      }
-    }
+    setSelectedImgIndex((prev) => (prev === imagesCount - 1 ? 0 : prev + 1));
   };
 
   const currentUrl = typeof window !== 'undefined' ? window.location.href : 'https://toriwear.in';
@@ -246,11 +140,10 @@ export const ProductGalleryModal: React.FC<ProductGalleryModalProps> = ({
   const hasStory = Boolean(product.storyQuote || product.character);
 
   const activeImageUrl = product.images[selectedImgIndex] || product.images[0] || '/assets/branding/toriwear-official-logo.png';
-  const highResImageUrl = getHighResImageUrl(activeImageUrl, zoomScale > 1 || isFullscreenZoom);
 
   return (
     <>
-      {/* Fullscreen Dedicated HD Lightbox View (When customer clicks Fullscreen) */}
+      {/* Fullscreen Dedicated HD Lightbox View */}
       {isFullscreenZoom && (
         <div 
           style={{ zIndex: 10001 }}
@@ -262,62 +155,34 @@ export const ProductGalleryModal: React.FC<ProductGalleryModalProps> = ({
               <span className="font-heading text-sm sm:text-base font-bold text-white uppercase tracking-wider">
                 {product.name}
               </span>
-              <span className="text-xs font-mono px-2 py-0.5 rounded bg-neutral-800 text-[#FF2028] font-bold">
-                {zoomScale === 1 ? 'FIT' : zoomScale === 2 ? '100% ZOOM' : '200% SUPER HD'}
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-neutral-800 text-[#FF2028] font-bold">
+                HD INSPECTOR
               </span>
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleToggle100Zoom}
-                className="px-3 py-1.5 rounded-lg bg-neutral-900 border border-neutral-700 text-xs font-mono font-bold text-white hover:border-[#FF2028] transition flex items-center gap-1.5 cursor-pointer"
-              >
-                <ZoomIn className="w-3.5 h-3.5 text-[#FF2028]" />
-                <span>{zoomScale === 1 ? '100% ZOOM' : zoomScale === 2 ? '200% HD' : 'RESET'}</span>
-              </button>
-              <button
-                onClick={() => {
-                  setIsFullscreenZoom(false);
-                  handleResetZoom();
-                }}
-                className="min-w-[40px] min-h-[40px] flex items-center justify-center p-2 rounded-lg bg-neutral-900 border border-neutral-700 text-white hover:bg-neutral-800 transition cursor-pointer"
-                aria-label="Close Fullscreen"
-              >
-                <Minimize2 className="w-4 h-4" />
-              </button>
-            </div>
+            <button
+              onClick={() => setIsFullscreenZoom(false)}
+              className="min-w-[40px] min-h-[40px] flex items-center justify-center p-2 rounded-lg bg-neutral-900 border border-neutral-700 text-white hover:bg-neutral-800 transition cursor-pointer"
+              aria-label="Close Fullscreen"
+            >
+              <Minimize2 className="w-4 h-4" />
+            </button>
           </div>
 
-          {/* Fullscreen Canvas View with Touch & Mouse Pan */}
-          <div
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onDoubleClick={handleToggle100Zoom}
-            className={`w-full flex-grow flex items-center justify-center overflow-hidden relative ${
-              zoomScale > 1 ? (isDragging ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-zoom-in'
-            }`}
-          >
-            <img
-              src={highResImageUrl}
-              alt={product.name}
-              referrerPolicy="no-referrer"
-              style={{
-                transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoomScale})`,
-                transition: isDragging ? 'none' : 'transform 0.25s ease-out',
-                imageRendering: 'auto',
-              }}
-              className="max-h-[85vh] max-w-[90vw] object-contain select-none will-change-transform"
-            />
-          </div>
+          <ProductZoomViewer
+            src={activeImageUrl}
+            alt={product.name}
+            enableHoverMagnify={true}
+            hoverZoomScale={2.0}
+            showToolbar={true}
+            onSwipeNext={() => handleNextImage()}
+            onSwipePrev={() => handlePrevImage()}
+            className="w-full flex-grow flex items-center justify-center min-h-0"
+            imageClassName="max-h-[82vh] max-w-[92vw] object-contain"
+          />
 
-          {/* Bottom Hint */}
           <div className="text-center pb-2 text-[11px] font-mono text-neutral-400">
-            {zoomScale > 1
-              ? 'DRAG WITH MOUSE OR TOUCH TO PAN · DOUBLE CLICK TO RESET'
-              : 'CLICK "100% ZOOM" OR DOUBLE-CLICK TO INSPECT FABRIC WEAVE & PRINT'}
+            HOVER / WHEEL ON DESKTOP OR PINCH / DOUBLE-TAP ON MOBILE TO INSPECT FABRIC WEAVE
           </div>
         </div>
       )}
@@ -368,33 +233,20 @@ export const ProductGalleryModal: React.FC<ProductGalleryModalProps> = ({
 
           {/* Modal Body: Two Column Gallery & Info */}
           <div className="overflow-y-auto p-5 sm:p-7 grid grid-cols-1 lg:grid-cols-12 gap-8">
-            {/* Left Column: Multi-Angle Gallery with 100% Zoom capability */}
+            {/* Left Column: Multi-Angle Gallery with ProductZoomViewer */}
             <div className="lg:col-span-6 space-y-4">
-              <div 
-                onMouseDown={handleMouseDown}
-                onMouseMove={handleMouseMove}
-                onMouseUp={handleMouseUp}
-                onMouseLeave={handleMouseUp}
-                onTouchStart={handleTouchStart}
-                onTouchMove={handleTouchMove}
-                onDoubleClick={handleToggle100Zoom}
-                className={`relative aspect-[4/5] rounded-2xl overflow-hidden bg-neutral-900 border border-neutral-800 group select-none ${
-                  zoomScale > 1 ? (isDragging ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-pointer'
-                }`}
+              <ProductZoomViewer
+                src={activeImageUrl}
+                alt={`${product.name} Preview`}
+                enableHoverMagnify={true}
+                hoverZoomScale={2.0}
+                showToolbar={true}
+                onExpandClick={() => setIsFullscreenZoom(true)}
+                onSwipeNext={() => handleNextImage()}
+                onSwipePrev={() => handlePrevImage()}
+                className="relative aspect-[4/5] rounded-2xl bg-neutral-900 border border-neutral-800 group"
+                imageClassName="w-full h-full object-cover object-center"
               >
-                {/* Primary High-Resolution Product Image */}
-                <img
-                  src={highResImageUrl}
-                  alt={`${product.name} Preview`}
-                  referrerPolicy="no-referrer"
-                  style={{
-                    transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoomScale})`,
-                    transition: isDragging ? 'none' : 'transform 0.25s ease-out',
-                    imageRendering: 'auto',
-                  }}
-                  className="w-full h-full object-cover object-center will-change-transform pointer-events-none"
-                />
-
                 {/* Badges on Top-Left */}
                 <div className="absolute top-3 left-3 flex flex-col gap-1.5 pointer-events-none z-10">
                   {product.gsm && (
@@ -409,56 +261,19 @@ export const ProductGalleryModal: React.FC<ProductGalleryModalProps> = ({
                   )}
                 </div>
 
-                {/* 100% Zoom Tool Bar Floating Controls */}
-                <div className="absolute top-3 right-14 z-20 flex items-center gap-1.5">
-                  {/* 100% / 200% Zoom Toggle Button */}
-                  <button
-                    onClick={handleToggle100Zoom}
-                    className={`px-2.5 py-1 rounded-full text-[10px] font-mono font-bold tracking-wider transition-all flex items-center gap-1 shadow-lg cursor-pointer ${
-                      zoomScale > 1
-                        ? 'bg-[#FF2028] text-white ring-2 ring-[#FF2028]/50'
-                        : 'bg-black/75 hover:bg-black text-neutral-200 hover:text-white border border-neutral-700'
-                    }`}
-                    title="Toggle 100% Zoom Inspection"
-                  >
-                    <ZoomIn className="w-3.5 h-3.5 text-white" />
-                    <span>{zoomScale === 1 ? '100% ZOOM' : zoomScale === 2 ? '200% HD' : 'RESET'}</span>
-                  </button>
-
-                  {/* Reset Button (only shown when zoomed) */}
-                  {zoomScale > 1 && (
-                    <button
-                      onClick={handleResetZoom}
-                      className="p-1 rounded-full bg-black/75 hover:bg-black text-neutral-300 hover:text-white border border-neutral-700 transition"
-                      title="Reset Zoom"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-
-                  {/* Fullscreen Expand Button */}
-                  <button
-                    onClick={() => setIsFullscreenZoom(true)}
-                    className="p-1.5 rounded-full bg-black/75 hover:bg-black text-neutral-200 hover:text-white border border-neutral-700 transition cursor-pointer shadow-md"
-                    title="Fullscreen Zoom Inspection"
-                  >
-                    <Maximize2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-
-                {/* Left and Right sliding arrows (hidden when zoomed to avoid touch conflict) */}
-                {imagesCount > 1 && zoomScale === 1 && (
+                {/* Left and Right sliding arrows */}
+                {imagesCount > 1 && (
                   <>
                     <button
                       onClick={handlePrevImage}
-                      className="absolute left-2.5 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-black/70 hover:bg-black/90 text-white flex items-center justify-center backdrop-blur-md border border-neutral-700/60 transition cursor-pointer z-10 opacity-80 hover:opacity-100"
+                      className="absolute left-2.5 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-black/70 hover:bg-black/90 text-white flex items-center justify-center backdrop-blur-md border border-neutral-700/60 transition cursor-pointer z-20 opacity-80 hover:opacity-100"
                       aria-label="Previous Image"
                     >
                       <ChevronLeft className="w-4 h-4" />
                     </button>
                     <button
                       onClick={handleNextImage}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-black/70 hover:bg-black/90 text-white flex items-center justify-center backdrop-blur-md border border-neutral-700/60 transition cursor-pointer z-10 opacity-80 hover:opacity-100"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-black/70 hover:bg-black/90 text-white flex items-center justify-center backdrop-blur-md border border-neutral-700/60 transition cursor-pointer z-20 opacity-80 hover:opacity-100"
                       aria-label="Next Image"
                     >
                       <ChevronRight className="w-4 h-4" />
@@ -482,15 +297,7 @@ export const ProductGalleryModal: React.FC<ProductGalleryModalProps> = ({
                     className={`w-5 h-5 ${isWishlisted ? 'fill-current' : ''}`}
                   />
                 </button>
-
-                {/* Active Zoom Drag Hint Bar */}
-                {zoomScale > 1 && (
-                  <div className="absolute bottom-2 inset-x-0 mx-auto w-fit px-3 py-1 rounded-full bg-black/85 border border-[#FF2028]/60 text-[#FF2028] text-[10px] font-mono font-bold tracking-wider pointer-events-none flex items-center gap-1.5 shadow-xl">
-                    <Move className="w-3 h-3 animate-pulse" />
-                    <span>DRAG TO INSPECT FABRIC & PRINT · DOUBLE-CLICK TO FIT</span>
-                  </div>
-                )}
-              </div>
+              </ProductZoomViewer>
 
               {/* Thumbnail Row */}
               {product.images && product.images.length > 1 && (
@@ -498,10 +305,7 @@ export const ProductGalleryModal: React.FC<ProductGalleryModalProps> = ({
                   {product.images.map((img, idx) => (
                     <button
                       key={idx}
-                      onClick={() => {
-                        handleResetZoom();
-                        setSelectedImgIndex(idx);
-                      }}
+                      onClick={() => setSelectedImgIndex(idx)}
                       className={`relative w-16 h-20 rounded-lg overflow-hidden border-2 transition flex-shrink-0 cursor-pointer ${
                         selectedImgIndex === idx
                           ? 'border-[#FF2028] shadow-md shadow-[#FF2028]/30'

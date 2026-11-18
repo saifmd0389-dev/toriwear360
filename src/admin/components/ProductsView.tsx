@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAdmin } from '../AdminDataContext';
 import { AdminProduct } from '../types';
 import { ProductEditorModal } from './ProductEditorModal';
+import { ProductReviewsModerationTab } from './ProductReviewsModerationTab';
 import {
   Package,
   Search,
@@ -13,6 +14,7 @@ import {
   ShieldCheck,
   Percent,
   X,
+  Star,
 } from 'lucide-react';
 
 export const ProductsView: React.FC<{ 
@@ -43,6 +45,7 @@ export const ProductsView: React.FC<{
     setEditingProduct(null);
   };
 
+  const [activeTab, setActiveTab] = useState<'CATALOG' | 'REVIEWS'>('CATALOG');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [selectedFranchise, setSelectedFranchise] = useState<string>('ALL');
@@ -97,17 +100,50 @@ export const ProductsView: React.FC<{
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
-          <button
-            onClick={handleOpenAddModal}
-            className="px-4 py-2.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-semibold text-xs transition-colors flex items-center gap-2 shadow-md shadow-red-600/20 cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add New Product</span>
-          </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex items-center p-1 bg-[#14141c] border border-neutral-800 rounded-lg text-xs">
+            <button
+              type="button"
+              onClick={() => setActiveTab('CATALOG')}
+              className={`px-3 py-1.5 rounded-md font-semibold flex items-center gap-1.5 transition cursor-pointer ${
+                activeTab === 'CATALOG'
+                  ? 'bg-neutral-800 text-white'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+            >
+              <Package className="w-3.5 h-3.5" />
+              <span>Catalog &amp; SKUs</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('REVIEWS')}
+              className={`px-3 py-1.5 rounded-md font-semibold flex items-center gap-1.5 transition cursor-pointer ${
+                activeTab === 'REVIEWS'
+                  ? 'bg-neutral-800 text-white'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+            >
+              <Star className="w-3.5 h-3.5 text-red-400" />
+              <span>Product Reviews</span>
+            </button>
+          </div>
+
+          {activeTab === 'CATALOG' && (
+            <button
+              onClick={handleOpenAddModal}
+              className="px-4 py-2.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-semibold text-xs transition-colors flex items-center gap-2 shadow-md shadow-red-600/20 cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add New Product</span>
+            </button>
+          )}
         </div>
       </div>
 
+      {activeTab === 'REVIEWS' ? (
+        <ProductReviewsModerationTab />
+      ) : (
+        <>
       {/* Filter & Search Toolbar */}
       <div className="bg-[#14141c] p-4 rounded-2xl border border-neutral-800 space-y-3">
         <div className="flex flex-col lg:flex-row gap-3">
@@ -407,6 +443,8 @@ export const ProductsView: React.FC<{
           <span className="font-mono text-[11px]">All items synced with customer storefront database</span>
         </div>
       </div>
+        </>
+      )}
 
       {/* Product Editor Modal */}
       <ProductEditorModal 

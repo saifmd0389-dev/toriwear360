@@ -5,7 +5,15 @@
  * Provides resilient fallbacks if the server is temporarily booting.
  */
 
-import { Product } from '../types';
+import {
+  Product,
+  ProductReview,
+  ProductReviewSummary,
+  StoreCategory,
+  StoreContactConfig,
+  MetaBusinessConfig,
+  ReturnRequestRecord,
+} from '../types';
 import { AdminProduct, InventoryItem } from '../admin/types';
 
 export interface ApiResponse<T> {
@@ -274,13 +282,85 @@ export const apiClient = {
     }
   },
 
-  async getCategories(department?: string): Promise<any[]> {
+  async getCategories(department?: string, includeAll?: boolean): Promise<StoreCategory[]> {
     try {
-      const q = department && department !== 'ALL' ? `?department=${department}` : '';
-      const { json } = await fetchJsonWithRetry<ApiResponse<any[]>>(`${API_BASE}/categories${q}`, {}, [400]);
+      const q = new URLSearchParams();
+      if (department && department !== 'ALL') q.set('department', department);
+      if (includeAll) q.set('all', 'true');
+      const qs = q.toString() ? `?${q.toString()}` : '';
+      const headers = includeAll ? getAuthHeaders() : undefined;
+      const { json } = await fetchJsonWithRetry<ApiResponse<StoreCategory[]>>(
+        `${API_BASE}/categories${qs}`,
+        headers ? { headers } : {},
+        [400]
+      );
       return json.data || [];
     } catch {
       return [];
+    }
+  },
+
+  async getCategoryBySlug(slug: string): Promise<{ category: StoreCategory | null; products: Product[] }> {
+    try {
+      const { json } = await fetchJsonWithRetry<ApiResponse<StoreCategory> & { products?: Product[] }>(
+        `${API_BASE}/categories/${encodeURIComponent(slug)}`,
+        {},
+        [400]
+      );
+      return { category: json.data || null, products: json.products || [] };
+    } catch {
+      return { category: null, products: [] };
+    }
+  },
+
+  async adminCreateCategory(payload: Partial<StoreCategory>): Promise<ApiResponse<StoreCategory>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/categories`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to create category' };
+    }
+  },
+
+  async adminUpdateCategory(id: string, updates: Partial<StoreCategory>): Promise<ApiResponse<StoreCategory>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/categories/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(updates),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to update category' };
+    }
+  },
+
+  async adminDeleteCategory(id: string): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/categories/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to delete category' };
+    }
+  },
+
+  async adminAssignCategoryProducts(id: string, productIds: string[]): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/categories/${encodeURIComponent(id)}/products`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ productIds }),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to assign category products' };
     }
   },
 
@@ -657,6 +737,23 @@ export const apiClient = {
     }
   },
 
+  async addAdminOrderTimelineEvent(
+    orderId: string,
+    payload: { title: string; status?: string; note?: string }
+  ): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/orders/${encodeURIComponent(orderId)}/timeline`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false, error: 'Failed to save timeline update' };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to add timeline event' };
+    }
+  },
+
   async cancelAdminOrder(orderId: string, reason: string): Promise<ApiResponse<any>> {
     try {
       const res = await fetch(`${API_BASE}/admin/orders/${encodeURIComponent(orderId)}/cancel`, {
@@ -960,4 +1057,324 @@ export const apiClient = {
       return { success: false, error: err?.message || 'Failed to load deliveries' };
     }
   },
+
+  // ==========================================
+  // Product Reviews (Public & Admin Moderation)
+  // ==========================================
+  async getProductReviews(
+    productId: string,
+    params?: { rating?: number; fit?: string; verified?: boolean; sort?: 'recent' | 'highest' | 'lowest' }
+  ): Promise<ApiResponse<ProductReview[]> & { summary?: ProductReviewSummary }> {
+    try {
+      const q = new URLSearchParams();
+      if (params?.rating) q.set('rating', String(params.rating));
+      if (params?.fit) q.set('fit', params.fit);
+      if (params?.verified) q.set('verified', 'true');
+      if (params?.sort) q.set('sort', params.sort);
+      const queryStr = q.toString();
+      const res = await fetch(
+        `${API_BASE}/products/${encodeURIComponent(productId)}/reviews${queryStr ? `?${queryStr}` : ''}`,
+        { headers: { Accept: 'application/json' } }
+      );
+      const parsed = await safeParseJson<any>(res);
+      if (!parsed.okJson || !parsed.data) {
+        return { success: false, error: 'Unable to load product reviews right now.', data: [] };
+      }
+      return parsed.data;
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to load product reviews', data: [] };
+    }
+  },
+
+  async submitProductReview(
+    productId: string,
+    payload: {
+      rating: number;
+      customerName: string;
+      email?: string;
+      title?: string;
+      comment: string;
+      sizePurchased?: string;
+      fitFeedback?: string;
+    }
+  ): Promise<ApiResponse<ProductReview> & { summary?: ProductReviewSummary }> {
+    try {
+      const res = await fetch(`${API_BASE}/products/${encodeURIComponent(productId)}/reviews`, {
+        method: 'POST',
+        headers: getCustomerHeaders(),
+        body: JSON.stringify(payload),
+      });
+      const parsed = await safeParseJson<any>(res);
+      if (!parsed.okJson || !parsed.data) {
+        return { success: false, error: 'Unable to submit review right now. Please try again.' };
+      }
+      return parsed.data;
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to submit review' };
+    }
+  },
+
+  async getAdminReviews(params?: {
+    status?: string;
+    productId?: string;
+    search?: string;
+  }): Promise<ApiResponse<ProductReview[]>> {
+    try {
+      const q = new URLSearchParams();
+      if (params?.status && params.status !== 'ALL') q.set('status', params.status);
+      if (params?.productId) q.set('productId', params.productId);
+      if (params?.search) q.set('search', params.search);
+      const res = await fetch(`${API_BASE}/admin/reviews?${q.toString()}`, {
+        headers: getAuthHeaders(),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false, error: 'Failed to load reviews', data: [] };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to load admin reviews', data: [] };
+    }
+  },
+
+  async updateAdminReviewStatus(
+    reviewId: string,
+    payload: { status?: 'PENDING' | 'APPROVED' | 'REJECTED'; isFeatured?: boolean }
+  ): Promise<ApiResponse<ProductReview>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/reviews/${encodeURIComponent(reviewId)}/status`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false, error: 'Failed to update review status' };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to moderate review' };
+    }
+  },
+
+  async deleteAdminReview(reviewId: string): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/reviews/${encodeURIComponent(reviewId)}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false, error: 'Failed to delete review' };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to delete review' };
+    }
+  },
+
+  // ==========================================
+  // Store Contact, Social & Meta Business
+  // ==========================================
+  async getStoreContact(): Promise<ApiResponse<StoreContactConfig>> {
+    try {
+      const { json } = await fetchJsonWithRetry<ApiResponse<StoreContactConfig>>(`${API_BASE}/store/contact`, {}, [400]);
+      return json;
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to load store contact config' };
+    }
+  },
+
+  async getAdminStoreContact(): Promise<ApiResponse<StoreContactConfig>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/store/contact`, {
+        headers: getAuthHeaders(),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to load admin store contact config' };
+    }
+  },
+
+  async adminUpdateStoreContact(payload: Partial<StoreContactConfig>): Promise<ApiResponse<StoreContactConfig>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/store/contact`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to save contact settings' };
+    }
+  },
+
+  async getAdminMetaBusiness(): Promise<ApiResponse<MetaBusinessConfig>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/store/meta`, {
+        headers: getAuthHeaders(),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to fetch Meta Business settings' };
+    }
+  },
+
+  async adminUpdateMetaBusiness(payload: Partial<MetaBusinessConfig>): Promise<ApiResponse<MetaBusinessConfig>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/store/meta`, {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to update Meta Business settings' };
+    }
+  },
+
+  // ==========================================
+  // Returns & Refunds (Customer & Admin)
+  // ==========================================
+  async uploadReturnProof(payload: {
+    dataUrl: string;
+    mimeType: string;
+    filename: string;
+    orderId?: string;
+  }): Promise<ApiResponse<{ url: string; filename: string }>> {
+    try {
+      const res = await fetch(`${API_BASE}/returns/upload-proof`, {
+        method: 'POST',
+        headers: getCustomerHeaders(payload.orderId),
+        body: JSON.stringify(payload),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Proof upload failed' };
+    }
+  },
+
+  async createReturnRequest(payload: {
+    orderId: string;
+    requestType: 'RETURN' | 'EXCHANGE';
+    reason: string;
+    comments?: string;
+    proofUrls?: string[];
+    refundMethod?: string;
+    pickupAddress?: any;
+    exchangeProductId?: string;
+    exchangeSize?: string;
+    items: Array<{
+      productId: string;
+      variantId?: string;
+      sku?: string;
+      productName: string;
+      size: string;
+      color: string;
+      quantity: number;
+      unitPrice: number;
+      image?: string;
+    }>;
+  }): Promise<ApiResponse<ReturnRequestRecord>> {
+    try {
+      const res = await fetch(`${API_BASE}/returns`, {
+        method: 'POST',
+        headers: getCustomerHeaders(payload.orderId),
+        body: JSON.stringify(payload),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to submit return request' };
+    }
+  },
+
+  async getMyReturns(orderIds?: string[]): Promise<ApiResponse<ReturnRequestRecord[]>> {
+    try {
+      const q = orderIds && orderIds.length > 0 ? `?orderIds=${encodeURIComponent(orderIds.join(','))}` : '';
+      const res = await fetch(`${API_BASE}/returns/my${q}`, {
+        headers: getCustomerHeaders(orderIds?.[0]),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to fetch returns', data: [] };
+    }
+  },
+
+  async fetchReturnProofBlobUrl(proofUrl: string, asAdmin = false): Promise<string | null> {
+    try {
+      if (!proofUrl) return null;
+      if (proofUrl.startsWith('data:') || proofUrl.startsWith('blob:')) return proofUrl;
+      const headers = asAdmin ? getAuthHeaders() : getCustomerHeaders();
+      const res = await fetch(proofUrl, { headers });
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      return URL.createObjectURL(blob);
+    } catch {
+      return null;
+    }
+  },
+
+  async getAdminReturns(params?: { status?: string; search?: string }): Promise<ApiResponse<ReturnRequestRecord[]>> {
+    try {
+      const q = new URLSearchParams();
+      if (params?.status && params.status !== 'ALL') q.set('status', params.status);
+      if (params?.search) q.set('search', params.search);
+      const qs = q.toString() ? `?${q.toString()}` : '';
+      const res = await fetch(`${API_BASE}/admin/returns${qs}`, {
+        headers: getAuthHeaders(),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to load returns', data: [] };
+    }
+  },
+
+  async updateAdminReturnStatus(
+    id: string,
+    payload: {
+      status: string;
+      note?: string;
+      rejectionReason?: string;
+      pickupCourier?: string;
+      pickupAwb?: string;
+      adminNotes?: string;
+    }
+  ): Promise<ApiResponse<ReturnRequestRecord>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/returns/${encodeURIComponent(id)}/status`, {
+        method: 'PATCH',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to update return status' };
+    }
+  },
+
+  async processAdminReturnRefund(
+    id: string,
+    payload: {
+      amount?: number;
+      refundMethod?: 'RAZORPAY' | 'BANK_UPI_MANUAL' | 'TORI_CREDIT';
+      reason?: string;
+      notes?: string;
+      manualReference?: string;
+    }
+  ): Promise<ApiResponse<ReturnRequestRecord>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/returns/${encodeURIComponent(id)}/refund`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to process refund' };
+    }
+  },
+
+  async verifyAdminReturnRefund(id: string): Promise<ApiResponse<ReturnRequestRecord> & { gatewayStatus?: string }> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/returns/${encodeURIComponent(id)}/verify-refund`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to verify Razorpay refund' };
+    }
+  },
 };
+

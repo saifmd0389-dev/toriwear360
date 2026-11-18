@@ -1,4 +1,4 @@
-import { AnimeFranchise, PopUniverse, FitType } from '../types';
+import { AnimeFranchise, PopUniverse, FitType, ContactChannelItem, MetaBusinessConfig, ReturnStatusValue, ReturnRequestItemRecord, ReturnStatusHistoryEntry } from '../types';
 
 export type Role = 
   | 'SUPER_ADMIN'
@@ -127,6 +127,7 @@ export interface AdminProduct {
   slug: string;
   publishingStatus: PublishingStatus;
   licenseRightsStatus: LicenseRightsStatus;
+  categoryIds?: string[];
   variants: AdminProductVariant[];
   stock?: number;
   inStock?: boolean;
@@ -459,24 +460,32 @@ export interface HeroSettings {
 
 export interface ReturnRequest {
   id: string;
+  returnNumber?: string;
   orderId: string;
   orderNumber: string;
   customerName: string;
   customerEmail: string;
   customerPhone: string;
+  requestType?: 'RETURN' | 'EXCHANGE';
   productName: string;
   size: string;
-  reason: 'Wrong Size' | 'Damaged' | 'Wrong Product' | 'Product Defect' | 'Other';
-  status: 
-    | 'REQUESTED'
-    | 'REVIEWING'
-    | 'APPROVED'
-    | 'PICKUP_SCHEDULED'
-    | 'PRODUCT_RECEIVED'
-    | 'QC_PASSED'
-    | 'REFUNDED'
-    | 'REJECTED';
+  reason: string;
+  comments?: string;
+  status: ReturnStatusValue | 'REVIEWING' | 'PRODUCT_RECEIVED' | 'QC_PASSED' | 'REFUNDED';
   refundAmount: number;
+  refundedAmount?: number;
+  refundMethod?: string;
+  refundTransactionId?: string | null;
+  refundGateway?: string | null;
+  refundStatus?: string | null;
+  proofUrls?: string[];
+  pickupCourier?: string | null;
+  pickupAwb?: string | null;
+  pickupScheduledAt?: string | null;
+  rejectionReason?: string | null;
+  stockRestored?: boolean;
+  items?: ReturnRequestItemRecord[];
+  statusHistory?: ReturnStatusHistoryEntry[];
   date: string;
   notes?: string;
 }
@@ -538,6 +547,11 @@ export interface StoreSettings {
   supportEmail: string;
   phone: string;
   businessAddress: string;
+  operatingHours?: string;
+  returnWindowDays?: number;
+  whatsappMessage?: string;
+  contactChannels?: ContactChannelItem[];
+  metaBusiness?: MetaBusinessConfig;
   currency: string;
   currencySymbol: string;
   timezone: string;

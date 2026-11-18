@@ -1,4 +1,10 @@
+import fs from 'fs';
+import path from 'path';
 import { getPrismaClient } from '../db/prisma';
+import { resolveSecureStorePath } from '../utils/storageHelper';
+
+const CUSTOMERS_STORE_PATH = resolveSecureStorePath('customers-store.json');
+const SESSIONS_STORE_PATH = resolveSecureStorePath('customer-sessions.json');
 
 export interface CustomerAddressRecord {
   id: string;
@@ -31,8 +37,165 @@ export interface CustomerRecord {
   updatedAt: Date;
 }
 
+export interface CustomerSessionRecord {
+  token: string;
+  customerId: string;
+  ipAddress?: string;
+  userAgent?: string;
+  expiresAt: string;
+  isValid: boolean;
+  lastActiveAt: string;
+  createdAt: string;
+}
+
 export class CustomerRepository {
   private customers = new Map<string, CustomerRecord>();
+  private sessions = new Map<string, CustomerSessionRecord>();
+  private loaded = false;
+
+  constructor() {
+    this.ensureLoaded();
+  }
+
+  private ensureLoaded() {
+    if (this.loaded) return;
+    this.loaded = true;
+    try {
+      if (fs.existsSync(CUSTOMERS_STORE_PATH)) {
+        const parsed = JSON.parse(fs.readFileSync(CUSTOMERS_STORE_PATH, 'utf-8'));
+        if (Array.isArray(parsed)) {
+          for (const c of parsed) {
+            if (c?.id) {
+              this.customers.set(c.id, {
+                ...c,
+                createdAt: new Date(c.createdAt || Date.now()),
+                updatedAt: new Date(c.updatedAt || Date.now()),
+              });
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[CustomerRepo] Failed to load customers store:', err);
+    }
+
+    try {
+      if (fs.existsSync(SESSIONS_STORE_PATH)) {
+        const parsed = JSON.parse(fs.readFileSync(SESSIONS_STORE_PATH, 'utf-8'));
+        if (Array.isArray(parsed)) {
+          for (const s of parsed) {
+            if (s?.token && s?.isValid !== false) {
+              this.sessions.set(s.token, s);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[CustomerRepo] Failed to load customer sessions store:', err);
+    }
+  }
+
+  private persistCustomersToDisk() {
+    try {
+      const dir = path.dirname(CUSTOMERS_STORE_PATH);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const tmp = `${CUSTOMERS_STORE_PATH}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(Array.from(this.customers.values()), null, 2), 'utf-8');
+      fs.renameSync(tmp, CUSTOMERS_STORE_PATH);
+    } catch (err) {
+      console.warn('[CustomerRepo] Failed to save customers store:', err);
+    }
+  }
+
+  private persistSessionsToDisk() {
+    try {
+      const now = Date.now();
+      const active = Array.from(this.sessions.values()).filter(
+        (s) => s.isValid && new Date(s.expiresAt).getTime() > now
+      );
+      const dir = path.dirname(SESSIONS_STORE_PATH);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const tmp = `${SESSIONS_STORE_PATH}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(active, null, 2), 'utf-8');
+      fs.renameSync(tmp, SESSIONS_STORE_PATH);
+    } catch (err) {
+      console.warn('[CustomerRepo] Failed to save customer sessions store:', err);
+    }
+  }
+
+  async saveSession(session: CustomerSessionRecord): Promise<void> {
+    this.ensureLoaded();
+    this.sessions.set(session.token, session);
+    this.persistSessionsToDisk();
+
+    const prisma = getPrismaClient();
+    if (prisma?.session) {
+      try {
+        await prisma.session.create({
+          data: {
+            token: session.token,
+            customerId: session.customerId,
+            ipAddress: session.ipAddress,
+            userAgent: session.userAgent,
+            expiresAt: new Date(session.expiresAt),
+            isValid: true,
+          },
+        });
+      } catch (err) {
+        console.warn('[CustomerRepo] Prisma saveSession note:', (err as any)?.message || err);
+      }
+    }
+  }
+
+  async findCustomerBySessionToken(token: string): Promise<CustomerRecord | null> {
+    this.ensureLoaded();
+    if (!token) return null;
+
+    const prisma = getPrismaClient();
+    if (prisma?.session) {
+      try {
+        const sess = await prisma.session.findUnique({
+          where: { token },
+          include: { customer: { include: { addresses: true } } },
+        });
+        if (sess && sess.isValid && sess.customerId && sess.customer) {
+          if (new Date(sess.expiresAt) < new Date()) {
+            await prisma.session.update({ where: { id: sess.id }, data: { isValid: false } }).catch(() => {});
+            this.sessions.delete(token);
+            this.persistSessionsToDisk();
+            return null;
+          }
+          if (sess.customer.status === 'SUSPENDED') return null;
+          await prisma.session.update({ where: { id: sess.id }, data: { lastActiveAt: new Date() } }).catch(() => {});
+          return await this.findById(sess.customerId);
+        }
+      } catch {}
+    }
+
+    const diskSession = this.sessions.get(token);
+    if (!diskSession || !diskSession.isValid) return null;
+    if (new Date(diskSession.expiresAt) < new Date()) {
+      this.sessions.delete(token);
+      this.persistSessionsToDisk();
+      return null;
+    }
+    const cust = await this.findById(diskSession.customerId);
+    if (!cust || cust.status === 'SUSPENDED') return null;
+    diskSession.lastActiveAt = new Date().toISOString();
+    return cust;
+  }
+
+  async revokeSession(token: string): Promise<void> {
+    this.ensureLoaded();
+    if (!token) return;
+    if (this.sessions.delete(token)) {
+      this.persistSessionsToDisk();
+    }
+    const prisma = getPrismaClient();
+    if (prisma?.session) {
+      await prisma.session.updateMany({ where: { token }, data: { isValid: false } }).catch(() => {});
+    }
+  }
 
   private mapPrismaCustomer(c: any): CustomerRecord {
     return {
@@ -68,6 +231,7 @@ export class CustomerRepository {
   }
 
   async findById(id: string): Promise<CustomerRecord | null> {
+    this.ensureLoaded();
     const prisma = getPrismaClient();
     if (prisma?.customer) {
       try {
@@ -78,6 +242,7 @@ export class CustomerRepository {
         if (found) {
           const rec = this.mapPrismaCustomer(found);
           this.customers.set(rec.id, rec);
+          this.persistCustomersToDisk();
           return rec;
         }
       } catch (err) {
@@ -88,6 +253,7 @@ export class CustomerRepository {
   }
 
   async findByFirebaseUid(uid: string): Promise<CustomerRecord | null> {
+    this.ensureLoaded();
     if (!uid) return null;
     const prisma = getPrismaClient();
     if (prisma?.customer) {
@@ -112,6 +278,7 @@ export class CustomerRepository {
   }
 
   async findByEmailOrPhone(identifier: string): Promise<CustomerRecord | null> {
+    this.ensureLoaded();
     const clean = identifier.trim().toLowerCase();
     if (!clean) return null;
     const prisma = getPrismaClient();
@@ -129,6 +296,7 @@ export class CustomerRepository {
         if (found) {
           const rec = this.mapPrismaCustomer(found);
           this.customers.set(rec.id, rec);
+          this.persistCustomersToDisk();
           return rec;
         }
       } catch (err) {
@@ -142,7 +310,9 @@ export class CustomerRepository {
   }
 
   async save(customer: CustomerRecord): Promise<CustomerRecord> {
+    this.ensureLoaded();
     this.customers.set(customer.id, customer);
+    this.persistCustomersToDisk();
     const prisma = getPrismaClient();
     if (prisma?.customer) {
       try {
@@ -214,6 +384,7 @@ export class CustomerRepository {
         const mapped = this.mapPrismaCustomer(saved);
         mapped.addresses = customer.addresses || mapped.addresses;
         this.customers.set(mapped.id, mapped);
+        this.persistCustomersToDisk();
         return mapped;
       } catch (err) {
         console.warn('[CustomerRepo] Prisma save warning:', err);
@@ -223,6 +394,7 @@ export class CustomerRepository {
   }
 
   async getAll(): Promise<CustomerRecord[]> {
+    this.ensureLoaded();
     const prisma = getPrismaClient();
     if (prisma?.customer) {
       try {
@@ -231,9 +403,12 @@ export class CustomerRepository {
           orderBy: { createdAt: 'desc' },
           take: 500,
         });
-        const mapped = rows.map((r: any) => this.mapPrismaCustomer(r));
-        mapped.forEach((m: CustomerRecord) => this.customers.set(m.id, m));
-        return mapped;
+        if (rows.length > 0) {
+          const mapped = rows.map((r: any) => this.mapPrismaCustomer(r));
+          mapped.forEach((m: CustomerRecord) => this.customers.set(m.id, m));
+          this.persistCustomersToDisk();
+          return mapped;
+        }
       } catch (err) {
         console.warn('[CustomerRepo] Prisma getAll warning:', err);
       }

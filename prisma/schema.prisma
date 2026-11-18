@@ -37,6 +37,7 @@ enum SeverityLevel {
 }
 
 enum DepartmentType {
+  ALL
   MEN
   KIDS
   UNISEX
@@ -398,23 +399,30 @@ enum PublishingStatus {
 }
 
 model Category {
-  id            String         @id @default(cuid())
-  name          String
-  slug          String         @unique
-  department    DepartmentType @default(MEN)
-  description   String?        @db.Text
-  image         String?        @db.Text
-  bannerImage   String?        @db.Text
-  displayOrder  Int            @default(0)
-  isActive      Boolean        @default(true)
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  id             String         @id @default(cuid())
+  name           String
+  slug           String         @unique
+  department     DepartmentType @default(MEN)
+  parentId       String?
+  description    String?        @db.Text
+  image          String?        @db.Text
+  bannerImage    String?        @db.Text
+  seoTitle       String?
+  seoDescription String?        @db.Text
+  displayOrder   Int            @default(0)
+  isActive       Boolean        @default(true)
+  showInNav      Boolean        @default(true)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
+  parent        Category?      @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children      Category[]     @relation("CategoryHierarchy")
   subcategories Subcategory[]
   products      Product[]
 
   @@index([slug])
   @@index([department])
+  @@index([parentId])
   @@map("categories")
 }
 
@@ -469,6 +477,7 @@ model Product {
   licenseType      String            @default("Original IP")
   publishingStatus PublishingStatus  @default(PUBLISHED)
   categoryId       String?
+  categoryIdsJson  String?           @db.Text
   subcategoryId    String?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
@@ -806,6 +815,7 @@ model Order {
   payments               Payment[]
   shipments              Shipment[]
   couponUsages           CouponUsage[]
+  returnRequests         ReturnRequest[]
 
   @@index([orderNumber])
   @@index([customerId])
@@ -1580,4 +1590,103 @@ model NotificationDelivery {
   @@index([campaignId])
   @@map("notification_deliveries")
 }
+
+// ============================================================================
+// 15. CUSTOMER RETURNS & RAZORPAY REFUNDS
+// ============================================================================
+
+enum ReturnRequestStatus {
+  RETURN_REQUESTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  PICKUP_SCHEDULED
+  IN_TRANSIT
+  RETURNED_TO_WAREHOUSE
+  REFUND_PROCESSING
+  REFUNDED
+  CLOSED
+}
+
+model ReturnRequest {
+  id                  String                @id @default(cuid())
+  returnNumber        String                @unique
+  orderId             String
+  orderNumber         String
+  customerId          String?
+  customerName        String
+  customerEmail       String
+  customerPhone       String
+  requestType         String                @default("RETURN") // RETURN | EXCHANGE
+  reason              String
+  comments            String?               @db.Text
+  proofFilesJson      String?               @db.Text
+  status              ReturnRequestStatus   @default(RETURN_REQUESTED)
+  rejectionReason     String?               @db.Text
+  courierPartner      String?
+  awbNumber           String?
+  pickupScheduledAt   DateTime?
+  receivedAt          DateTime?
+  restockedAt         DateTime?
+  refundAmount        Float                 @default(0.0)
+  refundMethod        String?               // RAZORPAY | BANK_UPI_MANUAL | TORI_CREDIT | EXCHANGE
+  refundId            String?
+  refundStatus        String?
+  refundReference     String?
+  refundedAt          DateTime?
+  adminNotes          String?               @db.Text
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  order               Order                 @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  items               ReturnItem[]
+  history             ReturnStatusHistory[]
+
+  @@index([orderId])
+  @@index([orderNumber])
+  @@index([customerId])
+  @@index([status])
+  @@map("return_requests")
+}
+
+model ReturnItem {
+  id              String        @id @default(cuid())
+  returnRequestId String
+  orderItemId     String
+  productId       String
+  variantId       String?
+  productName     String
+  sku             String?
+  size            String
+  color           String?
+  quantity        Int           @default(1)
+  unitPrice       Float
+  refundAmount    Float
+  restocked       Boolean       @default(false)
+  restockedAt     DateTime?
+
+  returnRequest   ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+
+  @@index([returnRequestId])
+  @@index([orderItemId])
+  @@map("return_items")
+}
+
+model ReturnStatusHistory {
+  id              String        @id @default(cuid())
+  returnRequestId String
+  fromStatus      String?
+  toStatus        String
+  note            String?       @db.Text
+  actorId         String?
+  actorName       String?
+  actorRole       String?
+  createdAt       DateTime      @default(now())
+
+  returnRequest   ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+
+  @@index([returnRequestId])
+  @@map("return_status_history")
+}
+
 

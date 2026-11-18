@@ -884,6 +884,91 @@ export class OrderService {
   async getAllOrders(filter?: { status?: string; search?: string; customerId?: string }): Promise<OrderRecord[]> {
     return await orderRepository.getAll(filter);
   }
+
+  /**
+   * Append a custom milestone / fulfillment timeline update to an order.
+   */
+  async addTimelineEvent(
+    orderId: string,
+    input: { title: string; status?: string; note?: string },
+    actor: { id: string; name: string; role: string }
+  ): Promise<{ success: boolean; order?: OrderRecord; entry?: OrderTimelineRecord; error?: string }> {
+    const title = String(input.title || '').trim();
+    if (title.length < 2) {
+      return { success: false, error: 'Timeline update title must be at least 2 characters.' };
+    }
+
+    const releaseLock = await this.acquireOrderLock(orderId);
+    try {
+      const order = (await orderRepository.findById(orderId)) || (await orderRepository.findByOrderNumber(orderId));
+      if (!order) {
+        return { success: false, error: 'Order not found.' };
+      }
+
+      const cleanNote = input.note ? String(input.note).trim() : '';
+      const entry: OrderTimelineRecord = {
+        status: (input.status || order.fulfillmentStatus || 'UPDATE').toUpperCase(),
+        timestamp: new Date().toISOString(),
+        description: title,
+        actorId: actor.id,
+        actorName: actor.name,
+        note: cleanNote || title,
+      };
+
+      const updated = await orderRepository.update(order.id, {
+        timeline: [...(order.timeline || []), entry],
+      });
+
+      await auditRepository.record({
+        userId: actor.id,
+        userName: actor.name,
+        userRole: actor.role as any,
+        module: 'orders',
+        action: 'ORDER_TIMELINE_UPDATED',
+        recordAffected: order.orderNumber,
+        newValue: `${title}${cleanNote ? ` — ${cleanNote}` : ''}`,
+        severity: 'INFO',
+      });
+
+      return { success: true, order: updated || undefined, entry };
+    } finally {
+      releaseLock();
+    }
+  }
+}
+
+const TIMELINE_TITLE_MAP: Record<string, string> = {
+  CONFIRMED: 'Order Confirmed',
+  PENDING_PAYMENT: 'Awaiting Payment',
+  PAYMENT_PENDING: 'Awaiting Payment',
+  PROCESSING: 'Processing Order',
+  PACKED: 'Packed & Quality Checked',
+  SHIPPED: 'Dispatched via Courier',
+  IN_TRANSIT: 'In Transit',
+  OUT_FOR_DELIVERY: 'Out for Delivery',
+  DELIVERED: 'Delivered',
+  CANCELLED: 'Order Cancelled',
+  REFUNDED: 'Refund Processed',
+  RETURN_REQUESTED: 'Return Requested',
+  RETURNED: 'Order Returned',
+};
+
+export function normalizeOrderTimeline(timeline: OrderTimelineRecord[] | undefined | null) {
+  if (!Array.isArray(timeline)) return [];
+  return timeline.map((entry) => {
+    const rawStatus = String(entry.status || '').toUpperCase();
+    const fallbackTitle = TIMELINE_TITLE_MAP[rawStatus] || (rawStatus ? `Status: ${rawStatus}` : 'Order Update');
+    const title = entry.description && entry.description.length <= 72 ? entry.description : fallbackTitle;
+    return {
+      status: entry.status || 'UPDATE',
+      title,
+      timestamp: entry.timestamp,
+      description: entry.description || title,
+      note: entry.note || entry.description || '',
+      actorName: entry.actorName,
+    };
+  });
 }
 
 export const orderService = new OrderService();
+

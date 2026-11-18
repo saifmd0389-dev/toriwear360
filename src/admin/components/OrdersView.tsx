@@ -26,12 +26,15 @@ function getAdminAuthHeaders(): HeadersInit {
 }
 
 export const OrdersView: React.FC = () => {
-  const { orders, updateOrderStatus, addOrderInternalNote, cancelOrder, initiateRefund, settings, showToast } = useAdmin();
+  const { orders, updateOrderStatus, addOrderTimelineEvent, addOrderInternalNote, cancelOrder, initiateRefund, settings, showToast } = useAdmin();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [statusTab, setStatusTab] = useState<string>('ALL');
   const [selectedOrder, setSelectedOrder] = useState<AdminOrder | null>(null);
   const [newInternalNote, setNewInternalNote] = useState('');
+  const [newTimelineTitle, setNewTimelineTitle] = useState('');
+  const [newTimelineNote, setNewTimelineNote] = useState('');
+  const [addingTimeline, setAddingTimeline] = useState(false);
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
 
   // Multi-Logistics Dispatch State
@@ -221,10 +224,27 @@ export const OrdersView: React.FC = () => {
     if (!selectedOrder || !newInternalNote.trim()) return;
     addOrderInternalNote(selectedOrder.orderId, newInternalNote.trim());
     setNewInternalNote('');
-    // refresh active selection
-    const updated = orders.find(o => o.orderId === selectedOrder.orderId);
-    if (updated) setSelectedOrder(updated);
   };
+
+  const handleAddTimelineMilestone = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedOrder || !newTimelineTitle.trim()) return;
+    setAddingTimeline(true);
+    const res = await addOrderTimelineEvent(
+      selectedOrder.orderId,
+      newTimelineTitle.trim(),
+      newTimelineNote.trim() || undefined
+    );
+    setAddingTimeline(false);
+    if (res.success) {
+      setNewTimelineTitle('');
+      setNewTimelineNote('');
+    }
+  };
+
+  const activeOrder = selectedOrder
+    ? orders.find((o) => o.orderId === selectedOrder.orderId) || selectedOrder
+    : null;
 
   return (
     <div className="space-y-6">
@@ -585,19 +605,68 @@ export const OrdersView: React.FC = () => {
 
               {/* Order Timeline */}
               <div>
-                <h3 className="text-xs font-bold text-neutral-300 uppercase tracking-wider mb-2">
-                  Fulfillment History
-                </h3>
-                <div className="space-y-2 border-l-2 border-neutral-800 pl-4 ml-2">
-                  {selectedOrder.timeline.map((step, idx) => (
-                    <div key={idx} className="relative">
-                      <div className="absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full bg-red-500" />
-                      <div className="text-xs font-semibold text-white">{step.title}</div>
-                      <div className="text-[10px] text-neutral-500 font-mono">{step.timestamp}</div>
-                      {step.note && <div className="text-xs text-neutral-400 mt-0.5">{step.note}</div>}
-                    </div>
-                  ))}
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-xs font-bold text-neutral-300 uppercase tracking-wider">
+                    Fulfillment History ({(activeOrder?.timeline || selectedOrder.timeline).length})
+                  </h3>
                 </div>
+                <div className="space-y-3 border-l-2 border-neutral-800 pl-4 ml-2 mb-3">
+                  {(activeOrder?.timeline || selectedOrder.timeline).map((step, idx) => {
+                    const parsedTs = step.timestamp ? new Date(step.timestamp) : null;
+                    const displayTs =
+                      parsedTs && !Number.isNaN(parsedTs.getTime())
+                        ? parsedTs.toLocaleString('en-IN', {
+                            day: 'numeric',
+                            month: 'short',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })
+                        : step.timestamp;
+                    return (
+                      <div key={idx} className="relative">
+                        <div className="absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full bg-red-500" />
+                        <div className="text-xs font-semibold text-white">{step.title}</div>
+                        <div className="text-[10px] text-neutral-500 font-mono tabular-nums">{displayTs}</div>
+                        {step.note && step.note !== step.title && (
+                          <div className="text-xs text-neutral-400 mt-0.5">{step.note}</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Add Customer-Visible Timeline Milestone */}
+                <form onSubmit={handleAddTimelineMilestone} className="p-3 rounded-xl bg-neutral-900/70 border border-neutral-800 space-y-2">
+                  <div className="text-[11px] font-mono font-semibold text-neutral-300">
+                    Post Customer Timeline Update
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      required
+                      placeholder="Milestone title (e.g. Dispatched from Mumbai Hub)"
+                      value={newTimelineTitle}
+                      onChange={(e) => setNewTimelineTitle(e.target.value)}
+                      className="flex-1 px-3 py-1.5 bg-neutral-950 border border-neutral-700 rounded-lg text-xs text-white focus:outline-none focus:border-red-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={addingTimeline || !newTimelineTitle.trim()}
+                      className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-medium flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50 shrink-0"
+                    >
+                      <Send className="w-3 h-3" />
+                      <span>{addingTimeline ? 'Posting...' : 'Post Update'}</span>
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Optional tracking note for customer (e.g. Handed over to BlueDart Air Express)"
+                    value={newTimelineNote}
+                    onChange={(e) => setNewTimelineNote(e.target.value)}
+                    className="w-full px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded-lg text-xs text-neutral-200 focus:outline-none focus:border-red-500"
+                  />
+                </form>
               </div>
 
               {/* Internal Staff Notes */}

@@ -398,16 +398,26 @@ export class PaymentService {
   }
 
   /**
-   * Process genuine refund through official Razorpay Refund API.
+   * Process genuine full or partial refund through official Razorpay Refund API.
+   * Supports multiple partial-item refunds per order up to total paid amount.
    */
-  async processRefund(input: RefundInput, ip: string): Promise<{ success: boolean; refundId?: string; error?: string }> {
+  async processRefund(input: RefundInput, ip: string): Promise<{
+    success: boolean;
+    refundId?: string;
+    refundStatus?: string;
+    refundAmount?: number;
+    error?: string;
+  }> {
     const order = (await orderRepository.findById(input.orderId)) || (await orderRepository.findByOrderNumber(input.orderId));
     if (!order) {
       return { success: false, error: 'Order not found.' };
     }
 
-    if (order.paymentStatus === 'REFUNDED') {
-      return { success: false, error: 'This order has already been refunded.' };
+    const alreadyRefundedRupees = Number(order.refundAmount || 0);
+    const remainingRefundableRupees = Math.max(0, Number((order.total - alreadyRefundedRupees).toFixed(2)));
+
+    if (order.paymentStatus === 'REFUNDED' || remainingRefundableRupees <= 0.01) {
+      return { success: false, error: 'This order has already been fully refunded.' };
     }
 
     if (order.paymentStatus !== 'PAID') {
@@ -429,10 +439,17 @@ export class PaymentService {
       };
     }
 
-    let refundId = '';
+    const maxPaise = Math.round(remainingRefundableRupees * 100);
     const requestedAmountPaise = input.amountPaise && input.amountPaise > 0
-      ? Math.min(Math.round(input.amountPaise), Math.round(order.total * 100))
-      : Math.round(order.total * 100);
+      ? Math.min(Math.round(input.amountPaise), maxPaise)
+      : maxPaise;
+
+    if (requestedAmountPaise <= 0) {
+      return { success: false, error: 'Requested refund amount must be greater than zero.' };
+    }
+
+    let refundId = '';
+    let gatewayRefundStatus = 'processed';
 
     try {
       const payload: any = {
@@ -462,6 +479,9 @@ export class PaymentService {
       }
 
       refundId = String(json.id);
+      if (json.status) {
+        gatewayRefundStatus = String(json.status);
+      }
     } catch (err: any) {
       return {
         success: false,
@@ -470,32 +490,34 @@ export class PaymentService {
     }
 
     const refundRupees = Number((requestedAmountPaise / 100).toFixed(2));
+    const cumulativeRefundRupees = Number((alreadyRefundedRupees + refundRupees).toFixed(2));
+    const isFullRefund = cumulativeRefundRupees >= order.total - 0.01;
 
     if (tx) {
       await paymentRepository.updateTransaction(tx.id, {
-        status: 'REFUNDED',
+        status: isFullRefund ? 'REFUNDED' : tx.status,
         refundId,
-        refundAmount: refundRupees,
+        refundAmount: cumulativeRefundRupees,
         refundReason: input.reason || 'Requested',
         refundedAt: new Date(),
       });
     }
 
-    order.paymentStatus = 'REFUNDED';
-    order.refundStatus = 'REFUND_COMPLETED';
-    order.refundAmount = refundRupees;
+    order.paymentStatus = isFullRefund ? 'REFUNDED' : 'PAID';
+    order.refundStatus = isFullRefund ? 'REFUND_COMPLETED' : 'PARTIAL_REFUND_COMPLETED';
+    order.refundAmount = cumulativeRefundRupees;
     order.timeline.push({
       status: 'REFUNDED',
       timestamp: new Date().toISOString(),
-      description: `Refund of ₹${refundRupees} processed via Razorpay. Refund ID: ${refundId}. Reason: ${input.reason || 'Requested'}`,
+      description: `${isFullRefund ? 'Full' : 'Partial'} refund of ₹${refundRupees} processed via Razorpay. Refund ID: ${refundId}. Reason: ${input.reason || 'Requested'}`,
       actorId: 'PAYMENT_SERVICE',
       actorName: 'Razorpay Gateway',
     });
 
     await orderRepository.update(order.id, {
-      paymentStatus: 'REFUNDED',
-      refundStatus: 'REFUND_COMPLETED',
-      refundAmount: refundRupees,
+      paymentStatus: order.paymentStatus,
+      refundStatus: order.refundStatus,
+      refundAmount: cumulativeRefundRupees,
       timeline: order.timeline,
     });
 
@@ -506,12 +528,61 @@ export class PaymentService {
       module: 'payments',
       action: 'PAYMENT_REFUND_PROCESSED',
       recordAffected: order.orderNumber,
-      newValue: `Refund ID: ${refundId} · ₹${refundRupees} · Order: ${order.orderNumber}`,
+      newValue: `Refund ID: ${refundId} · ₹${refundRupees} (Total refunded: ₹${cumulativeRefundRupees}) · Order: ${order.orderNumber}`,
       ipAddress: ip,
       severity: 'WARNING',
     });
 
-    return { success: true, refundId };
+    return {
+      success: true,
+      refundId,
+      refundStatus: gatewayRefundStatus,
+      refundAmount: refundRupees,
+    };
+  }
+
+  /**
+   * Verify refund settlement state directly with Razorpay Refunds API (GET /v1/refunds/:id).
+   */
+  async verifyRefundStatus(refundId: string): Promise<{
+    success: boolean;
+    refundId?: string;
+    status?: string;
+    amount?: number;
+    error?: string;
+  }> {
+    const cleanId = String(refundId || '').trim();
+    if (!cleanId) {
+      return { success: false, error: 'Refund ID is required to verify refund status.' };
+    }
+    const creds = this.getConfiguredCredentials();
+    if (!creds.authHeader) {
+      return { success: false, error: 'Razorpay credentials are not configured.' };
+    }
+    try {
+      const res = await fetch(`https://api.razorpay.com/v1/refunds/${encodeURIComponent(cleanId)}`, {
+        method: 'GET',
+        headers: {
+          Authorization: creds.authHeader,
+          Accept: 'application/json',
+        },
+      });
+      const json: any = await res.json().catch(() => ({}));
+      if (!res.ok || !json?.id) {
+        return {
+          success: false,
+          error: json?.error?.description || `Razorpay refund lookup failed (HTTP ${res.status})`,
+        };
+      }
+      return {
+        success: true,
+        refundId: String(json.id),
+        status: String(json.status || 'processed'),
+        amount: typeof json.amount === 'number' ? Number((json.amount / 100).toFixed(2)) : undefined,
+      };
+    } catch (err: any) {
+      return { success: false, error: `Failed to verify Razorpay refund status: ${err.message}` };
+    }
   }
 
   /**

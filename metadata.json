@@ -1,8 +1,6 @@
 {
   "name": "TORIWEAR | Original Anime Streetwear",
   "description": "Original anime-inspired streetwear brand. Proprietary character universes, original graphic artworks, 240+ GSM combed cotton, and dedicated dual Men and Kids departments.",
-  "requestFramePermissions": [
-    "camera"
-  ],
+  "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

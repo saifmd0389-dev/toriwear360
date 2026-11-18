@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { Search, ShoppingBag, User, Menu, X, ChevronDown } from 'lucide-react';
 import { InstagramIcon, WhatsAppIcon, FacebookIcon, XTwitterIcon, YouTubeIcon } from './SocialIcons';
-import { Department, MenWorldCategory, KidsWorldCategory } from '../types';
+import { Department, MenWorldCategory, KidsWorldCategory, StoreCategory, StoreContactConfig } from '../types';
 import { MEN_WORLDS, KIDS_WORLDS } from '../data/constants';
 import { OfficialToriwearLogo } from './OfficialToriwearLogo';
 import { useCustomerAuth } from '../context/CustomerAuthContext';
 import { WishlistHeartIcon } from './WishlistHeartIcon';
-import { getAuthoritativeInstagramUrl } from '../utils/socialLinks';
+import { getAuthoritativeInstagramUrl, normalizeSocialUrl } from '../utils/socialLinks';
 import { fetchFrontPageCmsDataFromServer } from '../admin/data/frontPageCmsData';
+import { apiClient } from '../services/apiClient';
+import { buildWhatsAppHref, renderSocialChannelIcon } from './ContactSupportModal';
 
 interface HeaderProps {
   cartCount: number;
@@ -16,6 +18,8 @@ interface HeaderProps {
   isFrontPage?: boolean;
   menCount?: number;
   kidsCount?: number;
+  categories?: StoreCategory[];
+  onSelectCategorySlug?: (slug: string) => void;
   onSelectDepartment: (dept: Department | 'ALL') => void;
   onSelectWorld: (world: MenWorldCategory | KidsWorldCategory | string) => void;
   onOpenCart: () => void;
@@ -36,6 +40,8 @@ export const Header: React.FC<HeaderProps> = ({
   isFrontPage,
   menCount,
   kidsCount,
+  categories = [],
+  onSelectCategorySlug,
   onSelectDepartment,
   onSelectWorld,
   onOpenCart,
@@ -52,6 +58,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [collectionsDropdownOpen, setCollectionsDropdownOpen] = useState(false);
   const [moreNavDropdownOpen, setMoreNavDropdownOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const [contactConfig, setContactConfig] = useState<StoreContactConfig | null>(null);
 
   const { customer, isLoggedIn, loginWithGoogle, openAuthModal, openAccountModal, logout } = useCustomerAuth();
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
@@ -172,6 +179,23 @@ export const Header: React.FC<HeaderProps> = ({
     window.addEventListener('scroll', handleScroll, { passive: true });
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const loadContact = () => {
+      apiClient.getStoreContact().then((res) => {
+        if (mounted && res.success && res.data) setContactConfig(res.data);
+      }).catch(() => {});
+    };
+    loadContact();
+    window.addEventListener('tori_contact_updated', loadContact);
+    return () => {
+      mounted = false;
+      window.removeEventListener('tori_contact_updated', loadContact);
+    };
+  }, []);
+
+  const navCategories = categories.filter((c) => c.isActive && c.showInNav !== false);
 
   const handleCmsLink = (targetLink?: string) => {
     const link = (targetLink || '').trim();
@@ -425,6 +449,28 @@ export const Header: React.FC<HeaderProps> = ({
                           </div>
                         </div>
                       </div>
+                      {navCategories.length > 0 && onSelectCategorySlug && (
+                        <div className="mt-4 pt-3 border-t border-neutral-800">
+                          <div className="text-[10px] font-mono font-bold tracking-wider text-neutral-400 uppercase mb-2">
+                            Categories
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {navCategories.map((cat) => (
+                              <button
+                                key={cat.id}
+                                type="button"
+                                onClick={() => {
+                                  onSelectCategorySlug(cat.slug);
+                                  setCollectionsDropdownOpen(false);
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-[#FF2028] text-[11px] font-mono text-neutral-200 hover:text-white transition cursor-pointer"
+                              >
+                                {cat.name}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -594,16 +640,6 @@ export const Header: React.FC<HeaderProps> = ({
                             <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
                           </svg>
                           <span>SIGN IN WITH GOOGLE</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setProfileDropdownOpen(false);
-                            openAuthModal();
-                          }}
-                          className="mt-2 w-full py-1.5 px-3 bg-neutral-900 hover:bg-neutral-800 text-white font-bold text-[11px] uppercase tracking-wider rounded transition cursor-pointer text-center flex items-center justify-center gap-1.5 font-mono"
-                        >
-                          <span>PHONE / OTP / PASSWORD</span>
                         </button>
                       </div>
 
@@ -968,59 +1004,118 @@ export const Header: React.FC<HeaderProps> = ({
                   Size Guide (Men & Kids)
                 </button>
               )}
+              <button
+                onClick={() => { onOpenContact(); setMobileMenuOpen(false); }}
+                className="w-full text-left py-2 px-3 text-neutral-200 hover:bg-neutral-800/50 rounded-lg"
+              >
+                Contact &amp; Support
+              </button>
             </div>
+
+            {navCategories.length > 0 && onSelectCategorySlug && (
+              <div className="pt-3 border-t border-neutral-800/80">
+                <div className="text-[10px] font-mono text-neutral-400 uppercase tracking-widest mb-2 px-1">
+                  CATEGORIES
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {navCategories.map((cat) => (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => {
+                        onSelectCategorySlug(cat.slug);
+                        setMobileMenuOpen(false);
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-neutral-900 border border-neutral-800 text-xs font-mono text-neutral-200 hover:text-white cursor-pointer"
+                    >
+                      {cat.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Mobile Drawer Social Links */}
             <div className="pt-4 border-t border-neutral-800/80">
               <div className="text-[10px] font-mono text-neutral-400 uppercase tracking-widest mb-2 px-1">
                 FOLLOW THE MOVEMENT
               </div>
-              <div className="flex items-center gap-2">
-                <a
-                  href={getAuthoritativeInstagramUrl()}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:text-white hover:border-[#FF2028]"
-                  aria-label="Instagram"
-                >
-                  <InstagramIcon className="w-3.5 h-3.5" />
-                </a>
-                <a
-                  href="https://wa.me/919876543210?text=Hi%20TORIWEAR!"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:text-[#25D366] hover:border-[#25D366]"
-                  aria-label="WhatsApp"
-                >
-                  <WhatsAppIcon className="w-3.5 h-3.5" />
-                </a>
-                <a
-                  href="https://facebook.com/toriwear"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:text-sky-400 hover:border-sky-400"
-                  aria-label="Facebook"
-                >
-                  <FacebookIcon className="w-3.5 h-3.5" />
-                </a>
-                <a
-                  href="https://x.com/toriwear"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:text-white hover:border-neutral-500"
-                  aria-label="X"
-                >
-                  <XTwitterIcon className="w-3.5 h-3.5" />
-                </a>
-                <a
-                  href="https://youtube.com/@toriwear"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:text-[#FF2028] hover:border-[#FF2028]"
-                  aria-label="YouTube"
-                >
-                  <YouTubeIcon className="w-3.5 h-3.5" />
-                </a>
+              <div className="flex items-center gap-2 flex-wrap">
+                {(() => {
+                  const waHref = buildWhatsAppHref(contactConfig);
+                  const activeChannels = (contactConfig?.channels || [])
+                    .filter((c) => c.enabled !== false && Boolean(c.url?.trim()))
+                    .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
+                  if (activeChannels.length > 0) {
+                    return activeChannels.map((ch) => {
+                      const isWa = (ch.platform || '').toLowerCase().includes('whatsapp');
+                      const href = isWa && waHref ? waHref : normalizeSocialUrl(ch.url, ch.url);
+                      return (
+                        <a
+                          key={ch.id || ch.platform}
+                          href={href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:text-white hover:border-[#FF2028]"
+                          aria-label={ch.label || ch.platform}
+                        >
+                          {renderSocialChannelIcon(ch.platform, 'w-3.5 h-3.5')}
+                        </a>
+                      );
+                    });
+                  }
+                  return (
+                    <>
+                      <a
+                        href={getAuthoritativeInstagramUrl()}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:text-white hover:border-[#FF2028]"
+                        aria-label="Instagram"
+                      >
+                        <InstagramIcon className="w-3.5 h-3.5" />
+                      </a>
+                      {waHref && (
+                        <a
+                          href={waHref}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:text-[#25D366] hover:border-[#25D366]"
+                          aria-label="WhatsApp"
+                        >
+                          <WhatsAppIcon className="w-3.5 h-3.5" />
+                        </a>
+                      )}
+                      <a
+                        href="https://facebook.com/toriwear"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:text-sky-400 hover:border-sky-400"
+                        aria-label="Facebook"
+                      >
+                        <FacebookIcon className="w-3.5 h-3.5" />
+                      </a>
+                      <a
+                        href="https://x.com/toriwear"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:text-white hover:border-neutral-500"
+                        aria-label="X"
+                      >
+                        <XTwitterIcon className="w-3.5 h-3.5" />
+                      </a>
+                      <a
+                        href="https://youtube.com/@toriwear"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="w-8 h-8 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:text-[#FF2028] hover:border-[#FF2028]"
+                        aria-label="YouTube"
+                      >
+                        <YouTubeIcon className="w-3.5 h-3.5" />
+                      </a>
+                    </>
+                  );
+                })()}
               </div>
             </div>
           </div>

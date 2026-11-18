@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { 
   CustomerProfile, 
   CustomerProductView, 
@@ -10,7 +10,14 @@ import {
 import { Product, CartItem } from '../types';
 import { INITIAL_CUSTOMERS } from '../admin/data/mockData';
 import { auth, googleProvider, authPersistenceReady } from '../firebase/firebase';
-import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import {
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  signOut,
+  onAuthStateChanged,
+  User as FirebaseUser,
+} from 'firebase/auth';
 
 export type CustomerAccountModalType = 
   | 'GIFT_CARDS' 
@@ -174,29 +181,49 @@ export const CustomerAuthProvider: React.FC<{ children: React.ReactNode }> = ({ 
     };
   };
 
+  const syncInFlightRef = useRef<{ uid: string; promise: Promise<CustomerProfile | null> } | null>(null);
+  const lastSyncErrorRef = useRef<string | null>(null);
+
   const syncFirebaseUserWithBackend = async (firebaseUser: FirebaseUser): Promise<CustomerProfile | null> => {
-    try {
-      const idToken = await firebaseUser.getIdToken();
-      const res = await fetch('/api/v1/customers/auth/firebase', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken }),
-      });
-      const data = await res.json();
-      if (data.success && data.sessionToken && data.customer) {
-        try {
-          localStorage.setItem(CUSTOMER_SESSION_KEY, data.sessionToken);
-        } catch {}
-        const mapped = mapServerCustomerToProfile(data.customer, customer || undefined);
-        setCustomer(mapped);
-        saveCustomerToStorage(mapped);
-        return mapped;
-      }
-      return null;
-    } catch (err) {
-      console.warn('Failed syncing Firebase session with backend:', err);
-      return null;
+    if (syncInFlightRef.current && syncInFlightRef.current.uid === firebaseUser.uid) {
+      return syncInFlightRef.current.promise;
     }
+
+    lastSyncErrorRef.current = null;
+    const promise = (async () => {
+      try {
+        const idToken = await firebaseUser.getIdToken();
+        const res = await fetch('/api/v1/customers/auth/firebase', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        });
+        const data = await res.json().catch(() => null);
+        if (res.ok && data?.success && data.sessionToken && data.customer) {
+          try {
+            localStorage.setItem(CUSTOMER_SESSION_KEY, data.sessionToken);
+          } catch {}
+          const mapped = mapServerCustomerToProfile(data.customer, customer || undefined);
+          setCustomer(mapped);
+          saveCustomerToStorage(mapped);
+          return mapped;
+        }
+        lastSyncErrorRef.current =
+          data?.error || `Backend session exchange failed (HTTP ${res.status}).`;
+        return null;
+      } catch (err: any) {
+        lastSyncErrorRef.current = err?.message || 'Network error verifying Google login.';
+        console.warn('Failed syncing Firebase session with backend:', err);
+        return null;
+      } finally {
+        if (syncInFlightRef.current?.uid === firebaseUser.uid) {
+          syncInFlightRef.current = null;
+        }
+      }
+    })();
+
+    syncInFlightRef.current = { uid: firebaseUser.uid, promise };
+    return promise;
   };
 
   // Hydrate existing DB session on mount + listen to Firebase auth persistence
@@ -226,6 +253,17 @@ export const CustomerAuthProvider: React.FC<{ children: React.ReactNode }> = ({ 
       } catch {}
     };
     hydrateBackendSession();
+
+    authPersistenceReady.then(async () => {
+      try {
+        const redirectResult = await getRedirectResult(auth);
+        if (mounted && redirectResult?.user) {
+          await syncFirebaseUserWithBackend(redirectResult.user);
+        }
+      } catch (err: any) {
+        console.warn('Firebase redirect completion notice:', err?.code || err?.message);
+      }
+    });
 
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
       if (!mounted) return;
@@ -268,27 +306,72 @@ export const CustomerAuthProvider: React.FC<{ children: React.ReactNode }> = ({ 
 
   // Primary Customer Authentication: Google Sign-In via Firebase + Server Verification
   const loginWithGoogle = async (): Promise<{ success: boolean; error?: string }> => {
+    const isEmbeddedIframe = (() => {
+      try {
+        return typeof window !== 'undefined' && window.self !== window.top;
+      } catch {
+        return true;
+      }
+    })();
+
     try {
       await authPersistenceReady;
+
+      // Mobile in-app browsers (Instagram/Facebook/WhatsApp webviews) often block popups
+      const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+      const isRestrictedWebView = /FBAN|FBAV|Instagram|Line|MicroMessenger/i.test(ua);
+      if (isRestrictedWebView && !isEmbeddedIframe) {
+        await signInWithRedirect(auth, googleProvider);
+        return { success: true };
+      }
+
       const result = await signInWithPopup(auth, googleProvider);
       if (result.user) {
         const synced = await syncFirebaseUserWithBackend(result.user);
         if (!synced) {
+          const detail = lastSyncErrorRef.current;
           await signOut(auth).catch(() => {});
-          return { success: false, error: 'Server verification of Google login failed. Please try again.' };
+          return {
+            success: false,
+            error: detail || 'Server verification of Google login failed. Please try again.',
+          };
         }
         closeAuthModal();
         return { success: true };
       }
       return { success: false, error: 'Sign in was cancelled.' };
     } catch (error: any) {
+      const code = error?.code || '';
+      if (
+        !isEmbeddedIframe &&
+        (code === 'auth/popup-blocked' ||
+          code === 'auth/operation-not-supported-in-this-environment' ||
+          code === 'auth/web-storage-unsupported')
+      ) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return { success: true };
+        } catch (redirectErr: any) {
+          console.warn('Firebase redirect fallback error:', redirectErr);
+        }
+      }
+
       console.warn('Firebase Google Sign-In Notice:', error);
       let message = error?.message || 'Failed to sign in with Google';
-      if (error?.code === 'auth/popup-closed-by-user') {
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
         message = 'Sign in window was closed before completing.';
-      } else if (error?.code === 'auth/popup-blocked') {
-        message = 'Sign in popup was blocked by browser. Please allow popups for this site.';
-      } else if (error?.code === 'auth/invalid-api-key') {
+      } else if (code === 'auth/popup-blocked') {
+        message = isEmbeddedIframe
+          ? 'Sign in popup was blocked inside the preview frame. Please allow popups or open the storefront in its own browser tab.'
+          : 'Sign in popup was blocked by your browser. Please allow popups or try again.';
+      } else if (code === 'auth/unauthorized-domain') {
+        const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+        message = `Google Sign-In is not authorized yet for ${host}. Add this domain under Firebase Authentication > Settings > Authorized domains.`;
+      } else if (code === 'auth/operation-not-allowed') {
+        message = 'Google Sign-In provider is not enabled yet in Firebase Authentication > Sign-in method.';
+      } else if (code === 'auth/network-request-failed') {
+        message = 'Network error while connecting to Google Sign-In. Please check your connection.';
+      } else if (code === 'auth/invalid-api-key') {
         message = 'Firebase configuration is incomplete. Please ensure Firebase Web App API key is configured.';
       }
       return { success: false, error: message };

@@ -405,6 +405,22 @@ export class OrderRepository {
               refundAmount: merged.refundAmount,
             },
           });
+
+          if (updates.timeline && updates.timeline.length > existing.timeline.length && prisma.orderStatusHistory) {
+            const addedEntries = updates.timeline.slice(existing.timeline.length);
+            for (const entry of addedEntries) {
+              await prisma.orderStatusHistory.create({
+                data: {
+                  orderId: id,
+                  fromStatus: existing.fulfillmentStatus as any,
+                  toStatus: (merged.fulfillmentStatus === 'PENDING_PAYMENT' ? 'CONFIRMED' : (merged.fulfillmentStatus === 'REFUNDED' ? 'RETURNED' : merged.fulfillmentStatus)) as any,
+                  changedBy: entry.actorName || entry.actorId || undefined,
+                  note: entry.note || entry.description,
+                  timestamp: entry.timestamp ? new Date(entry.timestamp) : new Date(),
+                },
+              });
+            }
+          }
         }
       } catch (err) {
         console.warn('[ORDER_REPO] Failed to update order in Prisma:', err);

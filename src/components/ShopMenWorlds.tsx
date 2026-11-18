@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ShoppingBag, Eye, Scale } from 'lucide-react';
-import { Product, MenWorldCategory } from '../types';
+import { Product, MenWorldCategory, StoreCategory } from '../types';
 import { MEN_WORLDS } from '../data/constants';
 import { isPublishedProduct } from '../utils/productFilters';
 import { EmptyDropState } from './EmptyDropState';
@@ -15,6 +15,9 @@ interface ShopMenWorldsProps {
   wishlist: string[];
   selectedWorld?: MenWorldCategory | 'ALL';
   onSelectWorld?: (world: MenWorldCategory | 'ALL') => void;
+  categories?: StoreCategory[];
+  selectedCategorySlug?: string | null;
+  onSelectCategorySlug?: (slug: string | null) => void;
   onToggleWishlist: (productId: string) => void;
   onOpenProductDetail: (product: Product) => void;
   onOpenPopoutZoom?: (product: Product) => void;
@@ -29,6 +32,9 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
   wishlist,
   selectedWorld: externalSelectedWorld,
   onSelectWorld,
+  categories = [],
+  selectedCategorySlug: externalCategorySlug,
+  onSelectCategorySlug,
   onToggleWishlist,
   onOpenProductDetail,
   onOpenPopoutZoom,
@@ -43,8 +49,22 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
     if (onSelectWorld) onSelectWorld(w);
   };
 
+  const [internalCatSlug, setInternalCatSlug] = useState<string | null>(null);
+  const activeCategorySlug = externalCategorySlug !== undefined ? externalCategorySlug : internalCatSlug;
+  const handleCategoryChange = (slug: string | null) => {
+    setInternalCatSlug(slug);
+    if (onSelectCategorySlug) onSelectCategorySlug(slug);
+  };
+
   const [selectedFit, setSelectedFit] = useState<string>('ALL');
   const [selectedSizes, setSelectedSizes] = useState<Record<string, string>>({});
+
+  const enabledMenCategories = categories.filter(
+    (c) => c.isActive && (c.department === 'MEN' || c.department === 'ALL')
+  );
+  const activeCategoryObj = activeCategorySlug
+    ? enabledMenCategories.find((c) => c.slug === activeCategorySlug) || null
+    : null;
 
   // Active world meta if a specific world is selected
   const activeWorldMeta = MEN_WORLDS.find((w) => w.id === selectedWorld);
@@ -59,6 +79,12 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
       p.franchise?.trim().toUpperCase() !== String(selectedWorld).trim().toUpperCase()
     ) {
       return false;
+    }
+    if (activeCategoryObj) {
+      const ids = Array.isArray(p.categoryIds) ? p.categoryIds : [];
+      if (!ids.includes(activeCategoryObj.id)) {
+        return false;
+      }
     }
     if (selectedFit !== 'ALL' && p.fit !== selectedFit) return false;
     return true;
@@ -90,6 +116,7 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
             <button
               onClick={() => {
                 handleWorldChange('ALL');
+                handleCategoryChange(null);
                 setSelectedFit('ALL');
               }}
               className="px-4 py-2 bg-neutral-950 text-white rounded-full text-xs font-mono font-bold uppercase tracking-wider hover:bg-neutral-800 transition cursor-pointer"
@@ -116,7 +143,7 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
         </div>
 
         {/* 5 World Navigation Tabs */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-3 mb-10 no-scrollbar">
+        <div className="flex items-center gap-2 overflow-x-auto pb-3 mb-4 no-scrollbar">
           <button
             onClick={() => handleWorldChange('ALL')}
             className={`px-4 py-2 rounded-full text-xs font-mono font-semibold uppercase whitespace-nowrap transition cursor-pointer border ${
@@ -149,6 +176,40 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
             );
           })}
         </div>
+
+        {/* Dynamic Store Categories Filter Pills */}
+        {enabledMenCategories.length > 0 && (
+          <div className="flex items-center gap-2 overflow-x-auto pb-3 mb-8 no-scrollbar">
+            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-500 font-bold shrink-0 mr-1">
+              CATEGORIES:
+            </span>
+            <button
+              type="button"
+              onClick={() => handleCategoryChange(null)}
+              className={`px-3 py-1 rounded-full text-[11px] font-mono uppercase whitespace-nowrap transition cursor-pointer border ${
+                !activeCategorySlug
+                  ? 'bg-[#FF2028] text-white border-[#FF2028] font-bold'
+                  : 'bg-white text-neutral-700 border-neutral-300 hover:border-neutral-700'
+              }`}
+            >
+              ALL CATEGORIES
+            </button>
+            {enabledMenCategories.map((cat) => (
+              <button
+                key={cat.id}
+                type="button"
+                onClick={() => handleCategoryChange(activeCategorySlug === cat.slug ? null : cat.slug)}
+                className={`px-3 py-1 rounded-full text-[11px] font-mono uppercase whitespace-nowrap transition cursor-pointer border ${
+                  activeCategorySlug === cat.slug
+                    ? 'bg-[#FF2028] text-white border-[#FF2028] font-bold shadow-sm'
+                    : 'bg-white text-neutral-700 border-neutral-300 hover:border-neutral-700'
+                }`}
+              >
+                {cat.name}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Active World Banner Showcase (when a specific world is chosen) */}
         {activeWorldMeta && (

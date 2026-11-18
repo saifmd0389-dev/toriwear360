@@ -8,6 +8,9 @@ import {
   AlertTriangle,
   XCircle,
   ShieldCheck,
+  Package,
+  Clock,
+  Check,
 } from 'lucide-react';
 import { OrderDetails, CartItem } from '../types';
 import { apiClient } from '../services/apiClient';
@@ -129,7 +132,9 @@ export const OrderTrackingModal: React.FC<OrderTrackingModalProps> = ({
         status: (
           String(tr.status || '').toUpperCase() === 'CANCELLED' ? 'Cancelled' :
           String(tr.status || '').toUpperCase() === 'DELIVERED' ? 'Delivered' :
-          String(tr.status || '').toUpperCase() === 'SHIPPED' ? 'Shipped' : 'Confirmed'
+          String(tr.status || '').toUpperCase() === 'OUT_FOR_DELIVERY' ? 'Out for Delivery' :
+          String(tr.status || '').toUpperCase() === 'SHIPPED' || String(tr.status || '').toUpperCase() === 'IN_TRANSIT' ? 'Shipped' :
+          String(tr.status || '').toUpperCase() === 'PACKED' ? 'Packed' : 'Confirmed'
         ) as any,
         estimatedDelivery: tr.estimatedDeliveryDate
           ? new Date(tr.estimatedDeliveryDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
@@ -462,41 +467,141 @@ export const OrderTrackingModal: React.FC<OrderTrackingModalProps> = ({
                 </div>
               ) : (
                 /* Real Fulfillment & Carrier Timeline */
-                <div className="space-y-3">
+                <div className="space-y-4">
+                  {/* Courier & AWB Summary */}
                   <div className="p-3 rounded-xl bg-neutral-950/70 border border-neutral-800 text-xs font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div>
                       <span className="text-neutral-400">Courier Partner: </span>
-                      <strong className="text-white">{liveMeta?.courierPartner || 'Pending courier assignment'}</strong>
+                      <strong className="text-white">{liveMeta?.courierPartner || searchedOrder.courierPartner || 'Pending courier assignment'}</strong>
                     </div>
                     <div>
                       <span className="text-neutral-400">AWB: </span>
-                      <strong className="text-red-400">{liveMeta?.awb || 'Awaiting AWB assignment'}</strong>
+                      <strong className="text-red-400 tabular-nums">{liveMeta?.awb || searchedOrder.trackingNumber || 'Awaiting AWB assignment'}</strong>
                     </div>
                   </div>
 
-                  {(liveMeta?.timeline && liveMeta.timeline.length > 0 ? liveMeta.timeline : [
-                    { title: `Order Status: ${searchedOrder.status}`, timestamp: searchedOrder.date, note: 'Awaiting carrier dispatch scan.' }
-                  ]).map((step, idx) => (
-                    <div key={idx} className="flex items-center gap-3 text-xs font-mono text-white">
-                      <div className="w-6 h-6 rounded-full bg-emerald-500 text-black flex items-center justify-center font-bold text-xs shrink-0">
-                        ✓
-                      </div>
-                      <div>
-                        <div className="font-bold">{step.title}</div>
-                        <div className="text-[10px] text-neutral-500">
-                          {step.timestamp || ''}{step.note ? ` • ${step.note}` : ''}
+                  {/* 5-Stage Fulfillment Milestone Bar */}
+                  {(() => {
+                    const st = searchedOrder.status;
+                    const activeStage =
+                      st === 'Delivered' ? 4 :
+                      st === 'Out for Delivery' ? 3 :
+                      st === 'Shipped' ? 2 :
+                      st === 'Packed' ? 1 : 0;
+                    const stages = [
+                      { label: 'Confirmed', icon: Check },
+                      { label: 'Packed', icon: Package },
+                      { label: 'Shipped', icon: Truck },
+                      { label: 'Out for Delivery', icon: Clock },
+                      { label: 'Delivered', icon: CheckCircle2 },
+                    ];
+                    return (
+                      <div className="p-3.5 rounded-xl bg-neutral-950/60 border border-neutral-800/80">
+                        <div className="relative flex items-start justify-between gap-1">
+                          <div className="absolute top-3.5 left-5 right-5 h-0.5 bg-neutral-800 z-0" />
+                          <div
+                            className="absolute top-3.5 left-5 h-0.5 bg-red-600 transition-all duration-300 z-0"
+                            style={{ width: `${(activeStage / 4) * 85}%` }}
+                          />
+                          {stages.map((stage, sIdx) => {
+                            const passed = activeStage >= sIdx;
+                            const isCurrent = activeStage === sIdx;
+                            const StageIcon = stage.icon;
+                            return (
+                              <div key={stage.label} className="relative z-10 flex flex-col items-center text-center flex-1">
+                                <div
+                                  className={`w-7 h-7 rounded-full flex items-center justify-center border text-xs transition ${
+                                    passed
+                                      ? sIdx === 4
+                                        ? 'bg-emerald-600 border-emerald-500 text-white'
+                                        : 'bg-red-600 border-red-500 text-white'
+                                      : 'bg-neutral-900 border-neutral-700 text-neutral-500'
+                                  } ${isCurrent && st !== 'Delivered' ? 'ring-2 ring-red-500/40' : ''}`}
+                                >
+                                  <StageIcon className="w-3.5 h-3.5" />
+                                </div>
+                                <span className={`mt-1.5 text-[10px] font-mono leading-tight ${passed ? 'text-white font-semibold' : 'text-neutral-500'}`}>
+                                  {stage.label}
+                                </span>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })()}
+
+                  {/* Connected Chronological Event Timeline */}
+                  {(() => {
+                    const events =
+                      liveMeta?.timeline && liveMeta.timeline.length > 0
+                        ? liveMeta.timeline
+                        : searchedOrder.timeline && searchedOrder.timeline.length > 0
+                        ? searchedOrder.timeline
+                        : [
+                            {
+                              title: `Order Status: ${searchedOrder.status}`,
+                              timestamp: searchedOrder.date,
+                              note: 'Order recorded in fulfillment queue.',
+                            },
+                          ];
+
+                    const formatTime = (ts?: string) => {
+                      if (!ts) return '';
+                      const d = new Date(ts);
+                      if (Number.isNaN(d.getTime())) return ts;
+                      return d.toLocaleString('en-IN', {
+                        day: 'numeric',
+                        month: 'short',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      });
+                    };
+
+                    return (
+                      <div className="pt-1">
+                        <div className="text-[11px] font-mono uppercase tracking-wider text-neutral-400 font-bold mb-3">
+                          Order Activity Timeline ({events.length})
+                        </div>
+                        <div className="border-l-2 border-neutral-800 ml-2.5 pl-4 space-y-4">
+                          {events.map((step, idx) => {
+                            const isLatest = idx === events.length - 1;
+                            return (
+                              <div key={idx} className="relative">
+                                <span
+                                  className={`absolute -left-[22px] top-1 w-3 h-3 rounded-full border-2 ${
+                                    isLatest
+                                      ? 'bg-emerald-500 border-emerald-950'
+                                      : 'bg-red-500 border-neutral-950'
+                                  }`}
+                                />
+                                <div className="text-xs font-bold text-white leading-snug">
+                                  {step.title}
+                                </div>
+                                <div className="text-[11px] font-mono text-neutral-400 tabular-nums mt-0.5">
+                                  {formatTime(step.timestamp)}
+                                </div>
+                                {step.note && step.note !== step.title && (
+                                  <div className="text-xs text-neutral-300 mt-1 leading-relaxed">
+                                    {step.note}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {liveMeta?.carrierEvents && liveMeta.carrierEvents.length > 0 && (
-                    <div className="pt-2 border-t border-neutral-800/80 space-y-1.5">
+                    <div className="pt-3 border-t border-neutral-800/80 space-y-2">
                       <div className="text-[10px] font-mono uppercase text-neutral-400 font-bold">Live Courier Scans</div>
                       {liveMeta.carrierEvents.map((ev, i) => (
                         <div key={i} className="text-[11px] font-mono text-neutral-300 flex items-center justify-between gap-2">
-                          <span>{ev.status}{ev.location ? ` (${ev.location})` : ''}</span>
-                          <span className="text-neutral-500 text-[10px]">{ev.timestamp || ''}</span>
+                          <span>{ev.status}{ev.location ? ` · ${ev.location}` : ''}</span>
+                          <span className="text-neutral-500 text-[10px] tabular-nums">{ev.timestamp || ''}</span>
                         </div>
                       ))}
                     </div>

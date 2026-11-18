@@ -80,6 +80,7 @@ export type AdminView =
   | 'COMMUNICATION'
   | 'ACCOUNT_SECURITY'
   | 'PRODUCTS'
+  | 'CATEGORIES'
   | 'INVENTORY'
   | 'ORDERS'
   | 'CUSTOMERS'
@@ -183,6 +184,7 @@ interface AdminDataContextType {
   clearAllProductsAndInventory: () => Promise<{ success: boolean; message: string }>;
   syncInventoryFromCatalog: () => Promise<{ success: boolean; addedCount?: number; message: string }>;
   updateOrderStatus: (orderId: string, status: OrderShippingStatus, note?: string) => void;
+  addOrderTimelineEvent: (orderId: string, title: string, note?: string, status?: string) => Promise<{ success: boolean; error?: string }>;
   addOrderInternalNote: (orderId: string, noteText: string) => void;
   cancelOrder: (orderId: string, reason: string) => void;
   initiateRefund: (orderId: string, amount: number, reason: string) => void;
@@ -645,9 +647,9 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             trackingNumber: o.courierTrackingNumber || o.trackingNumber,
             estimatedDelivery: o.estimatedDeliveryDate || o.estimatedDelivery || '3 to 5 Business Days',
             timeline: (o.timeline || []).map((tl: any) => ({
-              title: tl.status || tl.title || 'Update',
+              title: tl.title || tl.description || tl.status || 'Update',
               timestamp: tl.timestamp,
-              note: tl.description || tl.note,
+              note: tl.note || tl.description,
             })),
             internalNotes: o.internalNotes || [],
           };
@@ -717,6 +719,7 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
               slug: rp.slug || rp.name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
               publishingStatus: (rp.status || rp.publishingStatus || 'PUBLISHED') as any,
               licenseRightsStatus: (rp.licenseRightsStatus || 'Owned IP') as any,
+              categoryIds: Array.isArray(rp.categoryIds) ? rp.categoryIds : rp.categoryId ? [rp.categoryId] : [],
               variants: Array.isArray(rp.variants) && rp.variants.length > 0 
                 ? rp.variants.map((v: any) => ({
                     id: v.id,
@@ -941,6 +944,7 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
               slug: rp.slug || rp.name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
               publishingStatus: (rp.status || rp.publishingStatus || 'PUBLISHED') as any,
               licenseRightsStatus: (rp.licenseRightsStatus || 'Owned IP') as any,
+              categoryIds: Array.isArray(rp.categoryIds) ? rp.categoryIds : rp.categoryId ? [rp.categoryId] : [],
               variants: Array.isArray(rp.variants) && rp.variants.length > 0
                 ? rp.variants.map((v: any) => ({
                     id: v.id,
@@ -1271,6 +1275,7 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       slug: cleanName.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
       publishingStatus: productData.publishingStatus || 'PUBLISHED',
       licenseRightsStatus: productData.licenseRightsStatus || 'Owned IP',
+      categoryIds: productData.categoryIds || [],
       variants: productData.variants && productData.variants.length > 0 
         ? productData.variants 
         : [
@@ -1998,6 +2003,73 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     apiClient.updateAdminOrderStatus(orderId, status, note).catch((err) => console.warn('[AdminData] Async sync order status to API:', err));
   };
 
+  const addOrderTimelineEvent = async (
+    orderId: string,
+    title: string,
+    note?: string,
+    status?: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    const cleanTitle = title.trim();
+    if (cleanTitle.length < 2) {
+      return { success: false, error: 'Milestone title must be at least 2 characters.' };
+    }
+
+    const target = orders.find((o) => o.orderId === orderId);
+    const optimisticEntry = {
+      title: cleanTitle,
+      timestamp: new Date().toISOString(),
+      note: note?.trim() || cleanTitle,
+    };
+
+    try {
+      const res = await apiClient.addAdminOrderTimelineEvent(orderId, {
+        title: cleanTitle,
+        note: note?.trim() || undefined,
+        status: status || target?.shippingStatus,
+      });
+
+      if (res.success) {
+        const serverTimeline = Array.isArray(res.order?.timeline)
+          ? res.order.timeline.map((tl: any) => ({
+              title: tl.title || tl.description || tl.status || 'Update',
+              timestamp: tl.timestamp,
+              note: tl.note || tl.description,
+            }))
+          : null;
+
+        setOrders((prev) =>
+          prev.map((o) =>
+            o.orderId === orderId
+              ? {
+                  ...o,
+                  timeline: serverTimeline || [...o.timeline, optimisticEntry],
+                }
+              : o
+          )
+        );
+
+        logAction('ORDER_STATUS_CHANGED', `Order #${target?.orderNumber || orderId}`, `${cleanTitle}${note ? ` — ${note}` : ''}`);
+        showToast(`Timeline milestone added to Order #${target?.orderNumber || orderId}.`);
+        return { success: true };
+      }
+
+      // Fallback local state update if order exists only in local storefront storage
+      if (target) {
+        setOrders((prev) =>
+          prev.map((o) =>
+            o.orderId === orderId ? { ...o, timeline: [...o.timeline, optimisticEntry] } : o
+          )
+        );
+        showToast(`Timeline milestone saved locally for Order #${target.orderNumber}.`);
+        return { success: true };
+      }
+
+      return { success: false, error: res.error || 'Failed to add timeline update.' };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to add timeline update.' };
+    }
+  };
+
   const addOrderInternalNote = (orderId: string, noteText: string) => {
     const newNote = {
       id: `note-${Date.now()}`,
@@ -2650,6 +2722,7 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         clearAllProductsAndInventory,
         syncInventoryFromCatalog,
         updateOrderStatus,
+        addOrderTimelineEvent,
         addOrderInternalNote,
         cancelOrder,
         initiateRefund,

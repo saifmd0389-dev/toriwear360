@@ -7,6 +7,7 @@ import { resolveSecureStorePath } from '../utils/storageHelper';
 
 const PERSIST_FILE = resolveSecureStorePath('custom-products-store.json', 'public/generated-assets/custom-products-store.json');
 const TOMBSTONES_FILE = resolveSecureStorePath('deleted-product-ids.json', 'public/generated-assets/deleted-product-ids.json');
+const CATEGORIES_FILE = resolveSecureStorePath('categories-store.json');
 
 export interface ProductVariantRecord {
   id: string;
@@ -39,12 +40,18 @@ export interface CategoryRecord {
   id: string;
   name: string;
   slug: string;
-  department: 'MEN' | 'KIDS' | 'UNISEX';
+  department: 'ALL' | 'MEN' | 'KIDS' | 'UNISEX';
+  parentId?: string | null;
   description?: string;
   image?: string;
   bannerImage?: string;
+  seoTitle?: string;
+  seoDescription?: string;
   displayOrder: number;
   isActive: boolean;
+  isEnabled?: boolean;
+  showInNav?: boolean;
+  productCount?: number;
 }
 
 export interface CollectionRecord {
@@ -99,6 +106,7 @@ export interface ProductRecord {
   licenseType: string;
   status: 'PUBLISHED' | 'DRAFT' | 'REVIEW' | 'APPROVED' | 'ARCHIVED';
   categoryId?: string;
+  categoryIds?: string[];
   subcategoryId?: string;
   collectionSlugs?: string[];
   variants?: ProductVariantRecord[];
@@ -146,37 +154,135 @@ export class ProductRepository {
     }
   }
 
-  private initializeSeedData() {
-    // 1. Seed Categories (Worlds and standard apparel types)
-    MEN_WORLDS.forEach((w, idx) => {
-      const cat: CategoryRecord = {
-        id: `cat-men-${idx + 1}`,
-        name: w.name,
-        slug: w.id.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-        department: 'MEN',
-        description: w.tagline,
-        image: w.heroImage,
-        bannerImage: w.heroImage,
-        displayOrder: idx + 1,
-        isActive: true,
-      };
-      this.fallbackCategories.set(cat.id, cat);
-    });
+  private loadCategoriesFromDisk(): boolean {
+    try {
+      if (fs.existsSync(CATEGORIES_FILE)) {
+        const parsed = JSON.parse(fs.readFileSync(CATEGORIES_FILE, 'utf-8'));
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          this.fallbackCategories.clear();
+          parsed.forEach((c: any) => {
+            if (!c?.id) return;
+            const active = c.isEnabled !== undefined ? Boolean(c.isEnabled) : c.isActive !== false;
+            this.fallbackCategories.set(c.id, {
+              ...c,
+              department: (['ALL', 'MEN', 'KIDS', 'UNISEX'].includes(String(c.department || '').toUpperCase())
+                ? String(c.department).toUpperCase()
+                : 'MEN') as CategoryRecord['department'],
+              parentId: c.parentId || null,
+              isActive: active,
+              isEnabled: active,
+              showInNav: c.showInNav !== false,
+              displayOrder: Number.isFinite(Number(c.displayOrder)) ? Number(c.displayOrder) : 99,
+            });
+          });
+          return true;
+        }
+      }
+    } catch (err) {
+      console.warn('[REPO] Failed to load categories from disk:', err);
+    }
+    return false;
+  }
 
-    KIDS_WORLDS.forEach((w, idx) => {
-      const cat: CategoryRecord = {
-        id: `cat-kids-${idx + 1}`,
-        name: w.name,
-        slug: w.id.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-        department: 'KIDS',
-        description: w.tagline,
-        image: w.heroImage,
-        bannerImage: w.heroImage,
-        displayOrder: 10 + idx + 1,
-        isActive: true,
-      };
-      this.fallbackCategories.set(cat.id, cat);
-    });
+  private persistCategoriesToDisk() {
+    try {
+      const dir = path.dirname(CATEGORIES_FILE);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const tmp = `${CATEGORIES_FILE}.${process.pid}.tmp`;
+      const list = Array.from(this.fallbackCategories.values()).sort((a, b) => a.displayOrder - b.displayOrder);
+      fs.writeFileSync(tmp, JSON.stringify(list, null, 2), 'utf-8');
+      fs.renameSync(tmp, CATEGORIES_FILE);
+    } catch (err) {
+      console.warn('[REPO] Failed to persist categories to disk:', err);
+    }
+  }
+
+  private initializeSeedData() {
+    // 1. Load persistent Categories or seed defaults
+    const loadedCategories = this.loadCategoriesFromDisk();
+    if (!loadedCategories) {
+      MEN_WORLDS.forEach((w, idx) => {
+        const cat: CategoryRecord = {
+          id: `cat-men-${idx + 1}`,
+          name: w.name,
+          slug: w.id.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+          department: 'MEN',
+          description: w.tagline,
+          image: w.heroImage,
+          bannerImage: w.heroImage,
+          seoTitle: `${w.name} Anime Streetwear | TORI-WEAR`,
+          seoDescription: w.tagline,
+          displayOrder: idx + 1,
+          isActive: true,
+          isEnabled: true,
+          showInNav: true,
+        };
+        this.fallbackCategories.set(cat.id, cat);
+      });
+
+      KIDS_WORLDS.forEach((w, idx) => {
+        const cat: CategoryRecord = {
+          id: `cat-kids-${idx + 1}`,
+          name: w.name,
+          slug: w.id.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+          department: 'KIDS',
+          description: w.tagline,
+          image: w.heroImage,
+          bannerImage: w.heroImage,
+          seoTitle: `${w.name} Kids Anime Streetwear | TORI-WEAR`,
+          seoDescription: w.tagline,
+          displayOrder: 10 + idx + 1,
+          isActive: true,
+          isEnabled: true,
+          showInNav: true,
+        };
+        this.fallbackCategories.set(cat.id, cat);
+      });
+
+      const coreGarmentCategories: CategoryRecord[] = [
+        {
+          id: 'cat-oversized-tees',
+          name: 'Oversized T-Shirts',
+          slug: 'oversized-tees',
+          department: 'MEN',
+          description: '240 GSM heavyweight boxy oversized silhouettes.',
+          seoTitle: 'Oversized 240 GSM Anime T-Shirts | TORI-WEAR',
+          seoDescription: 'Shop heavyweight 240 GSM oversized Japanese anime streetwear tees engineered for structured drape.',
+          displayOrder: 21,
+          isActive: true,
+          isEnabled: true,
+          showInNav: true,
+        },
+        {
+          id: 'cat-drop-shoulder',
+          name: 'Drop Shoulder Tees',
+          slug: 'drop-shoulder',
+          department: 'UNISEX',
+          description: 'Relaxed drop-shoulder cuts with archival puff & screen prints.',
+          seoTitle: 'Drop Shoulder Anime Streetwear | TORI-WEAR',
+          seoDescription: 'Original manga-inspired drop shoulder tees in 240 GSM combed cotton.',
+          displayOrder: 22,
+          isActive: true,
+          isEnabled: true,
+          showInNav: true,
+        },
+        {
+          id: 'cat-hoodies',
+          name: 'Heavyweight Hoodies',
+          slug: 'hoodies',
+          department: 'UNISEX',
+          description: 'Fleece-lined anime outerwear built for midnight runs.',
+          seoTitle: 'Heavyweight Anime Hoodies | TORI-WEAR',
+          seoDescription: 'Heavyweight original anime streetwear hoodies & winter capsules.',
+          displayOrder: 23,
+          isActive: true,
+          isEnabled: true,
+          showInNav: true,
+        },
+      ];
+      coreGarmentCategories.forEach((c) => this.fallbackCategories.set(c.id, c));
+      this.persistCategoriesToDisk();
+    }
 
     // 2. Seed Collections
     const collections: CollectionRecord[] = [
@@ -362,6 +468,38 @@ export class ProductRepository {
       this.persistCustomProductsToFile();
     }
 
+    // Map product categoryIds non-destructively in memory where missing
+    for (const p of this.fallbackProducts.values()) {
+      const existingIds = new Set<string>(Array.isArray(p.categoryIds) ? p.categoryIds : []);
+      if (p.categoryId) existingIds.add(p.categoryId);
+      if (existingIds.size === 0) {
+        const wNorm = String(p.world || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+        for (const cat of this.fallbackCategories.values()) {
+          const cNorm = String(cat.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+          const sNorm = String(cat.slug || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+          if (wNorm && (cNorm.includes(wNorm) || wNorm.includes(cNorm) || sNorm.includes(wNorm) || wNorm.includes(sNorm))) {
+            if (cat.department === 'ALL' || cat.department === 'UNISEX' || cat.department === p.department) {
+              existingIds.add(cat.id);
+            }
+          }
+        }
+        const fitLower = String(p.fit || '').toLowerCase();
+        if (fitLower.includes('oversized') && this.fallbackCategories.has('cat-oversized-tees')) {
+          existingIds.add('cat-oversized-tees');
+        }
+        if (String(p.sleeves || '').toLowerCase().includes('drop') && this.fallbackCategories.has('cat-drop-shoulder')) {
+          existingIds.add('cat-drop-shoulder');
+        }
+        if (String(p.name || '').toLowerCase().includes('hoodie') && this.fallbackCategories.has('cat-hoodies')) {
+          existingIds.add('cat-hoodies');
+        }
+      }
+      p.categoryIds = Array.from(existingIds);
+      if (!p.categoryId && p.categoryIds.length > 0) {
+        p.categoryId = p.categoryIds[0];
+      }
+    }
+
     console.log(`[REPO] Initialized ProductRepository with ${this.fallbackProducts.size} products, ${this.fallbackCategories.size} categories, and ${this.fallbackCollections.size} collections.`);
   }
 
@@ -391,9 +529,18 @@ export class ProductRepository {
             .filter((url: unknown): url is string => typeof url === 'string' && url.trim().length > 0)
         : fallback?.images || [];
 
+    let parsedCategoryIds: string[] | undefined = fallback?.categoryIds;
+    if (typeof found?.categoryIdsJson === 'string' && found.categoryIdsJson.trim()) {
+      try {
+        const arr = JSON.parse(found.categoryIdsJson);
+        if (Array.isArray(arr)) parsedCategoryIds = arr;
+      } catch {}
+    }
+
     return {
       ...(fallback || {}),
       ...found,
+      categoryIds: parsedCategoryIds,
       status: (found?.status || found?.publishingStatus || fallback?.status || 'PUBLISHED') as ProductRecord['status'],
       images: normalizedImages,
     } as unknown as ProductRecord;
@@ -456,6 +603,7 @@ export class ProductRepository {
     world?: string;
     status?: string;
     categoryId?: string;
+    categorySlug?: string;
     collectionSlug?: string;
     isBestseller?: boolean;
     isNewDrop?: boolean;
@@ -473,8 +621,17 @@ export class ProductRepository {
     if (filter?.status && filter.status !== 'ALL') {
       list = list.filter((p) => p.status === filter.status);
     }
-    if (filter?.categoryId) {
-      list = list.filter((p) => p.categoryId === filter.categoryId);
+    if (filter?.categoryId || filter?.categorySlug) {
+      let targetCatId = filter.categoryId;
+      if (!targetCatId && filter.categorySlug) {
+        const cat = await this.getCategoryBySlug(filter.categorySlug);
+        targetCatId = cat?.id || filter.categorySlug;
+      }
+      if (targetCatId) {
+        list = list.filter(
+          (p) => p.categoryId === targetCatId || (Array.isArray(p.categoryIds) && p.categoryIds.includes(targetCatId!))
+        );
+      }
     }
     if (filter?.collectionSlug) {
       list = list.filter((p) => p.collectionSlugs?.includes(filter.collectionSlug!));
@@ -568,6 +725,8 @@ export class ProductRepository {
             reviewsCount: Number(product.reviewsCount || 0),
             licenseType: product.licenseType,
             publishingStatus: product.status as any,
+            categoryId: product.categoryId || (Array.isArray(product.categoryIds) ? product.categoryIds[0] : null) || null,
+            categoryIdsJson: Array.isArray(product.categoryIds) ? JSON.stringify(product.categoryIds) : null,
           },
           update: {
             catalogNumber: product.catalogNumber,
@@ -597,6 +756,8 @@ export class ProductRepository {
             reviewsCount: Number(product.reviewsCount || 0),
             licenseType: product.licenseType,
             publishingStatus: product.status as any,
+            categoryId: product.categoryId || (Array.isArray(product.categoryIds) ? product.categoryIds[0] : null) || null,
+            categoryIdsJson: Array.isArray(product.categoryIds) ? JSON.stringify(product.categoryIds) : null,
             updatedAt: new Date(),
           },
         });
@@ -686,6 +847,34 @@ export class ProductRepository {
     if (!product) return null;
     product.status = 'PUBLISHED';
     return this.save(product);
+  }
+
+  async updateRatingStats(productId: string, rating: number, reviewsCount: number): Promise<ProductRecord | null> {
+    const product = await this.findById(productId);
+    if (!product) return null;
+
+    product.rating = Math.round(Number(rating || 0) * 10) / 10;
+    product.reviewsCount = Math.max(0, Math.round(Number(reviewsCount || 0)));
+    product.updatedAt = new Date();
+    this.fallbackProducts.set(product.id, product);
+    this.persistCustomProductsToFile();
+
+    const prisma = getPrismaClient();
+    if (prisma?.product) {
+      try {
+        await prisma.product.updateMany({
+          where: { id: product.id },
+          data: {
+            rating: product.rating,
+            reviewsCount: product.reviewsCount,
+          },
+        });
+      } catch (err) {
+        console.warn('[REPO] Prisma updateRatingStats warning:', err);
+      }
+    }
+
+    return product;
   }
 
   async delete(id: string): Promise<boolean> {
@@ -860,10 +1049,31 @@ export class ProductRepository {
   }
 
   // Categories
-  async getCategories(department?: string): Promise<CategoryRecord[]> {
-    let list = Array.from(this.fallbackCategories.values());
+  async getCategories(department?: string, includeDisabled = false): Promise<CategoryRecord[]> {
+    const counts = new Map<string, number>();
+    for (const p of this.fallbackProducts.values()) {
+      if (p.status !== 'PUBLISHED') continue;
+      const ids = new Set<string>(Array.isArray(p.categoryIds) ? p.categoryIds : []);
+      if (p.categoryId) ids.add(p.categoryId);
+      ids.forEach((cid) => counts.set(cid, (counts.get(cid) || 0) + 1));
+    }
+
+    let list = Array.from(this.fallbackCategories.values()).map((c) => {
+      const enabled = c.isEnabled !== undefined ? Boolean(c.isEnabled) : c.isActive !== false;
+      return {
+        ...c,
+        isActive: enabled,
+        isEnabled: enabled,
+        productCount: counts.get(c.id) || 0,
+      };
+    });
+
+    if (!includeDisabled) {
+      list = list.filter((c) => c.isActive);
+    }
     if (department && department !== 'ALL') {
-      list = list.filter((c) => c.department === department || c.department === 'UNISEX');
+      const deptUpper = department.toUpperCase();
+      list = list.filter((c) => c.department === deptUpper || c.department === 'UNISEX' || c.department === 'ALL');
     }
     return list.sort((a, b) => a.displayOrder - b.displayOrder);
   }
@@ -873,22 +1083,170 @@ export class ProductRepository {
   }
 
   async getCategoryBySlug(slug: string): Promise<CategoryRecord | null> {
+    const clean = slug.toLowerCase().trim();
     for (const c of this.fallbackCategories.values()) {
-      if (c.slug === slug) return c;
+      if (c.slug.toLowerCase() === clean) return c;
     }
     return null;
   }
 
   async saveCategory(cat: CategoryRecord): Promise<CategoryRecord> {
-    this.fallbackCategories.set(cat.id, cat);
-    return cat;
+    const active = cat.isEnabled !== undefined ? Boolean(cat.isEnabled) : cat.isActive !== false;
+    const cleanSlug = (cat.slug || cat.name)
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || `category-${Date.now()}`;
+
+    const normalized: CategoryRecord = {
+      ...cat,
+      slug: cleanSlug,
+      department: (['ALL', 'MEN', 'KIDS', 'UNISEX'].includes(String(cat.department || '').toUpperCase())
+        ? String(cat.department).toUpperCase()
+        : 'MEN') as CategoryRecord['department'],
+      parentId: cat.parentId || null,
+      isActive: active,
+      isEnabled: active,
+      showInNav: cat.showInNav !== false,
+      displayOrder: Number.isFinite(Number(cat.displayOrder)) ? Number(cat.displayOrder) : 99,
+    };
+    this.fallbackCategories.set(normalized.id, normalized);
+    this.persistCategoriesToDisk();
+
+    const prisma = getPrismaClient();
+    if (prisma?.category) {
+      try {
+        await prisma.category.upsert({
+          where: { id: normalized.id },
+          create: {
+            id: normalized.id,
+            name: normalized.name,
+            slug: normalized.slug,
+            department: normalized.department as any,
+            parentId: normalized.parentId || null,
+            description: normalized.description || null,
+            image: normalized.image || null,
+            bannerImage: normalized.bannerImage || null,
+            seoTitle: normalized.seoTitle || null,
+            seoDescription: normalized.seoDescription || null,
+            displayOrder: normalized.displayOrder,
+            isActive: normalized.isActive,
+            showInNav: normalized.showInNav !== false,
+          },
+          update: {
+            name: normalized.name,
+            slug: normalized.slug,
+            department: normalized.department as any,
+            parentId: normalized.parentId || null,
+            description: normalized.description || null,
+            image: normalized.image || null,
+            bannerImage: normalized.bannerImage || null,
+            seoTitle: normalized.seoTitle || null,
+            seoDescription: normalized.seoDescription || null,
+            displayOrder: normalized.displayOrder,
+            isActive: normalized.isActive,
+            showInNav: normalized.showInNav !== false,
+          },
+        });
+      } catch (err) {
+        console.warn('[REPO] Prisma saveCategory note:', (err as any)?.message || err);
+      }
+    }
+
+    return normalized;
+  }
+
+  async assignProductsToCategory(categoryId: string, productIds: string[]): Promise<{ assignedCount: number }> {
+    const targetSet = new Set(productIds.filter(Boolean));
+    let changed = false;
+    let assignedCount = 0;
+
+    for (const product of this.fallbackProducts.values()) {
+      const currentSet = new Set<string>(Array.isArray(product.categoryIds) ? product.categoryIds : []);
+      if (product.categoryId) currentSet.add(product.categoryId);
+      const had = currentSet.has(categoryId);
+      const shouldHave = targetSet.has(product.id);
+      if (shouldHave) assignedCount++;
+
+      if (had !== shouldHave) {
+        if (shouldHave) {
+          currentSet.add(categoryId);
+        } else {
+          currentSet.delete(categoryId);
+        }
+        const nextArr = Array.from(currentSet);
+        product.categoryIds = nextArr;
+        if (product.categoryId === categoryId && !shouldHave) {
+          product.categoryId = nextArr[0];
+        } else if (!product.categoryId && shouldHave) {
+          product.categoryId = categoryId;
+        }
+        product.updatedAt = new Date();
+        this.fallbackProducts.set(product.id, product);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      this.persistCustomProductsToFile();
+    }
+    return { assignedCount };
+  }
+
+  async deleteCategory(id: string): Promise<{ deleted: boolean; unlinkedProducts: number }> {
+    const existed = this.fallbackCategories.delete(id);
+    if (!existed) return { deleted: false, unlinkedProducts: 0 };
+
+    // Clear parentId links pointing to this category
+    for (const c of this.fallbackCategories.values()) {
+      if (c.parentId === id) {
+        c.parentId = null;
+        this.fallbackCategories.set(c.id, c);
+      }
+    }
+    this.persistCategoriesToDisk();
+
+    // Unlink ONLY from products — NEVER delete products when a category is deleted
+    let unlinkedProducts = 0;
+    for (const p of this.fallbackProducts.values()) {
+      let touched = false;
+      if (Array.isArray(p.categoryIds) && p.categoryIds.includes(id)) {
+        p.categoryIds = p.categoryIds.filter((cid) => cid !== id);
+        touched = true;
+      }
+      if (p.categoryId === id) {
+        p.categoryId = p.categoryIds?.[0];
+        touched = true;
+      }
+      if (touched) {
+        unlinkedProducts++;
+        p.updatedAt = new Date();
+        this.fallbackProducts.set(p.id, p);
+      }
+    }
+    if (unlinkedProducts > 0) {
+      this.persistCustomProductsToFile();
+    }
+
+    const prisma = getPrismaClient();
+    if (prisma?.category) {
+      try {
+        await prisma.product.updateMany({ where: { categoryId: id }, data: { categoryId: null } });
+        await prisma.category.deleteMany({ where: { id } });
+      } catch (err) {
+        console.warn('[REPO] Prisma deleteCategory note:', (err as any)?.message || err);
+      }
+    }
+
+    return { deleted: true, unlinkedProducts };
   }
 
   async archiveCategory(id: string): Promise<boolean> {
     const cat = this.fallbackCategories.get(id);
     if (!cat) return false;
     cat.isActive = false;
-    this.fallbackCategories.set(id, cat);
+    cat.isEnabled = false;
+    await this.saveCategory(cat);
     return true;
   }
 

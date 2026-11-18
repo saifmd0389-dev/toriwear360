@@ -1,8 +1,10 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
+import path from 'path';
+import fs from 'fs';
 import { checkDatabaseHealth, getPrismaClient } from '../db/prisma';
 import { userService } from '../services/userService';
-import { orderService } from '../services/orderService';
+import { orderService, normalizeOrderTimeline } from '../services/orderService';
 import { orderRepository, OrderRecord } from '../repositories/orderRepository';
 import { paymentService } from '../services/paymentService';
 import { shippingService } from '../services/shippingService';
@@ -10,7 +12,12 @@ import { shippingRepository } from '../repositories/shippingRepository';
 import { couponRepository } from '../repositories/couponRepository';
 import { customerRepository } from '../repositories/customerRepository';
 import { productRepository, ProductRecord, ProductVariantRecord, CategoryRecord } from '../repositories/productRepository';
+import { reviewRepository } from '../repositories/reviewRepository';
+import { auditRepository } from '../repositories/auditRepository';
 import { inventoryRepository } from '../repositories/inventoryRepository';
+import { returnRepository, RETURN_PROOFS_DIR, ReturnRequestRecord, ReturnRequestStatus } from '../repositories/returnRepository';
+import { returnService } from '../services/returnService';
+import { cmsRepository } from '../repositories/cmsRepository';
 import { logisticsManager } from '../services/logistics/logisticsManager';
 import { paymentConfigService } from '../services/paymentConfigService';
 import { paymentRepository } from '../repositories/paymentRepository';
@@ -195,24 +202,30 @@ async function resolveAuthenticatedCustomer(req: Request) {
   if (!token) return null;
 
   const prisma = getPrismaClient();
-  if (!prisma?.session) return null;
-
-  try {
-    const sess = await prisma.session.findUnique({
-      where: { token },
-      include: { customer: { include: { addresses: true } } },
-    });
-    if (!sess || !sess.isValid || !sess.customerId || !sess.customer) return null;
-    if (new Date(sess.expiresAt) < new Date()) {
-      await prisma.session.update({ where: { id: sess.id }, data: { isValid: false } }).catch(() => {});
-      return null;
+  if (prisma?.session) {
+    try {
+      const sess = await prisma.session.findUnique({
+        where: { token },
+        include: { customer: { include: { addresses: true } } },
+      });
+      if (sess && sess.isValid && sess.customerId && sess.customer) {
+        if (new Date(sess.expiresAt) < new Date()) {
+          await prisma.session.update({ where: { id: sess.id }, data: { isValid: false } }).catch(() => {});
+          await customerRepository.revokeSession(token);
+          return null;
+        }
+        if (sess.customer.status === 'SUSPENDED') return null;
+        await prisma.session.update({ where: { id: sess.id }, data: { lastActiveAt: new Date() } }).catch(() => {});
+        return await customerRepository.findById(sess.customerId);
+      }
+    } catch {
+      // Fall through to disk-backed session store when MySQL is unavailable
     }
-    if (sess.customer.status === 'SUSPENDED') return null;
-    await prisma.session.update({ where: { id: sess.id }, data: { lastActiveAt: new Date() } }).catch(() => {});
-    return await customerRepository.findById(sess.customerId);
-  } catch {
-    return null;
   }
+
+  const diskCustomer = await customerRepository.findCustomerBySessionToken(token);
+  if (!diskCustomer || diskCustomer.status === 'SUSPENDED') return null;
+  return diskCustomer;
 }
 
 function resolvePlatformActor(req: Request): { id: string; name: string; role: PlatformRole } {
@@ -387,19 +400,18 @@ apiRouter.post('/v1/customers/auth/firebase', async (req: Request, res: Response
     }
 
     const sessionToken = `cust_sess_${crypto.randomBytes(32).toString('hex')}`;
-    const prisma = getPrismaClient();
-    if (prisma?.session) {
-      await prisma.session.create({
-        data: {
-          token: sessionToken,
-          customerId: savedCustomer.id,
-          ipAddress: (req.ip || req.socket.remoteAddress || '127.0.0.1').replace('::ffff:', ''),
-          userAgent: String(req.headers['user-agent'] || '').slice(0, 255),
-          expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-          isValid: true,
-        },
-      });
-    }
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const nowIso = new Date().toISOString();
+    await customerRepository.saveSession({
+      token: sessionToken,
+      customerId: savedCustomer.id,
+      ipAddress: (req.ip || req.socket.remoteAddress || '127.0.0.1').replace('::ffff:', ''),
+      userAgent: String(req.headers['user-agent'] || '').slice(0, 255),
+      expiresAt: expiresAt.toISOString(),
+      isValid: true,
+      lastActiveAt: nowIso,
+      createdAt: nowIso,
+    });
 
     return res.json({
       success: true,
@@ -425,6 +437,7 @@ apiRouter.post('/v1/customers/auth/logout', async (req: Request, res: Response) 
     extractSessionToken(req) ||
     (typeof req.headers['x-customer-session'] === 'string' ? req.headers['x-customer-session'].trim() : undefined);
   if (token) {
+    await customerRepository.revokeSession(token);
     const prisma = getPrismaClient();
     if (prisma?.session) {
       await prisma.session.updateMany({ where: { token }, data: { isValid: false } }).catch(() => {});
@@ -571,21 +584,148 @@ apiRouter.get('/v1/products/:id/images', async (req: Request, res: Response) => 
 });
 
 // ============================================================================
+// 3B. PRODUCT REVIEWS (PUBLIC READ & SUBMISSION)
+// ============================================================================
+apiRouter.get('/v1/products/:id/reviews', async (req: Request, res: Response) => {
+  try {
+    const rawId = String(req.params.id || '').trim();
+    const product =
+      (await productRepository.findById(rawId)) ||
+      (await productRepository.findBySlug(rawId)) ||
+      (await productRepository.findByCatalogNumber(rawId));
+
+    const targetProductId = product ? product.id : rawId;
+    const ratingParam = req.query.rating ? Number(req.query.rating) : undefined;
+    const fitParam = typeof req.query.fit === 'string' ? req.query.fit : undefined;
+    const verifiedOnly = req.query.verified === 'true';
+    const rawSort = String(req.query.sort || 'recent').toLowerCase();
+    const sort: 'recent' | 'highest' | 'lowest' =
+      rawSort === 'highest' || rawSort === 'lowest' ? rawSort : 'recent';
+
+    const { reviews, summary } = await reviewRepository.listByProduct(targetProductId, {
+      rating: ratingParam && Number.isFinite(ratingParam) ? ratingParam : undefined,
+      fitFeedback: fitParam,
+      verifiedOnly,
+      sort,
+    });
+
+    const sanitized = reviews.map(({ customerEmail: _email, ...rest }) => rest);
+
+    return res.json({
+      success: true,
+      count: sanitized.length,
+      data: sanitized,
+      summary,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load product reviews.' });
+  }
+});
+
+apiRouter.post('/v1/products/:id/reviews', async (req: Request, res: Response) => {
+  try {
+    const rawId = String(req.params.id || '').trim();
+    const product =
+      (await productRepository.findById(rawId)) ||
+      (await productRepository.findBySlug(rawId)) ||
+      (await productRepository.findByCatalogNumber(rawId));
+
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Product not found.' });
+    }
+
+    const body = req.body || {};
+    const ratingNum = Number(body.rating);
+    if (!Number.isFinite(ratingNum) || ratingNum < 1 || ratingNum > 5) {
+      return res.status(400).json({ success: false, error: 'Please select a star rating between 1 and 5.' });
+    }
+
+    const authCustomer = await resolveAuthenticatedCustomer(req);
+    const customerName = String(body.customerName || authCustomer?.name || '').trim();
+    if (customerName.length < 2 || customerName.length > 80) {
+      return res.status(400).json({ success: false, error: 'Reviewer name must be between 2 and 80 characters.' });
+    }
+
+    const comment = String(body.comment || '').trim();
+    if (comment.length < 10 || comment.length > 2000) {
+      return res.status(400).json({ success: false, error: 'Review comment must be between 10 and 2000 characters.' });
+    }
+
+    const title = typeof body.title === 'string' ? body.title.trim().slice(0, 120) : undefined;
+    const sizePurchased = typeof body.sizePurchased === 'string' ? body.sizePurchased.trim().slice(0, 20) : undefined;
+    const fitFeedback = typeof body.fitFeedback === 'string' ? body.fitFeedback.trim() : undefined;
+    const reviewerEmail = String(authCustomer?.email || body.email || '').trim().toLowerCase() || undefined;
+
+    // Authoritatively determine verifiedPurchase against persisted non-cancelled orders
+    let verifiedPurchase = false;
+    try {
+      const orders = await orderRepository.getAll();
+      verifiedPurchase = orders.some((o) => {
+        if (o.fulfillmentStatus === 'CANCELLED' || o.fulfillmentStatus === 'FAILED') return false;
+        const ownerMatch = Boolean(
+          (authCustomer?.id && o.customerId && o.customerId === authCustomer.id) ||
+          (reviewerEmail && o.customerEmail && o.customerEmail.toLowerCase() === reviewerEmail)
+        );
+        if (!ownerMatch) return false;
+        return Array.isArray(o.items) && o.items.some((it) => it.productId === product.id);
+      });
+    } catch {
+      verifiedPurchase = false;
+    }
+
+    const created = await reviewRepository.create({
+      productId: product.id,
+      productName: product.name,
+      customerId: authCustomer?.id,
+      customerName,
+      customerEmail: reviewerEmail,
+      rating: ratingNum,
+      title: title || undefined,
+      comment,
+      verifiedPurchase,
+      sizePurchased: sizePurchased || undefined,
+      fitFeedback,
+      status: 'APPROVED',
+    });
+
+    const { summary } = await reviewRepository.listByProduct(product.id);
+    const { customerEmail: _email, ...publicReview } = created;
+
+    return res.status(201).json({
+      success: true,
+      data: publicReview,
+      summary,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to submit review.' });
+  }
+});
+
+// ============================================================================
 // 4. CATEGORIES & COLLECTIONS
 // ============================================================================
 apiRouter.get('/v1/categories', async (req: Request, res: Response) => {
-  const { department } = req.query;
-  const categories = await productRepository.getCategories(typeof department === 'string' ? department : undefined);
+  const { department, all } = req.query;
+  const includeDisabled = all === 'true' && (await isStaffOrAdmin(req));
+  const categories = await productRepository.getCategories(
+    typeof department === 'string' ? department : undefined,
+    includeDisabled
+  );
   res.json({ success: true, count: categories.length, data: categories });
 });
 
 apiRouter.get('/v1/categories/:id', async (req: Request, res: Response) => {
   const id = String(req.params.id || '');
+  const isStaff = await isStaffOrAdmin(req);
   const cat = (await productRepository.getCategoryById(id)) || (await productRepository.getCategoryBySlug(id));
-  if (!cat) {
+  if (!cat || (!isStaff && (cat.isActive === false || cat.isEnabled === false))) {
     return res.status(404).json({ success: false, error: 'Category not found.' });
   }
-  return res.json({ success: true, data: cat });
+  const products = await productRepository.getAll({
+    status: isStaff ? 'ALL' : 'PUBLISHED',
+    categorySlug: cat.slug,
+  });
+  return res.json({ success: true, data: cat, products });
 });
 
 apiRouter.get('/v1/collections', async (_req: Request, res: Response) => {
@@ -615,6 +755,82 @@ apiRouter.get('/v1/admin/products', requireStaffPermission('products.view'), asy
   } catch (err: any) {
     console.error('[API] Error fetching admin products:', err);
     res.status(500).json({ success: false, error: err.message || 'Failed to fetch admin products.' });
+  }
+});
+
+// ============================================================================
+// 5B. ADMIN REVIEW MODERATION APIS
+// ============================================================================
+apiRouter.get('/v1/admin/reviews', requireStaffPermission('products.view'), async (req: Request, res: Response) => {
+  try {
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const productId = typeof req.query.productId === 'string' ? req.query.productId : undefined;
+    const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+    const reviews = await reviewRepository.listAllAdmin({ status, productId, search });
+    return res.json({ success: true, count: reviews.length, data: reviews });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load reviews.' });
+  }
+});
+
+apiRouter.put('/v1/admin/reviews/:reviewId/status', requireStaffPermission('products.edit'), async (req: Request, res: Response) => {
+  try {
+    const reviewId = String(req.params.reviewId || '');
+    const rawStatus = typeof req.body?.status === 'string' ? req.body.status.toUpperCase() : undefined;
+    const validStatuses = ['PENDING', 'APPROVED', 'REJECTED'];
+    if (rawStatus && !validStatuses.includes(rawStatus)) {
+      return res.status(400).json({ success: false, error: 'Invalid review status. Must be PENDING, APPROVED, or REJECTED.' });
+    }
+
+    const isFeatured = typeof req.body?.isFeatured === 'boolean' ? req.body.isFeatured : undefined;
+    const updated = await reviewRepository.moderate(reviewId, {
+      status: rawStatus as any,
+      isFeatured,
+    });
+
+    if (!updated) {
+      return res.status(404).json({ success: false, error: 'Review not found.' });
+    }
+
+    await auditRepository.record({
+      userId: req.user?.id || 'ADMIN',
+      userName: req.user?.name || 'Admin',
+      userRole: (req.user?.role || 'ADMIN') as any,
+      module: 'products',
+      action: 'REVIEW_MODERATED',
+      recordAffected: `${updated.productName || updated.productId} (${updated.id})`,
+      newValue: `Status: ${updated.status}, Featured: ${updated.isFeatured}`,
+      severity: 'INFO',
+    });
+
+    return res.json({ success: true, data: updated });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to moderate review.' });
+  }
+});
+
+apiRouter.delete('/v1/admin/reviews/:reviewId', requireStaffPermission('products.delete'), async (req: Request, res: Response) => {
+  try {
+    const reviewId = String(req.params.reviewId || '');
+    const existing = await reviewRepository.getById(reviewId);
+    const deleted = await reviewRepository.delete(reviewId);
+    if (!deleted) {
+      return res.status(404).json({ success: false, error: 'Review not found.' });
+    }
+
+    await auditRepository.record({
+      userId: req.user?.id || 'ADMIN',
+      userName: req.user?.name || 'Admin',
+      userRole: (req.user?.role || 'ADMIN') as any,
+      module: 'products',
+      action: 'REVIEW_DELETED',
+      recordAffected: existing ? `${existing.customerName} on ${existing.productId}` : reviewId,
+      severity: 'WARNING',
+    });
+
+    return res.json({ success: true, message: 'Review deleted.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to delete review.' });
   }
 });
 
@@ -677,7 +893,12 @@ apiRouter.post('/v1/admin/products', requireStaffPermission('products.create'), 
         : Number(data.stock || 50),
       licenseType: data.licenseType || 'Original IP',
       status: data.publishingStatus || data.status || 'PUBLISHED',
-      categoryId: data.categoryId,
+      categoryId: data.categoryId || (Array.isArray(data.categoryIds) ? data.categoryIds[0] : undefined),
+      categoryIds: Array.isArray(data.categoryIds)
+        ? data.categoryIds
+        : data.categoryId
+          ? [data.categoryId]
+          : undefined,
       subcategoryId: data.subcategoryId,
       collectionSlugs: Array.isArray(data.collectionSlugs) ? data.collectionSlugs : ['new-drop'],
       variants,
@@ -744,6 +965,12 @@ apiRouter.put('/v1/admin/products/:id', requireStaffPermission('products.edit'),
       id: existing.id,
       catalogNumber,
       department: dept,
+      categoryIds: Array.isArray(updates.categoryIds)
+        ? updates.categoryIds
+        : updates.categoryId
+          ? Array.from(new Set([...(existing.categoryIds || []), updates.categoryId]))
+          : existing.categoryIds,
+      categoryId: updates.categoryId ?? (Array.isArray(updates.categoryIds) ? updates.categoryIds[0] : existing.categoryId),
       variants: resolvedVariants,
       colors: resolvedColors,
       sizes: resolvedSizes,
@@ -874,20 +1101,32 @@ apiRouter.post('/v1/admin/products/:id/variants/:variantId/archive', requireStaf
 });
 
 apiRouter.post('/v1/admin/categories', requireStaffPermission('catalog.edit'), async (req: Request, res: Response) => {
-  const { name, department, description, image } = req.body;
-  if (!name) {
+  const { name, slug, department, description, image, parentId, seoTitle, seoDescription, showInNav, isActive, isEnabled, displayOrder } = req.body;
+  if (!name || !String(name).trim()) {
     return res.status(400).json({ success: false, error: 'Category name is required.' });
   }
 
+  const normalizedSlug = String(slug || name)
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  const enabledFlag = isEnabled !== undefined ? Boolean(isEnabled) : isActive !== undefined ? Boolean(isActive) : true;
   const cat: CategoryRecord = {
-    id: `cat-${Date.now()}`,
-    name,
-    slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-    department: department || 'MEN',
-    description,
-    image,
-    displayOrder: 99,
-    isActive: true,
+    id: `cat-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+    name: String(name).trim(),
+    slug: normalizedSlug || `cat-${Date.now()}`,
+    department: department || 'ALL',
+    description: description ? String(description) : undefined,
+    image: image ? String(image) : undefined,
+    parentId: parentId || null,
+    seoTitle: seoTitle ? String(seoTitle) : undefined,
+    seoDescription: seoDescription ? String(seoDescription) : undefined,
+    showInNav: showInNav !== undefined ? Boolean(showInNav) : true,
+    displayOrder: displayOrder !== undefined ? Number(displayOrder) : 50,
+    isActive: enabledFlag,
+    isEnabled: enabledFlag,
   };
 
   const saved = await productRepository.saveCategory(cat);
@@ -900,14 +1139,40 @@ apiRouter.put('/v1/admin/categories/:id', requireStaffPermission('catalog.edit')
     return res.status(404).json({ success: false, error: 'Category not found.' });
   }
 
+  const body = req.body || {};
+  const enabledFlag = body.isEnabled !== undefined
+    ? Boolean(body.isEnabled)
+    : body.isActive !== undefined
+      ? Boolean(body.isActive)
+      : existing.isActive !== false;
+
   const updated: CategoryRecord = {
     ...existing,
-    ...req.body,
+    ...body,
     id: existing.id,
+    isActive: enabledFlag,
+    isEnabled: enabledFlag,
+    slug: body.slug
+      ? String(body.slug).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+      : existing.slug,
   };
 
   const saved = await productRepository.saveCategory(updated);
   return res.json({ success: true, data: saved });
+});
+
+apiRouter.put('/v1/admin/categories/:id/products', requireStaffPermission('catalog.edit'), async (req: Request, res: Response) => {
+  try {
+    const categoryId = String(req.params.id || '');
+    const { productIds } = req.body || {};
+    if (!Array.isArray(productIds)) {
+      return res.status(400).json({ success: false, error: 'productIds array is required.' });
+    }
+    const result = await productRepository.assignProductsToCategory(categoryId, productIds.map(String));
+    return res.json({ success: true, message: 'Category products updated.', data: result });
+  } catch (err: any) {
+    return res.status(400).json({ success: false, error: err.message || 'Failed to assign products to category.' });
+  }
 });
 
 apiRouter.post('/v1/admin/categories/:id/archive', requireStaffPermission('catalog.edit'), async (req: Request, res: Response) => {
@@ -915,7 +1180,20 @@ apiRouter.post('/v1/admin/categories/:id/archive', requireStaffPermission('catal
   if (!success) {
     return res.status(404).json({ success: false, error: 'Category not found.' });
   }
-  return res.json({ success: true, message: 'Category archived successfully.' });
+  return res.json({ success: true, message: 'Category disabled successfully.' });
+});
+
+apiRouter.delete('/v1/admin/categories/:id', requireStaffPermission('catalog.edit'), async (req: Request, res: Response) => {
+  const categoryId = String(req.params.id || '');
+  const result = await productRepository.deleteCategory(categoryId);
+  if (!result.deleted) {
+    return res.status(404).json({ success: false, error: 'Category not found.' });
+  }
+  return res.json({
+    success: true,
+    message: `Category deleted safely. Unlinked ${result.unlinkedProducts} product(s); no products were deleted.`,
+    data: result,
+  });
 });
 
 // ============================================================================
@@ -1226,7 +1504,7 @@ apiRouter.get(['/v1/orders/track', '/orders/track'], async (req: Request, res: R
         courierPartner: shipment?.carrier || order.courierPartner || null,
         awb: shipment?.awbCode || order.awbNumber || order.courierTrackingNumber || null,
         estimatedDeliveryDate: shipment?.estimatedDeliveryDate || order.estimatedDeliveryDate || null,
-        timeline: Array.isArray(order.timeline) ? order.timeline : [],
+        timeline: normalizeOrderTimeline(order.timeline),
         carrierEvents: trackingEvents,
         shippingAddress: {
           city: order.shippingAddress?.city,
@@ -1289,7 +1567,10 @@ apiRouter.get('/v1/orders/:orderId', async (req: Request, res: Response) => {
     }
   }
 
-  return res.json({ success: true, data: order });
+  return res.json({
+    success: true,
+    data: { ...order, timeline: normalizeOrderTimeline(order.timeline) },
+  });
 });
 
 /**
@@ -1314,7 +1595,11 @@ apiRouter.get('/v1/orders/customer/:customerId', async (req: Request, res: Respo
     ? (typeof req.query.phone === 'string' ? req.query.phone : undefined)
     : authCustomer?.phone;
   const orders = await orderService.getCustomerOrders(customerId, email, phone);
-  return res.json({ success: true, count: orders.length, data: orders });
+  const normalizedOrders = orders.map((o) => ({
+    ...o,
+    timeline: normalizeOrderTimeline(o.timeline),
+  }));
+  return res.json({ success: true, count: normalizedOrders.length, data: normalizedOrders });
 });
 
 /**
@@ -1385,7 +1670,11 @@ apiRouter.get('/v1/admin/orders', requireStaffPermission('orders.view'), async (
   const customerId = typeof req.query.customerId === 'string' ? req.query.customerId : undefined;
 
   const orders = await orderService.getAllOrders({ status, search, customerId });
-  res.json({ success: true, count: orders.length, data: orders });
+  const normalized = orders.map((o) => ({
+    ...o,
+    timeline: normalizeOrderTimeline(o.timeline),
+  }));
+  res.json({ success: true, count: normalized.length, data: normalized });
 });
 
 /**
@@ -1396,7 +1685,10 @@ apiRouter.get('/v1/admin/orders/:orderId', requireStaffPermission('orders.view')
   if (!order) {
     return res.status(404).json({ success: false, error: 'Order not found.' });
   }
-  return res.json({ success: true, data: order });
+  return res.json({
+    success: true,
+    data: { ...order, timeline: normalizeOrderTimeline(order.timeline) },
+  });
 });
 
 /**
@@ -1429,7 +1721,41 @@ apiRouter.put('/v1/admin/orders/:orderId/status', requireStaffPermission('orders
     return res.status(400).json(result);
   }
 
-  return res.json(result);
+  return res.json({
+    ...result,
+    order: result.order ? { ...result.order, timeline: normalizeOrderTimeline(result.order.timeline) } : undefined,
+  });
+});
+
+/**
+ * Admin: Append a custom milestone / tracking update to an order's timeline.
+ */
+apiRouter.post('/v1/admin/orders/:orderId/timeline', requireStaffPermission('orders.edit'), async (req: Request, res: Response) => {
+  const actor = {
+    id: req.user?.id || 'STAFF',
+    name: req.user?.name || 'Operations Staff',
+    role: req.user?.role || 'STAFF',
+  };
+
+  const result = await orderService.addTimelineEvent(
+    String(req.params.orderId || ''),
+    {
+      title: String(req.body?.title || ''),
+      status: typeof req.body?.status === 'string' ? req.body.status : undefined,
+      note: typeof req.body?.note === 'string' ? req.body.note : undefined,
+    },
+    actor
+  );
+
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
+
+  return res.json({
+    success: true,
+    entry: result.entry,
+    order: result.order ? { ...result.order, timeline: normalizeOrderTimeline(result.order.timeline) } : undefined,
+  });
 });
 
 /**
@@ -2385,3 +2711,365 @@ apiRouter.delete('/v1/admin/coupons/:id', requireStaffPermission('marketing.edit
     return res.status(500).json({ success: false, error: err.message || 'Failed to delete coupon.' });
   }
 });
+
+// ============================================================================
+// 14. PUBLIC STORE CONTACT ALIAS
+// ============================================================================
+apiRouter.get('/v1/store/contact', async (_req: Request, res: Response) => {
+  try {
+    const contact = await cmsRepository.getPublicContactConfig();
+    return res.json({ success: true, data: contact });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load store contact info.' });
+  }
+});
+
+// ============================================================================
+// 15. CUSTOMER RETURNS & REFUNDS LIFECYCLE + RAZORPAY REFUNDS
+// ============================================================================
+async function verifyOrderOwnershipForReturn(req: Request, order: OrderRecord): Promise<boolean> {
+  if (await isStaffOrAdmin(req)) return true;
+  const authCustomer = await resolveAuthenticatedCustomer(req);
+  if (authCustomer) {
+    if (order.customerId && authCustomer.id === order.customerId) return true;
+    if (authCustomer.email && order.customerEmail && authCustomer.email.toLowerCase() === order.customerEmail.toLowerCase()) {
+      return true;
+    }
+  }
+  const orderToken = String(req.headers['x-order-token'] || req.body?.orderToken || req.query.orderToken || req.query.token || '').trim();
+  if (orderToken && order.orderAccessToken && safeTimingEqual(orderToken, order.orderAccessToken)) {
+    return true;
+  }
+  const queryEmail = String(req.body?.customerEmail || req.query.email || '').trim().toLowerCase();
+  const queryPhone = String(req.body?.customerPhone || req.query.phone || '').replace(/\D/g, '');
+  const orderPhone = (order.customerPhone || '').replace(/\D/g, '');
+  const emailOk = Boolean(queryEmail && order.customerEmail && order.customerEmail.trim().toLowerCase() === queryEmail);
+  const phoneOk = Boolean(queryPhone.length >= 4 && orderPhone.length >= 4 && orderPhone.slice(-10) === queryPhone.slice(-10));
+  return emailOk && phoneOk;
+}
+
+function serializeReturnForClient(rec: ReturnRequestRecord) {
+  const proofFiles = Array.isArray(rec.proofFiles) ? rec.proofFiles : [];
+  const proofUrls = proofFiles.map((f) => `/api/v1/returns/proof/${encodeURIComponent(f)}`);
+  const isRefunded = rec.status === 'REFUNDED' || rec.refundStatus === 'REFUND_COMPLETED';
+  return {
+    ...rec,
+    proofFiles,
+    proofUrls,
+    pickupCourier: rec.courierPartner || null,
+    pickupAwb: rec.awbNumber || null,
+    refundTransactionId: rec.refundId || rec.refundReference || null,
+    refundGateway: rec.refundMethod || null,
+    refundedAmount: isRefunded ? Number(rec.refundAmount || 0) : 0,
+    stockRestored: Boolean(rec.restockedAt || rec.items?.some((it) => it.restocked)),
+    statusHistory: (rec.history || []).map((h) => ({
+      id: h.id,
+      status: h.toStatus,
+      note: h.note,
+      actorName: h.actorName,
+      actorRole: h.actorRole,
+      createdAt: h.createdAt,
+    })),
+  };
+}
+
+function normalizeReturnTargetStatus(raw: string): ReturnRequestStatus {
+  const upper = String(raw || '').trim().toUpperCase();
+  const aliasMap: Record<string, ReturnRequestStatus> = {
+    REQUESTED: 'RETURN_REQUESTED',
+    RETURN_REQUESTED: 'RETURN_REQUESTED',
+    UNDER_REVIEW: 'UNDER_REVIEW',
+    REVIEWING: 'UNDER_REVIEW',
+    APPROVED: 'APPROVED',
+    REJECTED: 'REJECTED',
+    PICKUP_SCHEDULED: 'PICKUP_SCHEDULED',
+    IN_TRANSIT: 'IN_TRANSIT',
+    RETURNED_TO_WAREHOUSE: 'RETURNED_TO_WAREHOUSE',
+    PRODUCT_RECEIVED: 'RETURNED_TO_WAREHOUSE',
+    QC_PASSED: 'RETURNED_TO_WAREHOUSE',
+    REFUND_PROCESSING: 'REFUND_PROCESSING',
+    REFUND_INITIATED: 'REFUND_PROCESSING',
+    REFUNDED: 'REFUNDED',
+    REFUND_COMPLETED: 'REFUNDED',
+    PARTIAL_REFUND_COMPLETED: 'REFUNDED',
+    CLOSED: 'CLOSED',
+  };
+  return aliasMap[upper] || (upper as ReturnRequestStatus);
+}
+
+apiRouter.post('/v1/returns/upload-proof', async (req: Request, res: Response) => {
+  try {
+    const { dataUrl, filename, orderId } = req.body || {};
+    const authCustomer = await resolveAuthenticatedCustomer(req);
+    const isStaff = await isStaffOrAdmin(req);
+    if (!authCustomer && !isStaff) {
+      if (!orderId) {
+        return res.status(401).json({ success: false, error: 'Authentication or verified order details required to upload proof images.' });
+      }
+      const order = await orderService.getOrder(String(orderId));
+      if (!order || !(await verifyOrderOwnershipForReturn(req, order))) {
+        return res.status(403).json({ success: false, error: 'Unable to verify order ownership for proof upload.' });
+      }
+    }
+
+    const saved = returnService.saveUploadedProof(
+      String(dataUrl || ''),
+      filename ? String(filename) : undefined
+    );
+    if (!saved.success || !saved.filename) {
+      return res.status(400).json({ success: false, error: saved.error || 'Failed to upload proof image.' });
+    }
+    return res.status(201).json({
+      success: true,
+      data: {
+        filename: saved.filename,
+        url: `/api/v1/returns/proof/${encodeURIComponent(saved.filename)}`,
+      },
+    });
+  } catch (err: any) {
+    return res.status(400).json({ success: false, error: err.message || 'Failed to upload proof image.' });
+  }
+});
+
+apiRouter.get('/v1/returns/proof/:filename', async (req: Request, res: Response) => {
+  try {
+    const filename = String(req.params.filename || '');
+    if (!/^[a-zA-Z0-9._-]+$/.test(filename)) {
+      return res.status(400).json({ success: false, error: 'Invalid proof filename.' });
+    }
+
+    const isStaff = await isStaffOrAdmin(req);
+    if (!isStaff) {
+      const authCustomer = await resolveAuthenticatedCustomer(req);
+      const returnRecord = await returnRepository.findByProofFilename(filename);
+      let authorized = false;
+
+      if (returnRecord && authCustomer) {
+        if (returnRecord.customerId && returnRecord.customerId === authCustomer.id) authorized = true;
+        if (returnRecord.customerEmail && authCustomer.email && returnRecord.customerEmail.toLowerCase() === authCustomer.email.toLowerCase()) {
+          authorized = true;
+        }
+      }
+
+      if (!authorized && returnRecord) {
+        const order = await orderService.getOrder(returnRecord.orderId);
+        if (order && (await verifyOrderOwnershipForReturn(req, order))) {
+          authorized = true;
+        }
+      }
+
+      // Allow owner right after upload before return creation if authenticated customer holds session
+      if (!authorized && !returnRecord && authCustomer) {
+        authorized = true;
+      }
+
+      if (!authorized) {
+        return res.status(403).json({ success: false, error: 'Access denied to return proof image.' });
+      }
+    }
+
+    const filePath = path.join(RETURN_PROOFS_DIR, path.basename(filename));
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, error: 'Proof image not found.' });
+    }
+
+    const ext = path.extname(filename).toLowerCase();
+    const contentType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    return res.sendFile(filePath);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to retrieve proof image.' });
+  }
+});
+
+apiRouter.post('/v1/returns', async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const targetOrderKey = String(body.orderId || body.orderNumber || '').trim();
+    if (!targetOrderKey) {
+      return res.status(400).json({ success: false, error: 'Order ID or order number is required.' });
+    }
+
+    const order = await orderService.getOrder(targetOrderKey);
+    if (!order) {
+      return res.status(404).json({ success: false, error: 'Order not found.' });
+    }
+
+    const authorized = await verifyOrderOwnershipForReturn(req, order);
+    if (!authorized) {
+      return res.status(403).json({ success: false, error: 'Access denied: Please verify order ownership to request a return.' });
+    }
+
+    const authCustomer = await resolveAuthenticatedCustomer(req);
+    const rawProofs: string[] = Array.isArray(body.proofFiles)
+      ? body.proofFiles
+      : Array.isArray(body.proofUrls)
+        ? body.proofUrls
+        : Array.isArray(body.proofImages)
+          ? body.proofImages
+          : [];
+
+    const result = await returnService.createReturnRequest(
+      {
+        orderIdOrNumber: targetOrderKey,
+        requestType: body.requestType || body.resolutionType || 'RETURN',
+        reason: String(body.reason || body.reasonCategory || ''),
+        comments: body.comments ?? body.description,
+        proofFiles: rawProofs.map((u) => path.basename(String(u).split('?')[0] || '')),
+        items: Array.isArray(body.items) ? body.items : [],
+        customer: {
+          id: authCustomer?.id || order.customerId,
+          name: body.pickupAddress?.fullName || authCustomer?.name || order.customerName,
+          email: authCustomer?.email || order.customerEmail,
+          phone: body.pickupAddress?.phone || authCustomer?.phone || order.customerPhone,
+        },
+      },
+      order
+    );
+
+    if (!result.success || !result.returnRequest) {
+      return res.status(400).json({ success: false, error: result.error || 'Failed to submit return request.' });
+    }
+
+    return res.status(201).json({ success: true, data: serializeReturnForClient(result.returnRequest) });
+  } catch (err: any) {
+    return res.status(400).json({ success: false, error: err.message || 'Failed to submit return request.' });
+  }
+});
+
+apiRouter.get('/v1/returns/my', async (req: Request, res: Response) => {
+  try {
+    const authCustomer = await resolveAuthenticatedCustomer(req);
+    const orderQuery = typeof req.query.orderId === 'string'
+      ? req.query.orderId
+      : typeof req.query.orderNumber === 'string'
+        ? req.query.orderNumber
+        : undefined;
+    const orderIdsParam = typeof req.query.orderIds === 'string'
+      ? req.query.orderIds.split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+
+    const byIdMap = new Map<string, ReturnRequestRecord>();
+
+    if (authCustomer) {
+      const list = await returnRepository.listByCustomer({
+        customerId: authCustomer.id,
+        email: authCustomer.email,
+        phone: authCustomer.phone,
+      });
+      for (const r of list) byIdMap.set(r.id, r);
+    }
+
+    const keysToCheck = Array.from(new Set([...(orderQuery ? [orderQuery] : []), ...orderIdsParam])).slice(0, 20);
+    for (const key of keysToCheck) {
+      const order = await orderService.getOrder(key);
+      if (!order) continue;
+      if (await verifyOrderOwnershipForReturn(req, order)) {
+        const list = await returnRepository.listByOrderId(order.id);
+        for (const r of list) byIdMap.set(r.id, r);
+      }
+    }
+
+    if (!authCustomer && keysToCheck.length === 0) {
+      return res.status(401).json({ success: false, error: 'Customer authentication or verified order query required.' });
+    }
+
+    const combined = Array.from(byIdMap.values())
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .map(serializeReturnForClient);
+    return res.json({ success: true, count: combined.length, data: combined });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load returns.' });
+  }
+});
+
+apiRouter.get('/v1/admin/returns', requireStaffPermission('orders.view'), async (req: Request, res: Response) => {
+  try {
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+    const list = await returnRepository.listAll({ status, search });
+    const serialized = list.map(serializeReturnForClient);
+    return res.json({ success: true, count: serialized.length, data: serialized });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load admin returns.' });
+  }
+});
+
+apiRouter.patch('/v1/admin/returns/:id/status', requireStaffPermission('orders.edit'), async (req: Request, res: Response) => {
+  try {
+    const returnId = String(req.params.id || '');
+    const { status, note, rejectionReason, pickupCourier, pickupAwb, courierPartner, awbNumber, adminNotes } = req.body || {};
+    if (!status) {
+      return res.status(400).json({ success: false, error: 'Target status is required.' });
+    }
+    const targetStatus = normalizeReturnTargetStatus(String(status));
+    const result = await returnService.updateStatus(returnId, targetStatus, resolvePlatformActor(req), {
+      note,
+      rejectionReason,
+      courierPartner: courierPartner || pickupCourier,
+      awbNumber: awbNumber || pickupAwb,
+      adminNotes,
+    });
+    if (!result.success || !result.returnRequest) {
+      return res.status(400).json({ success: false, error: result.error || 'Failed to update return status.' });
+    }
+    return res.json({
+      success: true,
+      message: `Return updated to ${result.returnRequest.status}.`,
+      data: serializeReturnForClient(result.returnRequest),
+    });
+  } catch (err: any) {
+    return res.status(400).json({ success: false, error: err.message || 'Failed to update return status.' });
+  }
+});
+
+apiRouter.post('/v1/admin/returns/:id/refund', requireStaffPermission('orders.edit'), async (req: Request, res: Response) => {
+  try {
+    const returnId = String(req.params.id || '');
+    const { amount, refundMethod, method, manualReference, reference, notes, reason } = req.body || {};
+    const result = await returnService.processReturnRefund(
+      returnId,
+      resolvePlatformActor(req),
+      {
+        amount: amount !== undefined ? Number(amount) : undefined,
+        method: method || refundMethod,
+        reference: manualReference || reference,
+        note: notes || reason,
+      },
+      req.ip || '127.0.0.1'
+    );
+    if (!result.success || !result.returnRequest) {
+      return res.status(400).json({
+        success: false,
+        error: result.error || 'Failed to process return refund.',
+        data: result.returnRequest ? serializeReturnForClient(result.returnRequest) : undefined,
+      });
+    }
+    return res.json({
+      success: true,
+      message: `Refund processed via ${result.returnRequest.refundMethod}.`,
+      data: serializeReturnForClient(result.returnRequest),
+    });
+  } catch (err: any) {
+    return res.status(400).json({ success: false, error: err.message || 'Failed to process return refund.' });
+  }
+});
+
+apiRouter.post('/v1/admin/returns/:id/verify-refund', requireStaffPermission('orders.view'), async (req: Request, res: Response) => {
+  try {
+    const returnId = String(req.params.id || '');
+    const result = await returnService.verifyReturnRefund(returnId);
+    if (!result.success || !result.returnRequest) {
+      return res.status(400).json({ success: false, error: result.error || 'Failed to verify refund status.' });
+    }
+    return res.json({
+      success: true,
+      data: serializeReturnForClient(result.returnRequest),
+      gatewayStatus: result.gatewayStatus,
+    });
+  } catch (err: any) {
+    return res.status(400).json({ success: false, error: err.message || 'Failed to verify refund status.' });
+  }
+});
+

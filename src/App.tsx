@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { PRODUCTS } from './data/products';
-import { Product, CartItem, OrderDetails, Department } from './types';
+import { Product, CartItem, OrderDetails, Department, StoreCategory, StoreContactConfig } from './types';
 import { getStorefrontCatalog } from './utils/productFilters';
+import { updateSeoTags, buildOrganizationJsonLd } from './utils/seo';
+import { initMetaPixel, trackMetaEvent } from './utils/metaPixel';
 
 // Core Navigation & 14-Section Brand Layout
 import { Header } from './components/Header';
@@ -41,7 +43,8 @@ import { CustomerAccountModals } from './components/CustomerAccountModals';
 import { WishlistModal } from './components/WishlistModal';
 import { ProductCompareModal } from './components/ProductCompareModal';
 import { RecentlyViewedSection } from './components/RecentlyViewedSection';
-import { WhatsAppFloatingButton } from './components/WhatsAppFloatingButton';
+import { SupportFloatingWidget } from './components/SupportFloatingWidget';
+import { ContactSupportModal } from './components/ContactSupportModal';
 import { StorefrontMaintenanceScreen } from './components/StorefrontMaintenanceScreen';
 import { CmsPromoBanner } from './components/CmsPromoBanner';
 import { useCustomerAuth } from './context/CustomerAuthContext';
@@ -90,16 +93,26 @@ export default function App() {
     return false;
   });
 
-  // --- Department Filter State ---
+  // --- Department & Dynamic Category Filter State ---
   const [activeDepartment, setActiveDepartment] = useState<'ALL' | Department>(() => {
     if (typeof window !== 'undefined') {
       const path = window.location.pathname;
-      if (path === '/men') return 'MEN';
+      if (path === '/men' || path === '/catalog') return 'MEN';
       if (path === '/kids') return 'KIDS';
     }
     return 'ALL';
   });
   const [selectedWorldCategory, setSelectedWorldCategory] = useState<any>('ALL');
+  const [categories, setCategories] = useState<StoreCategory[]>([]);
+  const [selectedCategorySlug, setSelectedCategorySlug] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      const m = window.location.pathname.match(/^\/category\/([^/]+)/);
+      return m?.[1] ? decodeURIComponent(m[1]) : null;
+    }
+    return null;
+  });
+  const [storeContact, setStoreContact] = useState<StoreContactConfig | null>(null);
+  const [isContactModalOpen, setIsContactModalOpen] = useState(false);
 
   // --- Real Administrator-Published Catalog for Customer-Facing Storefront ---
   const [storefrontCatalog, setStorefrontCatalog] = useState<Product[]>([]);
@@ -331,6 +344,47 @@ export default function App() {
     }
   }, [isAdminView, refreshAuthoritativeCatalog]);
 
+  // Fetch dynamic categories and public store contact + Meta Pixel configuration
+  useEffect(() => {
+    let mounted = true;
+    const loadCategories = () => {
+      apiClient
+        .getCategories()
+        .then((list) => {
+          if (mounted && Array.isArray(list)) {
+            setCategories(list);
+          }
+        })
+        .catch(() => {});
+    };
+
+    const loadStoreContact = () => {
+      apiClient
+        .getStoreContact()
+        .then((res) => {
+          if (mounted && res.success && res.data) {
+            setStoreContact(res.data);
+            if (res.data.metaBusiness?.pixelId) {
+              initMetaPixel(res.data.metaBusiness.pixelId);
+            }
+          }
+        })
+        .catch(() => {});
+    };
+
+    loadCategories();
+    loadStoreContact();
+    window.addEventListener('tori_categories_updated', loadCategories);
+    window.addEventListener('tori_contact_updated', loadStoreContact);
+    window.addEventListener('focus', loadCategories);
+    return () => {
+      mounted = false;
+      window.removeEventListener('tori_categories_updated', loadCategories);
+      window.removeEventListener('tori_contact_updated', loadStoreContact);
+      window.removeEventListener('focus', loadCategories);
+    };
+  }, []);
+
   // Sync browser back/forward and URL routes
   useEffect(() => {
     let activeRouteCheck = true;
@@ -392,14 +446,42 @@ export default function App() {
 
       setIsProductDetailLoading(false);
 
-      // If at category or root
-      if (path === '/men') {
+      // Check for /category/:slug
+      const categoryMatch = path.match(/^\/category\/([^/]+)/);
+      if (categoryMatch?.[1]) {
+        const slug = decodeURIComponent(categoryMatch[1]);
+        setSelectedProductDetail(null);
+        setSelectedCategorySlug(slug);
+        setSelectedWorldCategory('ALL');
+        const matchedCat = categories.find((c) => c.slug === slug);
+        if (matchedCat) {
+          setActiveDepartment(matchedCat.department === 'KIDS' ? 'KIDS' : 'MEN');
+        } else {
+          apiClient.getCategoryBySlug(slug).then((catRes) => {
+            if (!activeRouteCheck) return;
+            if (catRes.category) {
+              setActiveDepartment(catRes.category.department === 'KIDS' ? 'KIDS' : 'MEN');
+            } else {
+              setActiveDepartment('MEN');
+            }
+          }).catch(() => {
+            if (activeRouteCheck) setActiveDepartment('MEN');
+          });
+        }
+        return;
+      }
+
+      // Standard catalog / department / root routes
+      if (path === '/men' || path === '/catalog') {
         setActiveDepartment('MEN');
+        setSelectedCategorySlug(null);
         setSelectedProductDetail(null);
       } else if (path === '/kids') {
         setActiveDepartment('KIDS');
+        setSelectedCategorySlug(null);
         setSelectedProductDetail(null);
       } else if (path === '/' || path === '') {
+        setSelectedCategorySlug(null);
         if (!hash.startsWith('#product-')) {
           setSelectedProductDetail(null);
         }
@@ -416,7 +498,7 @@ export default function App() {
       window.removeEventListener('hashchange', handleRoute);
       window.removeEventListener('popstate', handleRoute);
     };
-  }, [storefrontCatalog, isCatalogLoading]);
+  }, [storefrontCatalog, isCatalogLoading, categories]);
 
   // --- Persistent States (Cart, Wishlist, Orders) ---
   const [cartItems, setCartItems] = useState<CartItem[]>(() => {
@@ -556,16 +638,25 @@ export default function App() {
     apiClient
       .getCustomerOrders(customer.id, customer.email, customer.phone)
       .then((res) => {
-        if (!active || !res?.success || !Array.isArray(res.orders)) return;
-        const mappedServerOrders: OrderDetails[] = res.orders.map((so: any) => {
+        const serverOrders = Array.isArray((res as any)?.data)
+          ? (res as any).data
+          : Array.isArray((res as any)?.orders)
+          ? (res as any).orders
+          : null;
+        if (!active || !res?.success || !serverOrders) return;
+        const mappedServerOrders: OrderDetails[] = serverOrders.map((so: any) => {
           const st = String(so.status || so.fulfillmentStatus || 'CONFIRMED').toUpperCase();
           const mappedStatus: OrderDetails['status'] =
             st === 'CANCELLED'
               ? 'Cancelled'
               : st === 'DELIVERED'
               ? 'Delivered'
-              : st === 'SHIPPED' || st === 'IN_TRANSIT' || st === 'OUT_FOR_DELIVERY'
+              : st === 'OUT_FOR_DELIVERY'
+              ? 'Out for Delivery'
+              : st === 'SHIPPED' || st === 'IN_TRANSIT'
               ? 'Shipped'
+              : st === 'PACKED'
+              ? 'Packed'
               : 'Confirmed';
 
           return {
@@ -620,6 +711,18 @@ export default function App() {
                   year: 'numeric',
                 })
               : '3 to 5 Business Days',
+            courierPartner: so.courierPartner || undefined,
+            trackingNumber: so.courierTrackingNumber || so.awbNumber || undefined,
+            timeline: Array.isArray(so.timeline)
+              ? so.timeline.map((tl: any) => ({
+                  status: tl.status,
+                  title: tl.title || tl.description || tl.status || 'Order Update',
+                  timestamp: tl.timestamp,
+                  description: tl.description,
+                  note: tl.note || tl.description,
+                  actorName: tl.actorName,
+                }))
+              : undefined,
             cancellationReason: so.cancellationReason || undefined,
             refundStatus: (
               mappedStatus === 'Cancelled'
@@ -663,7 +766,7 @@ export default function App() {
   const [trackingOrderId, setTrackingOrderId] = useState<string | undefined>(undefined);
   const [isStoryOpen, setIsStoryOpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [isPromoOpen, setIsPromoOpen] = useState(true);
+  const [isPromoOpen, setIsPromoOpen] = useState(false);
   const [isCompareOpen, setIsCompareOpen] = useState(false);
   const [compareSlots, setCompareSlots] = useState<[Product | null, Product | null]>([null, null]);
 
@@ -726,6 +829,16 @@ export default function App() {
       } else {
         return [...prev, { product, size, color, quantity: 1 }];
       }
+    });
+
+    trackMetaEvent('AddToCart', {
+      contentIds: [product.id],
+      contentName: product.name,
+      contentCategory: product.world || product.department,
+      value: Number(product.price || 0),
+      currency: 'INR',
+      numItems: 1,
+      userData: { email: customer?.email, phone: customer?.phone },
     });
 
     showToast(`Added "${product.name}" (${size}) to your bag!`);
@@ -840,6 +953,14 @@ export default function App() {
     color: string
   ) => {
     handleAddToCart(product, size, color);
+    trackMetaEvent('InitiateCheckout', {
+      contentIds: [product.id],
+      contentName: product.name,
+      value: Number(product.price || 0),
+      currency: 'INR',
+      numItems: 1,
+      userData: { email: customer?.email, phone: customer?.phone },
+    });
     setSelectedProductDetail(null);
     setIsCartOpen(false);
     setIsCheckoutOpen(true);
@@ -923,6 +1044,15 @@ export default function App() {
             refundStatus: (o.paymentMethod === 'cod'
               ? 'Not Applicable (COD)'
               : 'Refund Initiated') as OrderDetails['refundStatus'],
+            timeline: [
+              ...(o.timeline || []),
+              {
+                status: 'CANCELLED',
+                title: 'Order Cancelled',
+                timestamp: new Date().toISOString(),
+                note: `Reason: ${reason}`,
+              },
+            ],
           };
         }
         return o;
@@ -1028,6 +1158,14 @@ export default function App() {
       window.history.pushState(null, '', `/product/${getProductSlug(prod)}`);
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    trackMetaEvent('ViewContent', {
+      contentIds: [prod.id],
+      contentName: prod.name,
+      contentCategory: prod.world || prod.department,
+      value: Number(prod.price || 0),
+      currency: 'INR',
+      userData: { email: customer?.email, phone: customer?.phone },
+    });
     // Silently verify latest stock & pricing from server without snapping layout
     apiClient
       .getProductByIdOrSlug(prod.id)
@@ -1043,7 +1181,13 @@ export default function App() {
     setSelectedProductDetail(null);
     setIsProductDetailLoading(false);
     if (typeof window !== 'undefined' && window.history.pushState) {
-      const targetPath = activeDepartment === 'MEN' ? '/men' : activeDepartment === 'KIDS' ? '/kids' : '/';
+      const targetPath = selectedCategorySlug
+        ? `/category/${encodeURIComponent(selectedCategorySlug)}`
+        : activeDepartment === 'MEN'
+        ? '/men'
+        : activeDepartment === 'KIDS'
+        ? '/kids'
+        : '/';
       window.history.pushState(null, '', targetPath);
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1052,6 +1196,7 @@ export default function App() {
   const handleNavigateHome = () => {
     setSelectedProductDetail(null);
     setIsProductDetailLoading(false);
+    setSelectedCategorySlug(null);
     setActiveDepartment('ALL');
     setSelectedWorldCategory('ALL');
     if (typeof window !== 'undefined' && window.history.pushState) {
@@ -1063,6 +1208,7 @@ export default function App() {
   const handleSelectDepartment = (dept: Department | 'ALL') => {
     setSelectedProductDetail(null);
     setIsProductDetailLoading(false);
+    setSelectedCategorySlug(null);
     setActiveDepartment(dept);
     setSelectedWorldCategory('ALL');
     if (typeof window !== 'undefined' && window.history.pushState) {
@@ -1073,8 +1219,34 @@ export default function App() {
     refreshAuthoritativeCatalog({ silent: storefrontCatalog.length > 0 });
   };
 
+  const handleSelectCategorySlug = (slug: string | null) => {
+    setSelectedProductDetail(null);
+    setIsProductDetailLoading(false);
+    setSelectedWorldCategory('ALL');
+    setSelectedCategorySlug(slug);
+    if (!slug) {
+      const targetDept = activeDepartment === 'KIDS' ? 'KIDS' : 'MEN';
+      setActiveDepartment(targetDept);
+      if (typeof window !== 'undefined' && window.history.pushState) {
+        window.history.pushState(null, '', targetDept === 'KIDS' ? '/kids' : '/men');
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
+    const cat = categories.find((c) => c.slug === slug);
+    const targetDept: Department = cat?.department === 'KIDS' ? 'KIDS' : activeDepartment === 'KIDS' && cat?.department === 'ALL' ? 'KIDS' : 'MEN';
+    setActiveDepartment(targetDept);
+    if (typeof window !== 'undefined' && window.history.pushState) {
+      window.history.pushState(null, '', `/category/${encodeURIComponent(slug)}`);
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    refreshAuthoritativeCatalog({ silent: storefrontCatalog.length > 0 });
+  };
+
   const handleSelectWorldCategory = (world: string) => {
     setSelectedProductDetail(null);
+    setSelectedCategorySlug(null);
     const clean = (world || '').trim().toUpperCase();
     if (clean.includes('SHONEN')) {
       setActiveDepartment('MEN');
@@ -1247,6 +1419,116 @@ export default function App() {
   const shipping = subtotal >= freeThreshold || subtotal === 0 ? 0 : standardFee;
   const total = Math.max(0, subtotal - discount) + shipping;
 
+  // Dynamic SEO metadata, canonical URLs, Schema.org JSON-LD, and robots directives
+  useEffect(() => {
+    if (isAdminView) {
+      updateSeoTags({
+        title: 'Admin Console | TORI-WEAR',
+        description: 'TORI-WEAR internal operations dashboard.',
+        canonicalPath: ADMIN_CONFIG.ADMIN_PATH,
+        robots: 'noindex, nofollow',
+      });
+      return;
+    }
+
+    if (isMaintenanceMode && !staffBypassedMaintenance) {
+      updateSeoTags({
+        title: 'Dropping Soon | TORI-WEAR Anime Streetwear',
+        description: 'TORI-WEAR storefront is preparing the next limited anime streetwear drop.',
+        canonicalPath: '/',
+        robots: 'noindex, nofollow',
+      });
+      return;
+    }
+
+    if (selectedProductDetail) {
+      const slug = getProductSlug(selectedProductDetail);
+      updateSeoTags({
+        title: `${selectedProductDetail.name} | TORI-WEAR Anime Streetwear`,
+        description: (
+          selectedProductDetail.description ||
+          `${selectedProductDetail.name} — Heavyweight ${selectedProductDetail.gsm || 240} GSM ${selectedProductDetail.fit || 'Oversized'} anime streetwear.`
+        ).slice(0, 160),
+        keywords: `TORI-WEAR, ${selectedProductDetail.name}, ${selectedProductDetail.world}, ${selectedProductDetail.gsm || 240} GSM t-shirt, anime streetwear India`,
+        canonicalPath: `/product/${slug}`,
+        ogType: 'product',
+        ogImage: selectedProductDetail.images?.[0],
+        robots: 'index, follow',
+      });
+      return;
+    }
+
+    if (selectedCategorySlug) {
+      const activeCat = categories.find((c) => c.slug === selectedCategorySlug);
+      updateSeoTags({
+        title: activeCat?.seoTitle || `${activeCat?.name || selectedCategorySlug} | TORI-WEAR Streetwear`,
+        description:
+          activeCat?.seoDescription ||
+          activeCat?.description ||
+          `Explore ${activeCat?.name || selectedCategorySlug} original anime-inspired heavyweight 240 GSM streetwear from TORI-WEAR.`,
+        keywords: `TORI-WEAR, ${activeCat?.name || selectedCategorySlug}, anime streetwear, oversized t-shirts, 240 GSM`,
+        canonicalPath: `/category/${encodeURIComponent(selectedCategorySlug)}`,
+        robots: 'index, follow',
+      });
+      return;
+    }
+
+    if (activeDepartment === 'MEN') {
+      updateSeoTags({
+        title: "Men's Anime Streetwear & 240 GSM Oversized Tees | TORI-WEAR",
+        description:
+          "Shop TORI-WEAR Men's heavyweight 240 GSM oversized T-shirts, drop-shoulder fits, hoodies, and original anime streetwear chapters.",
+        keywords: "TORI-WEAR men, oversized anime t-shirts India, 240 GSM streetwear, drop-shoulder tees, hoodies",
+        canonicalPath: '/men',
+        robots: 'index, follow',
+      });
+      return;
+    }
+
+    if (activeDepartment === 'KIDS') {
+      updateSeoTags({
+        title: "Kids' Anime Storywear & Bio-Wash Cotton Tees | TORI-WEAR",
+        description:
+          "Discover soft 180 GSM bio-wash kids anime T-shirts & adventure storywear crafted by TORI-WEAR for ages 2 to 12.",
+        keywords: "TORI-WEAR kids, anime kids t-shirts India, soft cotton storywear, bio-wash kids apparel",
+        canonicalPath: '/kids',
+        robots: 'index, follow',
+      });
+      return;
+    }
+
+    const sameAs = (storeContact?.channels || [])
+      .filter((c) => c.enabled && c.url && /^https?:\/\//i.test(c.url))
+      .map((c) => c.url);
+
+    updateSeoTags({
+      title: 'TORI-WEAR — Original Anime Streetwear & 240 GSM Apparel',
+      description:
+        'Original anime-inspired heavyweight 240 GSM streetwear, oversized T-shirts, drop-shoulder styles, hoodies, and custom apparel from TORI-WEAR.',
+      keywords:
+        'TORI-WEAR, anime streetwear India, heavyweight 240 GSM t-shirt, oversized t-shirts, drop-shoulder styles, anime hoodies, custom streetwear',
+      canonicalPath: '/',
+      ogType: 'website',
+      robots: 'index, follow',
+      jsonLdId: 'tori-org-jsonld',
+      jsonLd: buildOrganizationJsonLd({
+        email: storeContact?.supportEmail,
+        phone: storeContact?.phone,
+        address: storeContact?.businessAddress,
+        sameAs,
+      }),
+    });
+  }, [
+    isAdminView,
+    isMaintenanceMode,
+    staffBypassedMaintenance,
+    selectedProductDetail,
+    selectedCategorySlug,
+    activeDepartment,
+    categories,
+    storeContact,
+  ]);
+
   // If Admin View is active, render full-fledged Admin Control Center
   if (isAdminView) {
     return (
@@ -1322,9 +1604,11 @@ export default function App() {
         cartCount={totalCartCount}
         wishlistCount={wishlist.length}
         activeDepartment={activeDepartment}
-        isFrontPage={activeDepartment === 'ALL' && selectedProductDetail === null && !isProductDetailLoading && selectedWorldCategory === 'ALL'}
+        isFrontPage={activeDepartment === 'ALL' && selectedProductDetail === null && !isProductDetailLoading && selectedWorldCategory === 'ALL' && !selectedCategorySlug}
         menCount={storefrontCatalog.filter((p) => p.department === 'MEN').length}
         kidsCount={storefrontCatalog.filter((p) => p.department === 'KIDS').length}
+        categories={categories}
+        onSelectCategorySlug={(slug) => handleSelectCategorySlug(slug)}
         onSelectDepartment={handleSelectDepartment}
         onSelectWorld={handleSelectWorldCategory}
         onOpenCart={() => setIsCartOpen(true)}
@@ -1336,7 +1620,7 @@ export default function App() {
           setIsSizeGuideOpen(true);
         }}
         onOpenStory={() => setIsStoryOpen(true)}
-        onOpenContact={() => scrollToSection('faq-section')}
+        onOpenContact={() => setIsContactModalOpen(true)}
         onNavigateHome={handleNavigateHome}
         onScrollToSection={scrollToSection}
       />
@@ -1620,6 +1904,9 @@ export default function App() {
                   isLoading={isCatalogLoading}
                   selectedWorld={selectedWorldCategory}
                   onSelectWorld={setSelectedWorldCategory}
+                  categories={categories}
+                  selectedCategorySlug={selectedCategorySlug}
+                  onSelectCategorySlug={handleSelectCategorySlug}
                   onOpenProductDetail={handleOpenProductDetail}
                   onOpenPopoutZoom={(prod) => setPopoutZoomProduct(prod)}
                   onOpenCombo={(prod) => setTwinningComboProduct(prod)}
@@ -1660,6 +1947,7 @@ export default function App() {
                       <button
                         onClick={() => {
                           setActiveDepartment('MEN');
+                          setSelectedCategorySlug(null);
                           setSelectedWorldCategory('ALL');
                           window.scrollTo({ top: 0, behavior: 'smooth' });
                         }}
@@ -1677,6 +1965,9 @@ export default function App() {
                   isLoading={isCatalogLoading}
                   selectedWorld={selectedWorldCategory}
                   onSelectWorld={setSelectedWorldCategory}
+                  categories={categories}
+                  selectedCategorySlug={selectedCategorySlug}
+                  onSelectCategorySlug={handleSelectCategorySlug}
                   onOpenProductDetail={handleOpenProductDetail}
                   onOpenPopoutZoom={(prod) => setPopoutZoomProduct(prod)}
                   onOpenCombo={(prod) => setTwinningComboProduct(prod)}
@@ -1730,7 +2021,7 @@ export default function App() {
         }}
         onOpenTrackOrder={() => setIsTrackingOpen(true)}
         onOpenStory={() => setIsStoryOpen(true)}
-        onOpenContact={() => scrollToSection('faq-section')}
+        onOpenContact={() => setIsContactModalOpen(true)}
       />
 
       {/* --- MODALS & DRAWERS --- */}
@@ -1777,6 +2068,13 @@ export default function App() {
         discount={discount}
         appliedCouponDetail={appliedCouponDetail}
         onProceedToCheckout={() => {
+          trackMetaEvent('InitiateCheckout', {
+            contentIds: cartItems.map((it) => it.product?.id).filter(Boolean),
+            value: total,
+            currency: 'INR',
+            numItems: totalCartCount,
+            userData: { email: customer?.email, phone: customer?.phone },
+          });
           setIsCartOpen(false);
           setIsCheckoutOpen(true);
         }}
@@ -1794,7 +2092,21 @@ export default function App() {
         shipping={shipping}
         total={total}
         onOrderPlaced={(order) => {
-          setOrders((prev) => [order, ...prev]);
+          const orderWithTimeline: OrderDetails = {
+            ...order,
+            timeline:
+              order.timeline && order.timeline.length > 0
+                ? order.timeline
+                : [
+                    {
+                      status: 'CONFIRMED',
+                      title: 'Order Confirmed',
+                      timestamp: new Date().toISOString(),
+                      note: 'Order placed & confirmed via storefront checkout.',
+                    },
+                  ],
+          };
+          setOrders((prev) => [orderWithTimeline, ...prev]);
           setCartItems([]);
           setAppliedCoupon(null);
           setAppliedCouponDetail(null);
@@ -1944,8 +2256,14 @@ export default function App() {
         onOpenProductDetail={(prod) => handleOpenProductDetail(prod)}
       />
 
-      {/* Floating 24/7 WhatsApp Concierge Support */}
-      <WhatsAppFloatingButton />
+      {/* Customer Contact Popup Modal */}
+      <ContactSupportModal
+        isOpen={isContactModalOpen}
+        onClose={() => setIsContactModalOpen(false)}
+      />
+
+      {/* Single Consolidated Bottom-Right Support Widget */}
+      <SupportFloatingWidget onOpenContact={() => setIsContactModalOpen(true)} />
 
       {/* Toast Floating Notification */}
       {toastMessage && (

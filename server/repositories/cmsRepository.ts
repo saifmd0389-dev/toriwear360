@@ -39,11 +39,36 @@ export interface HeroSettingsRecord {
   [key: string]: any;
 }
 
+export interface ContactChannelRecord {
+  id: string;
+  platform: string;
+  label: string;
+  valueOrUrl: string;
+  url?: string;
+  isEnabled: boolean;
+  enabled?: boolean;
+  displayOrder: number;
+  isPrimary?: boolean;
+  isCustom?: boolean;
+}
+
+export interface MetaBusinessSettingsRecord {
+  domainVerificationCode: string;
+  pixelId: string;
+  capiEnabled: boolean;
+}
+
 export interface StoreSettingsRecord {
   storeName: string;
   tagline: string;
   supportEmail: string;
   supportPhone: string;
+  whatsappNumber: string;
+  whatsappDefaultMessage: string;
+  contactChannels: ContactChannelRecord[];
+  returnWindowDays: number;
+  exchangeEnabled: boolean;
+  metaBusiness: MetaBusinessSettingsRecord;
   currency: string;
   taxRatePercent: number;
   freeShippingThreshold: number;
@@ -146,11 +171,32 @@ export const BASELINE_TABS = [
   { id: 'tab-lookbook-campus', category: 'LOOKBOOK_FILTER', label: 'Campus & Creator Fits', targetLink: 'CAMPUS', enabled: true, order: 4 },
 ];
 
+export const BASELINE_CONTACT_CHANNELS: ContactChannelRecord[] = [
+  { id: 'ch-whatsapp', platform: 'WHATSAPP', label: 'WhatsApp Concierge', valueOrUrl: '+91 98201 45112', isEnabled: true, displayOrder: 1, isPrimary: true },
+  { id: 'ch-email', platform: 'EMAIL', label: 'Support Email', valueOrUrl: 'care@toriwear.com', isEnabled: true, displayOrder: 2, isPrimary: true },
+  { id: 'ch-phone', platform: 'PHONE', label: 'Customer Care Line', valueOrUrl: '+91 98201 45112', isEnabled: true, displayOrder: 3 },
+  { id: 'ch-instagram', platform: 'INSTAGRAM', label: 'Instagram', valueOrUrl: 'https://instagram.com/toriwear', isEnabled: true, displayOrder: 4 },
+  { id: 'ch-facebook', platform: 'FACEBOOK', label: 'Facebook', valueOrUrl: 'https://facebook.com/toriwear', isEnabled: true, displayOrder: 5 },
+  { id: 'ch-twitter', platform: 'TWITTER', label: 'X / Twitter', valueOrUrl: 'https://x.com/toriwear', isEnabled: true, displayOrder: 6 },
+  { id: 'ch-youtube', platform: 'YOUTUBE', label: 'YouTube', valueOrUrl: 'https://youtube.com/@toriwear', isEnabled: true, displayOrder: 7 },
+  { id: 'ch-discord', platform: 'DISCORD', label: 'Discord Community', valueOrUrl: 'https://discord.gg/toriwear', isEnabled: true, displayOrder: 8 },
+];
+
 export const BASELINE_SETTINGS: StoreSettingsRecord = {
   storeName: 'TORI WEAR Atelier',
   tagline: '240 GSM Heavyweight Japanese Anime Streetwear',
   supportEmail: 'care@toriwear.com',
   supportPhone: '+91 98201 45112',
+  whatsappNumber: '+91 98201 45112',
+  whatsappDefaultMessage: "Hey TORI-WEAR! I'd like help with my order / sizing.",
+  contactChannels: BASELINE_CONTACT_CHANNELS,
+  returnWindowDays: 7,
+  exchangeEnabled: true,
+  metaBusiness: {
+    domainVerificationCode: '',
+    pixelId: '',
+    capiEnabled: false,
+  },
   currency: 'INR',
   taxRatePercent: 5.0,
   freeShippingThreshold: 999,
@@ -178,6 +224,40 @@ export class CmsRepository {
     this.ensureLoaded();
   }
 
+  private normalizeSettings(raw: Partial<StoreSettingsRecord> | null | undefined): StoreSettingsRecord {
+    const base = { ...BASELINE_SETTINGS };
+    const merged: StoreSettingsRecord = {
+      ...base,
+      ...(raw || {}),
+      contactChannels: Array.isArray(raw?.contactChannels) && raw.contactChannels.length > 0
+        ? raw.contactChannels.map((c: any, idx: number) => {
+            const val = String(c?.valueOrUrl ?? c?.url ?? '').trim();
+            const active = c?.isEnabled !== undefined ? c.isEnabled !== false : c?.enabled !== false;
+            return {
+              id: String(c?.id || `ch-${idx + 1}`),
+              platform: String(c?.platform || 'CUSTOM').toUpperCase(),
+              label: String(c?.label || 'Channel').trim(),
+              valueOrUrl: val,
+              url: val,
+              isEnabled: active,
+              enabled: active,
+              displayOrder: Number.isFinite(Number(c?.displayOrder)) ? Number(c.displayOrder) : idx + 1,
+              isPrimary: Boolean(c?.isPrimary),
+              isCustom: Boolean(c?.isCustom),
+            };
+          }).sort((a, b) => a.displayOrder - b.displayOrder)
+        : BASELINE_CONTACT_CHANNELS.map((c) => ({ ...c, url: c.valueOrUrl, enabled: c.isEnabled })),
+      returnWindowDays: Math.max(1, Math.min(60, Number(raw?.returnWindowDays || base.returnWindowDays || 7))),
+      exchangeEnabled: raw?.exchangeEnabled !== undefined ? Boolean(raw.exchangeEnabled) : true,
+      metaBusiness: {
+        domainVerificationCode: String(raw?.metaBusiness?.domainVerificationCode || '').trim(),
+        pixelId: String(raw?.metaBusiness?.pixelId || '').replace(/[^0-9a-zA-Z_-]/g, '').trim(),
+        capiEnabled: Boolean(raw?.metaBusiness?.capiEnabled),
+      },
+    };
+    return merged;
+  }
+
   private ensureLoaded() {
     if (this.initialized) return;
 
@@ -189,7 +269,7 @@ export class CmsRepository {
           this.buildDefaults();
           const normalized = this.normalizeFrontPage(parsed.frontPage, this.frontPageData!);
           this.frontPageData = normalized;
-          this.storeSettings = { ...BASELINE_SETTINGS, ...(parsed.storeSettings || {}) };
+          this.storeSettings = this.normalizeSettings(parsed.storeSettings);
           this.initialized = true;
           return;
         }
@@ -303,7 +383,7 @@ export class CmsRepository {
           id: 'ad-welcome-popup',
           title: 'Welcome Promo Code Modal (TORI100)',
           type: 'POPUP_MODAL',
-          enabled: true,
+          enabled: false,
           headline: 'WELCOME TO THE TORI UNIVERSE',
           tagline: 'Claim your first streetwear drop discount',
           description: 'Get flat ₹100 OFF on your first purchase of 240 GSM heavyweight Japanese anime streetwear.',
@@ -663,26 +743,109 @@ export class CmsRepository {
     return this.storeSettings!;
   }
 
+  async getPublicContactConfig(includeDisabledChannels = false) {
+    this.ensureLoaded();
+    const s = this.storeSettings!;
+    const fpFooter = this.frontPageData?.footer || {};
+    const allChannels = (s.contactChannels || [])
+      .map((c, idx) => {
+        const resolvedUrl = String(c.valueOrUrl || c.url || '').trim();
+        const enabledFlag = c.isEnabled !== false && c.enabled !== false;
+        return {
+          ...c,
+          url: resolvedUrl,
+          valueOrUrl: resolvedUrl,
+          enabled: enabledFlag,
+          isEnabled: enabledFlag,
+          displayOrder: Number.isFinite(Number(c.displayOrder)) ? Number(c.displayOrder) : idx + 1,
+        };
+      })
+      .sort((a, b) => a.displayOrder - b.displayOrder);
+
+    const orderedChannels = includeDisabledChannels
+      ? allChannels
+      : allChannels.filter((c) => c.enabled && Boolean(c.url));
+
+    const whatsappChannel = allChannels.find((c) => c.enabled && c.platform === 'WHATSAPP');
+    const whatsappRaw = whatsappChannel?.url || s.whatsappNumber || s.supportPhone || '';
+    const whatsappDigits = whatsappRaw.replace(/\D/g, '');
+    const emailChannel = allChannels.find((c) => c.enabled && c.platform === 'EMAIL');
+    const phoneChannel = allChannels.find((c) => c.enabled && c.platform === 'PHONE');
+    const resolvedEmail = emailChannel?.url || s.supportEmail || fpFooter.supportEmail || '';
+    const resolvedPhone = phoneChannel?.url || s.supportPhone || fpFooter.supportPhone || '';
+    const resolvedAddress = s.registeredAddress || fpFooter.atelierAddress || '';
+    const resolvedHours = s.operatingHours || fpFooter.operatingHours || 'Mon - Sat: 10:00 AM - 8:00 PM IST';
+    const resolvedWaMsg = s.whatsappDefaultMessage || "Hey TORI-WEAR! I'd like help with my order / sizing.";
+
+    return {
+      storeName: s.storeName || 'TORI WEAR',
+      supportEmail: resolvedEmail,
+      phone: resolvedPhone,
+      supportPhone: resolvedPhone,
+      whatsappNumber: whatsappRaw,
+      whatsappDigits,
+      whatsappMessage: resolvedWaMsg,
+      whatsappDefaultMessage: resolvedWaMsg,
+      operatingHours: resolvedHours,
+      businessAddress: resolvedAddress,
+      registeredAddress: resolvedAddress,
+      returnWindowDays: s.returnWindowDays || 7,
+      exchangeEnabled: s.exchangeEnabled !== false,
+      channels: orderedChannels,
+      socialLinks: orderedChannels.filter((c) => !['WHATSAPP', 'EMAIL', 'PHONE'].includes(c.platform)),
+      metaBusiness: {
+        domainVerificationCode: s.metaBusiness?.domainVerificationCode || '',
+        pixelId: s.metaBusiness?.pixelId || '',
+        capiEnabled: Boolean(s.metaBusiness?.capiEnabled),
+      },
+    };
+  }
+
   async updateStoreSettings(settings: Partial<StoreSettingsRecord>, actorId?: string): Promise<StoreSettingsRecord> {
     return this.enqueueWrite(async () => {
       this.ensureLoaded();
-      this.storeSettings = {
+      const sanitizedInput: Partial<StoreSettingsRecord> = { ...(settings || {}) };
+      if (sanitizedInput.metaBusiness) {
+        const { capiToken: _ignoreToken, ...safeMeta } = sanitizedInput.metaBusiness as any;
+        sanitizedInput.metaBusiness = safeMeta;
+      }
+
+      this.storeSettings = this.normalizeSettings({
         ...this.storeSettings!,
-        ...settings,
-      };
+        ...sanitizedInput,
+      });
+
+      // Keep footer contact & social links synchronized when channels or support info changes
+      if (this.frontPageData?.footer) {
+        this.frontPageData.footer.supportEmail = this.storeSettings.supportEmail;
+        this.frontPageData.footer.supportPhone = this.storeSettings.supportPhone;
+        this.frontPageData.footer.operatingHours = this.storeSettings.operatingHours;
+        this.frontPageData.footer.atelierAddress = this.storeSettings.registeredAddress;
+        const socialOnly = (this.storeSettings.contactChannels || []).filter(
+          (c) => !['WHATSAPP', 'EMAIL', 'PHONE'].includes(c.platform)
+        );
+        if (socialOnly.length > 0) {
+          this.frontPageData.footer.socialLinks = socialOnly.map((c) => ({
+            platform: c.label || c.platform,
+            url: c.valueOrUrl,
+            enabled: c.isEnabled,
+          }));
+        }
+      }
+
       this.saveToDisk();
 
     // Mirror to Prisma WebsiteSetting if connected
     try {
       if (prisma && prisma.websiteSetting) {
-        for (const [key, value] of Object.entries(settings)) {
+        for (const [key, value] of Object.entries(sanitizedInput)) {
           await prisma.websiteSetting.upsert({
             where: { key: `store_${key}` },
             create: {
               key: `store_${key}`,
               value: typeof value === 'object' ? JSON.stringify(value) : String(value),
               group: 'GENERAL',
-              isPublic: ['freeShippingThreshold', 'standardShippingFee', 'codFee', 'maintenanceMode'].includes(key),
+              isPublic: ['freeShippingThreshold', 'standardShippingFee', 'codFee', 'maintenanceMode', 'returnWindowDays'].includes(key),
             },
             update: {
               value: typeof value === 'object' ? JSON.stringify(value) : String(value),

@@ -32,6 +32,7 @@ import {
   Trash2,
   FileSpreadsheet,
   BellRing,
+  FolderTree,
 } from 'lucide-react';
 
 import { useFinance } from '../context/FinanceContext';
@@ -42,6 +43,7 @@ import { SuperAdminControlCenterView } from './SuperAdminControlCenterView';
 import { StaffApprovalsView } from './StaffApprovalsView';
 import { InternalCommunicationView } from './InternalCommunicationView';
 import { ProductsView } from './ProductsView';
+import { CategoryManagementView } from './CategoryManagementView';
 import { InventoryView } from './InventoryView';
 import { OrdersView } from './OrdersView';
 import { PaymentsView } from './PaymentsView';
@@ -157,6 +159,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
     { id: 'ACCOUNT_SECURITY', label: 'My Account & Security', icon: ShieldCheck },
     { id: 'AI_DESIGN_LAB', label: 'AI Design Lab', icon: Sparkles, permission: 'ai.view' },
     { id: 'PRODUCTS', label: 'Products Vault', icon: Package, permission: 'products.view' },
+    { id: 'CATEGORIES', label: 'Categories', icon: FolderTree, permission: 'products.view' },
     { id: 'INVENTORY', label: 'Inventory & Stock', icon: Boxes, permission: 'inventory.view', badge: lowStockCount },
     { id: 'ORDERS', label: 'Orders Fulfillment', icon: ShoppingBag, permission: 'orders.view', badge: pendingOrdersCount },
     { id: 'PAYMENTS', label: 'Payments & UPI', icon: CreditCard, permission: 'payments.view' },
@@ -483,6 +486,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
           {currentView === 'COMMUNICATION' && <InternalCommunicationView />}
           {currentView === 'AI_DESIGN_LAB' && <AIDesignLabView />}
           {currentView === 'PRODUCTS' && <ProductsView />}
+          {currentView === 'CATEGORIES' && <CategoryManagementView />}
           {currentView === 'INVENTORY' && <InventoryView />}
           {currentView === 'ORDERS' && <OrdersView />}
           {currentView === 'PAYMENTS' && <PaymentsView />}

@@ -1,23 +1,19 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   MessageSquare,
-  Video,
   Send,
   Search,
   Lock,
   ShieldCheck,
   Calendar,
   Clock,
-  Mic,
-  MicOff,
-  VideoOff,
-  PhoneOff,
+  LogOut,
   PlusCircle,
   Hash,
   User,
   X,
   FileText,
-  Monitor,
+  Users,
 } from 'lucide-react';
 import { platformApi, encryptE2EEMessage, decryptE2EEMessage, getSessionToken } from '../services/platformService';
 import {
@@ -56,19 +52,11 @@ export const InternalCommunicationView: React.FC = () => {
   });
   const [meetingError, setMeetingError] = useState('');
 
-  // WebRTC Call State
-  const [isInCall, setIsInCall] = useState(false);
+  // Sync Room State (Text & Presence only - zero camera/mic access)
+  const [isInRoomSync, setIsInRoomSync] = useState(false);
   const [activeCallRoom, setActiveCallRoom] = useState<string>('');
-  const [isAudioMuted, setIsAudioMuted] = useState(false);
-  const [isVideoMuted, setIsVideoMuted] = useState(false);
-  const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [callPeers, setCallPeers] = useState<{ id: string; name: string; role: string }[]>([]);
 
-  // WebRTC Media refs
-  const localVideoRef = useRef<HTMLVideoElement | null>(null);
-  const screenShareVideoRef = useRef<HTMLVideoElement | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -250,78 +238,23 @@ export const InternalCommunicationView: React.FC = () => {
     }
   };
 
-  // WebRTC Start Video / Audio Call
-  const handleStartCall = async (roomId: string = 'TORI-COLLAB-ROOM') => {
+  // Join text & presence sync room over WebSocket without camera or microphone permissions
+  const handleStartCall = (roomId: string = 'TORI-COLLAB-ROOM') => {
     setActiveCallRoom(roomId);
-    setIsInCall(true);
+    setIsInRoomSync(true);
 
-    try {
-      // Initialize real WebRTC PeerConnection
-      const pc = new RTCPeerConnection({
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-        ],
-      });
-      peerConnectionRef.current = pc;
-
-      // Access real local media
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true,
-        });
-      } catch (mediaErr) {
-        console.warn('Physical camera/mic restricted. Generating canvas video stream for WebRTC testing:', mediaErr);
-        // Canvas stream fallback for environments without physical camera
-        const canvas = document.createElement('canvas');
-        canvas.width = 640;
-        canvas.height = 480;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.fillStyle = '#0f172a';
-          ctx.fillRect(0, 0, 640, 480);
-          ctx.fillStyle = '#ef4444';
-          ctx.font = 'bold 24px sans-serif';
-          ctx.fillText('TORIWEAR WebRTC Stream', 160, 240);
-        }
-        stream = canvas.captureStream(30);
-      }
-
-      localStreamRef.current = stream;
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
-
-      // Add local tracks to peer connection
-      stream.getTracks().forEach((track) => {
-        pc.addTrack(track, stream);
-      });
-
-      // Notify others via WebSocket signaling
-      if (socketRef.current?.readyState === WebSocket.OPEN) {
-        socketRef.current.send(
-          JSON.stringify({
-            type: 'webrtc_join_room',
-            roomId,
-            mediaState: { audio: !isAudioMuted, video: !isVideoMuted, screen: false },
-          })
-        );
-      }
-    } catch (err) {
-      console.error('WebRTC initialization error:', err);
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(
+        JSON.stringify({
+          type: 'webrtc_join_room',
+          roomId,
+          mediaState: { audio: false, video: false, screen: false },
+        })
+      );
     }
   };
 
   const handleEndCall = () => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((t) => t.stop());
-    }
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
-    }
     if (socketRef.current?.readyState === WebSocket.OPEN) {
       socketRef.current.send(
         JSON.stringify({
@@ -330,51 +263,8 @@ export const InternalCommunicationView: React.FC = () => {
         })
       );
     }
-    setIsInCall(false);
-    setIsScreenSharing(false);
+    setIsInRoomSync(false);
     setCallPeers([]);
-  };
-
-  const toggleMic = () => {
-    if (localStreamRef.current) {
-      const audioTrack = localStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsAudioMuted(!audioTrack.enabled);
-      }
-    }
-  };
-
-  const toggleVideo = () => {
-    if (localStreamRef.current) {
-      const videoTrack = localStreamRef.current.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        setIsVideoMuted(!videoTrack.enabled);
-      }
-    }
-  };
-
-  const toggleScreenShare = async () => {
-    if (!isScreenSharing) {
-      try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-        if (screenShareVideoRef.current) {
-          screenShareVideoRef.current.srcObject = screenStream;
-        }
-        setIsScreenSharing(true);
-        const videoTrack = screenStream.getVideoTracks()[0];
-        if (videoTrack) {
-          videoTrack.onended = () => {
-            setIsScreenSharing(false);
-          };
-        }
-      } catch (err) {
-        console.warn('Screen sharing cancelled or unsupported:', err);
-      }
-    } else {
-      setIsScreenSharing(false);
-    }
   };
 
   // Create Meeting
@@ -423,7 +313,7 @@ export const InternalCommunicationView: React.FC = () => {
             <span>Internal Enterprise Communication</span>
           </h1>
           <p className="text-xs text-slate-500">
-            Real-time collaboration suite with AES-GCM end-to-end encrypted partner channels, department groups, and WebRTC video conferencing.
+            Real-time collaboration suite with AES-GCM end-to-end encrypted partner channels, department groups, and executive sync rooms.
           </p>
         </div>
 
@@ -636,14 +526,14 @@ export const InternalCommunicationView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Action buttons (Video / Voice calls) */}
+              {/* Room Sync Action */}
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => handleStartCall(activeChannel ? activeChannel.id : `dm-${currentUser?.id}-${activeDirectUser?.id}`)}
                   className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
                 >
-                  <Video className="w-3.5 h-3.5" />
-                  <span>Start WebRTC Video</span>
+                  <Users className="w-3.5 h-3.5" />
+                  <span>Open Sync Room</span>
                 </button>
               </div>
             </div>
@@ -771,9 +661,9 @@ export const InternalCommunicationView: React.FC = () => {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-sm font-bold text-slate-900">Enterprise Video Meetings & Sessions</h2>
+              <h2 className="text-sm font-bold text-slate-900">Enterprise Sync Meetings & Agendas</h2>
               <p className="text-xs text-slate-500">
-                Scheduled executive syncs with WebRTC real-time calling and screen presentation rooms.
+                Scheduled executive syncs with encrypted agenda rooms and live participant presence.
               </p>
             </div>
 
@@ -825,8 +715,8 @@ export const InternalCommunicationView: React.FC = () => {
                     onClick={() => handleStartCall(mtg.meetingRoomCode)}
                     className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer shadow-xs"
                   >
-                    <Video className="w-3.5 h-3.5 text-red-400" />
-                    <span>Join Meeting Room</span>
+                    <Users className="w-3.5 h-3.5 text-red-400" />
+                    <span>Join Sync Room</span>
                   </button>
                 </div>
               </div>
@@ -835,17 +725,16 @@ export const InternalCommunicationView: React.FC = () => {
         </div>
       )}
 
-      {/* WEBRTC REAL-TIME VIDEO CALL INTERFACE MODAL */}
-      {isInCall && (
-        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col justify-between p-4 sm:p-6 animate-in fade-in duration-200">
-          {/* Header */}
+      {/* REAL-TIME EXECUTIVE SYNC ROOM OVERLAY (NO CAMERA/MIC) */}
+      {isInRoomSync && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex flex-col justify-between p-4 sm:p-6 animate-in fade-in duration-200">
           <div className="flex items-center justify-between text-white pb-3 border-b border-white/10">
             <div className="flex items-center gap-3">
-              <span className="w-3 h-3 rounded-full bg-red-500 animate-ping" />
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
               <div>
-                <h3 className="font-bold text-sm tracking-tight">Active Real-Time WebRTC Call: {activeCallRoom}</h3>
-                <span className="text-[11px] text-slate-400 font-mono">
-                  Encryption: WebRTC DTLS-SRTP · Participants ({callPeers.length + 1})
+                <h3 className="font-bold text-sm tracking-tight">Active Sync Room: {activeCallRoom}</h3>
+                <span className="text-[11px] text-slate-400 font-mono tabular-nums">
+                  WebSocket Presence Room · Participants ({callPeers.length + 1})
                 </span>
               </div>
             </div>
@@ -854,98 +743,43 @@ export const InternalCommunicationView: React.FC = () => {
               onClick={handleEndCall}
               className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs flex items-center gap-2 cursor-pointer shadow-lg"
             >
-              <PhoneOff className="w-4 h-4" />
-              <span>Leave Call</span>
+              <LogOut className="w-4 h-4" />
+              <span>Leave Room</span>
             </button>
           </div>
 
-          {/* Videos Grid */}
-          <div className="flex-1 my-4 grid grid-cols-1 md:grid-cols-2 gap-4 items-center justify-center overflow-hidden">
-            {/* Local Video Stream */}
-            <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-800 aspect-video flex items-center justify-center shadow-2xl">
-              <video
-                ref={localVideoRef}
-                autoPlay
-                playsInline
-                muted
-                className={`w-full h-full object-cover ${isVideoMuted ? 'hidden' : 'block'}`}
-              />
-              {isVideoMuted && (
-                <div className="text-center space-y-2">
-                  <div className="w-16 h-16 rounded-full bg-slate-800 text-white flex items-center justify-center mx-auto text-xl font-bold">
-                    {currentUser?.name.charAt(0)}
-                  </div>
-                  <div className="text-xs text-slate-400">Camera Off</div>
+          <div className="flex-1 my-6 max-w-3xl w-full mx-auto flex flex-col justify-center gap-4">
+            <div className="rounded-2xl bg-slate-900 border border-slate-800 p-6 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div>
+                  <div className="text-sm font-bold text-white">Room Participants</div>
+                  <div className="text-xs text-slate-400">Text & agenda coordination room (camera/microphone disabled)</div>
                 </div>
-              )}
-              <div className="absolute bottom-3 left-3 px-2 py-1 rounded-lg bg-black/60 backdrop-blur-sm text-white text-[11px] font-mono">
-                {currentUser?.name} (You)
+                <span className="text-xs font-mono text-emerald-400 tabular-nums">{callPeers.length + 1} Active</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-red-600 text-white flex items-center justify-center font-bold text-sm">
+                    {currentUser?.name.charAt(0) || 'A'}
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-white">{currentUser?.name || 'Admin'} (You)</div>
+                    <div className="text-[11px] text-slate-400 font-mono">{currentUser?.role || 'STAFF'}</div>
+                  </div>
+                </div>
+                {callPeers.map((peer) => (
+                  <div key={peer.id} className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-lg bg-slate-800 text-white flex items-center justify-center font-bold text-sm">
+                      {peer.name.charAt(0)}
+                    </div>
+                    <div>
+                      <div className="text-xs font-bold text-white">{peer.name}</div>
+                      <div className="text-[11px] text-slate-400 font-mono">{peer.role}</div>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
-
-            {/* Remote Peer Stream or Screen Presentation */}
-            <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-800 aspect-video flex items-center justify-center shadow-2xl">
-              {isScreenSharing ? (
-                <video
-                  ref={screenShareVideoRef}
-                  autoPlay
-                  playsInline
-                  className="w-full h-full object-contain"
-                />
-              ) : (
-                <div className="text-center space-y-3 p-6">
-                  <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-red-600 to-amber-500 text-white flex items-center justify-center mx-auto text-2xl font-bold shadow-lg">
-                    🤝
-                  </div>
-                  <div className="text-sm font-bold text-white">
-                    {callPeers[0]
-                      ? `${callPeers[0].name} (${callPeers[0].role})`
-                      : 'TORIWEAR Executive WebRTC Room'}
-                  </div>
-                  <p className="text-xs text-slate-400 max-w-xs">
-                    {callPeers.length > 0
-                      ? 'Peer connection established and streaming audio/video.'
-                      : 'Waiting for additional partners or invited team members to join room code.'}
-                  </p>
-                </div>
-              )}
-              <div className="absolute bottom-3 left-3 px-2 py-1 rounded-lg bg-black/60 backdrop-blur-sm text-white text-[11px] font-mono">
-                {isScreenSharing ? 'Your Screen Presentation' : 'Collaborative Peer View'}
-              </div>
-            </div>
-          </div>
-
-          {/* Call Controls Bar */}
-          <div className="flex items-center justify-center gap-3 pt-3 border-t border-white/10">
-            <button
-              onClick={toggleMic}
-              className={`p-3 rounded-2xl text-white font-bold text-xs flex items-center gap-2 cursor-pointer transition-colors ${
-                isAudioMuted ? 'bg-red-600 hover:bg-red-500' : 'bg-slate-800 hover:bg-slate-700'
-              }`}
-            >
-              {isAudioMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-              <span>{isAudioMuted ? 'Unmute Mic' : 'Mute Mic'}</span>
-            </button>
-
-            <button
-              onClick={toggleVideo}
-              className={`p-3 rounded-2xl text-white font-bold text-xs flex items-center gap-2 cursor-pointer transition-colors ${
-                isVideoMuted ? 'bg-red-600 hover:bg-red-500' : 'bg-slate-800 hover:bg-slate-700'
-              }`}
-            >
-              {isVideoMuted ? <VideoOff className="w-4 h-4" /> : <Video className="w-4 h-4" />}
-              <span>{isVideoMuted ? 'Start Camera' : 'Stop Camera'}</span>
-            </button>
-
-            <button
-              onClick={toggleScreenShare}
-              className={`p-3 rounded-2xl text-white font-bold text-xs flex items-center gap-2 cursor-pointer transition-colors ${
-                isScreenSharing ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-slate-800 hover:bg-slate-700'
-              }`}
-            >
-              <Monitor className="w-4 h-4" />
-              <span>{isScreenSharing ? 'Stop Sharing' : 'Share Screen'}</span>
-            </button>
           </div>
         </div>
       )}
@@ -955,7 +789,7 @@ export const InternalCommunicationView: React.FC = () => {
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-200">
-              <h3 className="text-base font-bold text-slate-900">Schedule Video Meeting</h3>
+              <h3 className="text-base font-bold text-slate-900">Schedule Sync Meeting</h3>
               <button onClick={() => setShowScheduleModal(false)} className="text-slate-400 hover:text-slate-700 cursor-pointer p-1">
                 <X className="w-5 h-5" />
               </button>

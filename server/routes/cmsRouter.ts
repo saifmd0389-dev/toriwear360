@@ -175,10 +175,164 @@ cmsRouter.get(['/settings', '/cms/settings', '/admin/settings', '/admin/cms/sett
         logoUrl: resolvedLogoUrl,
         secondaryLogoUrl: resolvedSecondaryLogoUrl,
         logoUpdatedAt: full.logoUpdatedAt || null,
+        whatsappNumber: full.whatsappNumber,
+        whatsappDefaultMessage: full.whatsappDefaultMessage,
+        contactChannels: full.contactChannels,
+        returnWindowDays: full.returnWindowDays || 7,
+        exchangeEnabled: full.exchangeEnabled !== false,
+        metaBusiness: full.metaBusiness || { domainVerificationCode: '', pixelId: '', capiEnabled: false },
       },
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message || 'Failed to retrieve store settings' });
+  }
+});
+
+/**
+ * Public Store Contact & Social Channels Endpoint (/api/v1/store/contact)
+ */
+cmsRouter.get(['/v1/store/contact', '/store/contact'], async (_req: Request, res: Response) => {
+  try {
+    const contact = await cmsRepository.getPublicContactConfig();
+    res.json({ success: true, data: contact });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Failed to retrieve store contact configuration' });
+  }
+});
+
+/**
+ * Admin Read Store Contact, Social & Support Policy Settings (/api/v1/admin/store/contact)
+ */
+cmsRouter.get(['/v1/admin/store/contact', '/admin/store/contact'], requireAdminAuth('view'), async (_req: Request, res: Response) => {
+  try {
+    const contact = await cmsRepository.getPublicContactConfig(true);
+    return res.json({ success: true, data: contact });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load admin contact settings' });
+  }
+});
+
+/**
+ * Admin Update Store Contact, Social & Support Policy Settings (/api/v1/admin/store/contact)
+ */
+cmsRouter.put(['/v1/admin/store/contact', '/admin/store/contact'], requireAdminAuth('edit'), async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const updates: Record<string, any> = {};
+    if (typeof body.storeName === 'string' && body.storeName.trim()) updates.storeName = body.storeName.trim();
+    if (typeof body.supportEmail === 'string') updates.supportEmail = body.supportEmail.trim();
+    const incomingPhone = typeof body.supportPhone === 'string' ? body.supportPhone : typeof body.phone === 'string' ? body.phone : undefined;
+    if (incomingPhone !== undefined) updates.supportPhone = incomingPhone.trim();
+    if (typeof body.whatsappNumber === 'string') updates.whatsappNumber = body.whatsappNumber.trim();
+    const incomingWaMsg = typeof body.whatsappDefaultMessage === 'string'
+      ? body.whatsappDefaultMessage
+      : typeof body.whatsappMessage === 'string'
+        ? body.whatsappMessage
+        : undefined;
+    if (incomingWaMsg !== undefined) updates.whatsappDefaultMessage = incomingWaMsg.trim();
+    if (typeof body.operatingHours === 'string') updates.operatingHours = body.operatingHours.trim();
+    const incomingAddress = typeof body.registeredAddress === 'string'
+      ? body.registeredAddress
+      : typeof body.businessAddress === 'string'
+        ? body.businessAddress
+        : undefined;
+    if (incomingAddress !== undefined) updates.registeredAddress = incomingAddress.trim();
+    if (body.returnWindowDays !== undefined) updates.returnWindowDays = Math.max(1, Math.min(60, Number(body.returnWindowDays) || 7));
+    if (typeof body.exchangeEnabled === 'boolean') updates.exchangeEnabled = body.exchangeEnabled;
+    const rawChannels = Array.isArray(body.contactChannels)
+      ? body.contactChannels
+      : Array.isArray(body.channels)
+        ? body.channels
+        : undefined;
+    if (rawChannels) updates.contactChannels = rawChannels;
+
+    const saved = await cmsRepository.updateStoreSettings(updates, req.user?.id || req.user?.name || 'ADMIN');
+    const adminContact = await cmsRepository.getPublicContactConfig(true);
+    const publicContact = await cmsRepository.getPublicContactConfig(false);
+    return res.json({ success: true, message: 'Contact & social settings saved.', data: adminContact, rawSettings: saved, publicContact });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to update contact settings' });
+  }
+});
+
+/**
+ * Admin Meta Business Integration Settings (/api/v1/admin/store/meta)
+ * Server-side token is read strictly from process.env.META_CONVERSIONS_API_TOKEN and NEVER returned to client.
+ */
+cmsRouter.get(['/v1/admin/store/meta', '/admin/store/meta'], requireAdminAuth('view'), async (_req: Request, res: Response) => {
+  try {
+    const settings = await cmsRepository.getStoreSettings();
+    return res.json({
+      success: true,
+      data: {
+        domainVerificationCode: settings.metaBusiness?.domainVerificationCode || '',
+        pixelId: settings.metaBusiness?.pixelId || '',
+        capiEnabled: Boolean(settings.metaBusiness?.capiEnabled),
+        capiTokenConfigured: Boolean(process.env.META_CONVERSIONS_API_TOKEN && process.env.META_CONVERSIONS_API_TOKEN.trim()),
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to read Meta Business configuration' });
+  }
+});
+
+cmsRouter.put(['/v1/admin/store/meta', '/admin/store/meta'], requireAdminAuth('edit'), async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const current = await cmsRepository.getStoreSettings();
+    const nextMeta = {
+      domainVerificationCode: typeof body.domainVerificationCode === 'string'
+        ? body.domainVerificationCode.trim()
+        : (current.metaBusiness?.domainVerificationCode || ''),
+      pixelId: typeof body.pixelId === 'string'
+        ? body.pixelId.replace(/[^0-9a-zA-Z_-]/g, '').trim()
+        : (current.metaBusiness?.pixelId || ''),
+      capiEnabled: typeof body.capiEnabled === 'boolean'
+        ? body.capiEnabled
+        : Boolean(current.metaBusiness?.capiEnabled),
+    };
+
+    await cmsRepository.updateStoreSettings({ metaBusiness: nextMeta }, req.user?.id || req.user?.name || 'ADMIN');
+    return res.json({
+      success: true,
+      message: 'Meta Business settings updated.',
+      data: {
+        ...nextMeta,
+        capiTokenConfigured: Boolean(process.env.META_CONVERSIONS_API_TOKEN && process.env.META_CONVERSIONS_API_TOKEN.trim()),
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Failed to update Meta Business settings' });
+  }
+});
+
+/**
+ * Storefront Meta Conversions API Deduplication Relay (/api/v1/store/meta/event)
+ */
+cmsRouter.post(['/v1/store/meta/event', '/store/meta/event'], async (req: Request, res: Response) => {
+  try {
+    const { dispatchMetaCapiEvent } = await import('../services/metaCapiService');
+    const body = req.body || {};
+    const validEvents = new Set(['PageView', 'ViewContent', 'AddToCart', 'InitiateCheckout', 'Purchase']);
+    const eventName = String(body.eventName || '');
+    if (!validEvents.has(eventName)) {
+      return res.status(400).json({ success: false, error: 'Unsupported Meta event name.' });
+    }
+    const eventId = String(body.eventId || crypto.randomUUID());
+    const ip = (req.ip || req.socket.remoteAddress || '').replace('::ffff:', '');
+    const result = await dispatchMetaCapiEvent({
+      eventName: eventName as any,
+      eventId,
+      eventSourceUrl: typeof body.eventSourceUrl === 'string' ? body.eventSourceUrl : undefined,
+      clientIpAddress: ip || undefined,
+      clientUserAgent: String(req.headers['user-agent'] || '').slice(0, 255) || undefined,
+      email: typeof body.email === 'string' ? body.email : undefined,
+      phone: typeof body.phone === 'string' ? body.phone : undefined,
+      customData: body.customData && typeof body.customData === 'object' ? body.customData : undefined,
+    });
+    return res.json({ success: true, ...result });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Meta event relay failed' });
   }
 });
 

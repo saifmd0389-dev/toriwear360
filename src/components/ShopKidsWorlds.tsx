@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Smile, ChevronLeft, ChevronRight, Sparkles, ArrowRight, Scale } from 'lucide-react';
-import { Product, KidsWorldCategory } from '../types';
+import { Product, KidsWorldCategory, StoreCategory } from '../types';
 import { KIDS_WORLDS, KIDS_AGE_GROUPS } from '../data/constants';
 import {
   isPublishedKidsProduct,
@@ -21,6 +21,9 @@ interface ShopKidsWorldsProps {
   wishlist: string[];
   selectedWorld?: KidsWorldCategory | 'ALL';
   onSelectWorld?: (world: KidsWorldCategory | 'ALL') => void;
+  categories?: StoreCategory[];
+  selectedCategorySlug?: string | null;
+  onSelectCategorySlug?: (slug: string | null) => void;
   onToggleWishlist: (productId: string) => void;
   onOpenProductDetail: (product: Product) => void;
   onOpenPopoutZoom?: (product: Product) => void;
@@ -35,6 +38,9 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
   wishlist,
   selectedWorld: externalSelectedWorld,
   onSelectWorld,
+  categories = [],
+  selectedCategorySlug: externalCategorySlug,
+  onSelectCategorySlug,
   onToggleWishlist,
   onOpenProductDetail,
   onOpenPopoutZoom,
@@ -54,7 +60,24 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
     onSelectWorld?.(w);
   };
 
+  const [internalCatSlug, setInternalCatSlug] = useState<string | null>(null);
+  const activeCategorySlug = externalCategorySlug !== undefined ? externalCategorySlug : internalCatSlug;
+  const handleCategoryChange = (slug: string | null) => {
+    setInternalCatSlug(slug);
+    onSelectCategorySlug?.(slug);
+  };
+
   const [selectedAge, setSelectedAge] = useState<string>('ALL');
+
+  const enabledKidsCategories = useMemo(
+    () => categories.filter((c) => c.isActive && (c.department === 'KIDS' || c.department === 'ALL')),
+    [categories]
+  );
+
+  const activeCategoryObj = useMemo(
+    () => (activeCategorySlug ? enabledKidsCategories.find((c) => c.slug === activeCategorySlug) || null : null),
+    [activeCategorySlug, enabledKidsCategories]
+  );
 
   // Single source of truth for valid, published Kids products
   const publishedKidsProducts = useMemo(() => {
@@ -74,12 +97,17 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
     return counts;
   }, [publishedKidsProducts]);
 
-  // Filtered products matching active world and selected age group
+  // Filtered products matching active world, category and selected age group
   const filteredProducts = useMemo(() => {
     return publishedKidsProducts.filter((p) => {
-      return matchesKidsWorld(p, activeWorld) && matchesKidsAge(p, selectedAge);
+      if (!matchesKidsWorld(p, activeWorld) || !matchesKidsAge(p, selectedAge)) return false;
+      if (activeCategoryObj) {
+        const ids = Array.isArray(p.categoryIds) ? p.categoryIds : [];
+        if (!ids.includes(activeCategoryObj.id)) return false;
+      }
+      return true;
     });
-  }, [publishedKidsProducts, activeWorld, selectedAge]);
+  }, [publishedKidsProducts, activeWorld, selectedAge, activeCategoryObj]);
 
   // Active world metadata from KIDS_WORLDS (only show banner when a specific world is selected)
   const activeWorldMeta = useMemo(() => {
@@ -139,6 +167,7 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
 
   const handleResetFilters = () => {
     handleWorldChange('ALL');
+    handleCategoryChange(null);
     setSelectedAge('ALL');
   };
 
@@ -370,6 +399,40 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
             );
           })}
         </div>
+
+        {/* Dynamic Store Categories Filter Pills */}
+        {enabledKidsCategories.length > 0 && (
+          <div className="flex items-center gap-2 overflow-x-auto pb-3 mb-6 no-scrollbar">
+            <span className="text-[10px] font-mono uppercase tracking-wider text-sky-700 font-bold shrink-0 mr-1">
+              CATEGORIES:
+            </span>
+            <button
+              type="button"
+              onClick={() => handleCategoryChange(null)}
+              className={`px-3 py-1 rounded-full text-[11px] font-mono uppercase whitespace-nowrap transition cursor-pointer border ${
+                !activeCategorySlug
+                  ? 'bg-sky-600 text-white border-sky-600 font-bold'
+                  : 'bg-white text-neutral-700 border-neutral-300 hover:border-sky-400'
+              }`}
+            >
+              ALL CATEGORIES
+            </button>
+            {enabledKidsCategories.map((cat) => (
+              <button
+                key={cat.id}
+                type="button"
+                onClick={() => handleCategoryChange(activeCategorySlug === cat.slug ? null : cat.slug)}
+                className={`px-3 py-1 rounded-full text-[11px] font-mono uppercase whitespace-nowrap transition cursor-pointer border ${
+                  activeCategorySlug === cat.slug
+                    ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm'
+                    : 'bg-white text-neutral-700 border-neutral-300 hover:border-sky-400'
+                }`}
+              >
+                {cat.name}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Active Kids World Showcase Banner */}
         {activeWorldMeta && (

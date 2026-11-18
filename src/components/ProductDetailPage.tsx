@@ -6,7 +6,6 @@ import {
   ChevronLeft,
   ChevronRight,
   ZoomIn,
-  ZoomOut,
   RotateCw,
   X,
   AlertCircle,
@@ -15,13 +14,17 @@ import {
   Minus,
   Maximize2,
   Scale,
+  Star,
 } from 'lucide-react';
-import { Product } from '../types';
+import { Product, ProductReviewSummary, StoreContactConfig } from '../types';
 import { useCustomerAuth } from '../context/CustomerAuthContext';
 import { RecentlyViewedSection } from './RecentlyViewedSection';
+import { ProductReviewsSection } from './ProductReviewsSection';
 import { WishlistHeartIcon } from './WishlistHeartIcon';
 import { getAuthoritativeInstagramUrl } from '../utils/socialLinks';
 import { ShimmerImage, ProductDetailSkeleton } from './StorefrontSkeletons';
+import { ProductZoomViewer } from './ProductZoomViewer';
+import { apiClient } from '../services/apiClient';
 
 interface ProductDetailPageProps {
   product: Product;
@@ -114,6 +117,29 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
   const [pincode, setPincode] = useState('');
   const [pincodeStatus, setPincodeStatus] = useState<string | null>(null);
   const [shareToast, setShareToast] = useState<string | null>(null);
+  const [reviewSummary, setReviewSummary] = useState<ProductReviewSummary | null>(null);
+  const [contactConfig, setContactConfig] = useState<StoreContactConfig | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    const loadContact = () => {
+      apiClient.getStoreContact().then((res) => {
+        if (mounted && res.success && res.data) {
+          setContactConfig(res.data);
+        }
+      }).catch(() => {});
+    };
+    loadContact();
+    window.addEventListener('tori_contact_updated', loadContact);
+    return () => {
+      mounted = false;
+      window.removeEventListener('tori_contact_updated', loadContact);
+    };
+  }, []);
+
+  useEffect(() => {
+    setReviewSummary(null);
+  }, [product.id]);
 
   // Accordion states
   const [isDetailsOpen, setIsDetailsOpen] = useState(true);
@@ -125,10 +151,6 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
   const [isAllImagesOpen, setIsAllImagesOpen] = useState(false);
   const [isZoomOpen, setIsZoomOpen] = useState(false);
   const [zoomImgIndex, setZoomImgIndex] = useState(0);
-  const [zoomScale, setZoomScale] = useState(1);
-  const [panPosition, setPanPosition] = useState({ x: 50, y: 50 });
-  const [isHoverZooming, setIsHoverZooming] = useState(false);
-  const zoomContainerRef = useRef<HTMLDivElement>(null);
   const thumbStripRef = useRef<HTMLDivElement>(null);
   const carouselTouchXRef = useRef<number | null>(null);
   const carouselTouchYRef = useRef<number | null>(null);
@@ -269,7 +291,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
           '@type': 'MerchantReturnPolicy',
           applicableCountry: 'IN',
           returnPolicyCategory: 'https://schema.org/MerchantReturnFiniteReturnWindow',
-          merchantReturnDays: 30,
+          merchantReturnDays: contactConfig?.returnWindowDays || 7,
           returnMethod: 'https://schema.org/ReturnByMail',
           returnFees: 'https://schema.org/FreeReturn',
         },
@@ -287,7 +309,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
     }
 
     return schemaPayload;
-  }, [product, galleryImages, availableColors, availableSizes, isProductOverallInStock]);
+  }, [product, galleryImages, availableColors, availableSizes, isProductOverallInStock, contactConfig?.returnWindowDays]);
 
   // Inject Schema.org Product JSON-LD script and sync document head SEO tags for search crawlers & rich snippets
   useEffect(() => {
@@ -385,7 +407,6 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
     setPincodeStatus(null);
     setActiveCarouselIndex(0);
     setVisibleGridCount(6);
-    setZoomScale(1);
     setZoomImgIndex(0);
     setIsZoomOpen(false);
     setIsAllImagesOpen(false);
@@ -428,18 +449,12 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
         }
       } else if (isZoomOpen && e.key === 'ArrowLeft') {
         setZoomImgIndex((prev) => (prev > 0 ? prev - 1 : galleryImages.length - 1));
-        setZoomScale(1);
       } else if (isZoomOpen && e.key === 'ArrowRight') {
         setZoomImgIndex((prev) => (prev < galleryImages.length - 1 ? prev + 1 : 0));
-        setZoomScale(1);
       } else if (!isZoomOpen && !isAllImagesOpen && galleryImages.length > 1 && e.key === 'ArrowLeft') {
         setActiveCarouselIndex((prev) => (prev > 0 ? prev - 1 : galleryImages.length - 1));
       } else if (!isZoomOpen && !isAllImagesOpen && galleryImages.length > 1 && e.key === 'ArrowRight') {
         setActiveCarouselIndex((prev) => (prev < galleryImages.length - 1 ? prev + 1 : 0));
-      } else if (isZoomOpen && (e.key === '+' || e.key === '=')) {
-        setZoomScale((s) => Math.min(3.5, s + 0.5));
-      } else if (isZoomOpen && e.key === '-') {
-        setZoomScale((s) => Math.max(1, s - 0.5));
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -545,7 +560,6 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
   const handleOpenZoom = (index: number) => {
     const safeIdx = Math.max(0, Math.min(index, galleryImages.length - 1));
     setZoomImgIndex(safeIdx);
-    setZoomScale(1.8); // Default to a sharp 1.8x zoom on click for instant clear view of design!
     setIsZoomOpen(true);
   };
 
@@ -564,52 +578,6 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
   const handleCarouselNext = (e?: React.MouseEvent) => {
     e?.stopPropagation();
     setActiveCarouselIndex((prev) => (prev < totalGalleryCount - 1 ? prev + 1 : 0));
-  };
-
-  const handleCarouselTouchStart = (e: React.TouchEvent) => {
-    const touch = e.touches[0];
-    if (!touch) return;
-    carouselTouchXRef.current = touch.clientX;
-    carouselTouchYRef.current = touch.clientY;
-    carouselSwipedRef.current = false;
-  };
-
-  const handleCarouselTouchEnd = (e: React.TouchEvent) => {
-    if (totalGalleryCount <= 1 || carouselTouchXRef.current === null || carouselTouchYRef.current === null) return;
-    const touch = e.changedTouches[0];
-    if (!touch) return;
-    const dx = touch.clientX - carouselTouchXRef.current;
-    const dy = touch.clientY - carouselTouchYRef.current;
-    carouselTouchXRef.current = null;
-    carouselTouchYRef.current = null;
-
-    if (Math.abs(dx) > 36 && Math.abs(dx) > Math.abs(dy) * 1.15) {
-      carouselSwipedRef.current = true;
-      if (dx < 0) {
-        setActiveCarouselIndex((prev) => (prev < totalGalleryCount - 1 ? prev + 1 : 0));
-      } else {
-        setActiveCarouselIndex((prev) => (prev > 0 ? prev - 1 : totalGalleryCount - 1));
-      }
-    }
-  };
-
-  // Handle mouse move inside the zoom container for super-sharp design inspection
-  const handleZoomMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!zoomContainerRef.current) return;
-    const rect = zoomContainerRef.current.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 100;
-    const y = ((e.clientY - rect.top) / rect.height) * 100;
-    setPanPosition({ x: Math.max(0, Math.min(100, x)), y: Math.max(0, Math.min(100, y)) });
-  };
-
-  // Toggle zoom level when clicking directly on the zoomed image
-  const handleToggleZoomScale = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setZoomScale((prev) => {
-      if (prev <= 1.2) return 2.2;
-      if (prev <= 2.2) return 3.2;
-      return 1;
-    });
   };
 
   return (
@@ -665,40 +633,24 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
           {/* ===================================================================== */}
           <div className="lg:col-span-7 space-y-5">
 
-            {/* A. PRIMARY INTERACTIVE IMAGE CAROUSEL (BOTH MOBILE & DESKTOP) */}
+            {/* A. PRIMARY INTERACTIVE IMAGE CAROUSEL WITH ZOOM (MOBILE PINCH/DOUBLE-TAP + DESKTOP HOVER) */}
             <div className="space-y-3">
               <div
-                onTouchStart={handleCarouselTouchStart}
-                onTouchEnd={handleCarouselTouchEnd}
-                onClick={() => {
-                  if (carouselSwipedRef.current) {
-                    carouselSwipedRef.current = false;
-                    return;
-                  }
-                  handleOpenZoom(activeCarouselIndex);
-                }}
-                className="relative group bg-[#F5F5F3] overflow-hidden aspect-[4/5] sm:aspect-[3/4] max-h-[76vh] w-full cursor-zoom-in select-none border border-neutral-200/70"
-                title="Click image for 100% HD Zoom or swipe/use arrows to browse angles"
+                className="relative group bg-[#F5F5F3] overflow-hidden aspect-[4/5] sm:aspect-[3/4] max-h-[76vh] w-full select-none border border-neutral-200/70"
+                title="Hover or double-tap/pinch to zoom • Click expand for HD lightbox"
               >
-                {/* GPU-Accelerated Horizontal Slide Track */}
-                <div
-                  className="flex w-full h-full will-change-transform transition-transform duration-300 ease-out"
-                  style={{ transform: `translate3d(-${activeCarouselIndex * 100}%, 0, 0)` }}
-                >
-                  {galleryImages.map((img, idx) => (
-                    <div key={idx} className="w-full h-full shrink-0 relative">
-                      <ShimmerImage
-                        src={img.url}
-                        alt={`${product.name} carousel slide ${idx + 1}`}
-                        theme="neutral"
-                        wrapperClassName="w-full h-full"
-                        loading={idx <= 1 ? 'eager' : 'lazy'}
-                        decoding="async"
-                        className="w-full h-full object-cover object-center"
-                      />
-                    </div>
-                  ))}
-                </div>
+                <ProductZoomViewer
+                  src={galleryImages[activeCarouselIndex]?.url || ''}
+                  alt={`${product.name} slide ${activeCarouselIndex + 1}`}
+                  className="w-full h-full"
+                  imageClassName="w-full h-full object-cover object-center"
+                  enableHoverMagnify={true}
+                  hoverZoomScale={1.9}
+                  showToolbar={true}
+                  onExpandClick={() => handleOpenZoom(activeCarouselIndex)}
+                  onSwipeNext={() => handleCarouselNext()}
+                  onSwipePrev={() => handleCarouselPrev()}
+                />
 
                 {/* Top-Left Primary Fit Badge */}
                 {galleryImages[activeCarouselIndex]?.tagTopLeft && (
@@ -962,6 +914,34 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
               <p className="text-xs sm:text-sm text-neutral-500 mt-0.5">
                 {product.department === 'KIDS' ? 'Kids Boxy Fit T-Shirts' : 'Men Boxy Fit T-Shirts'}
               </p>
+
+              {/* Interactive Rating Summary Link */}
+              {(() => {
+                const count = reviewSummary ? reviewSummary.totalCount : Number(product.reviewsCount || 0);
+                const avg = reviewSummary
+                  ? reviewSummary.averageRating
+                  : count > 0
+                  ? Number(product.rating || 0)
+                  : 0;
+                return (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      document.getElementById('pdp-reviews-section')?.scrollIntoView({ behavior: 'smooth' });
+                    }}
+                    className="mt-2 inline-flex items-center gap-1.5 text-xs text-neutral-700 hover:text-neutral-950 transition cursor-pointer"
+                  >
+                    <Star className={`w-3.5 h-3.5 ${count > 0 ? 'fill-[#e11b23] text-[#e11b23]' : 'text-neutral-400'}`} />
+                    <span className="font-semibold tabular-nums">
+                      {count > 0 ? `${avg.toFixed(1)}` : 'No reviews yet'}
+                    </span>
+                    <span className="text-neutral-400">·</span>
+                    <span className="underline underline-offset-2 text-neutral-600 tabular-nums">
+                      {count > 0 ? `${count} ${count === 1 ? 'Review' : 'Reviews'}` : 'Write a Review'}
+                    </span>
+                  </button>
+                );
+              })()}
 
               <div className="mt-3">
                 <span className="text-xl sm:text-2xl font-bold text-neutral-900">
@@ -1319,7 +1299,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                   <RotateCw className="w-3 h-3" />
                 </div>
                 <p className="text-[11px] text-neutral-600 leading-snug">
-                  This product is eligible for return or exchange under our 30-day return or exchange policy. No questions asked.
+                  This product is eligible for return or exchange under our {contactConfig?.returnWindowDays || 7}-day return or exchange policy. No questions asked.
                 </p>
               </div>
             </div>
@@ -1356,11 +1336,10 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
 
                     <div>
                       <strong className="block text-neutral-900 font-semibold mb-0.5">Manufactured & Sold By:</strong>
-                      <p>TORIWEAR Originals Pvt. Ltd.</p>
-                      <p>Studio Shibuya &amp; Anime Apparel Axis</p>
-                      <p>Mumbai &amp; Tokyo</p>
-                      <p className="text-neutral-900 font-medium">support@toriwear.com</p>
-                      <p>Official Brand Care: +91 98201 45112</p>
+                      <p>{contactConfig?.storeName ? `${contactConfig.storeName} Originals Pvt. Ltd.` : 'TORIWEAR Originals Pvt. Ltd.'}</p>
+                      <p>{contactConfig?.businessAddress || 'Mumbai, Maharashtra, India'}</p>
+                      <p className="text-neutral-900 font-medium">{contactConfig?.supportEmail || 'support@toriwear.com'}</p>
+                      {contactConfig?.phone && <p>Official Brand Care: {contactConfig.phone}</p>}
                     </div>
                   </div>
                 )}
@@ -1400,6 +1379,16 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
 
           </div>
         </div>
+
+        {/* ========================================================== */}
+        {/* 2B. CUSTOMER REVIEWS & FIT CONSENSUS                       */}
+        {/* ========================================================== */}
+        <ProductReviewsSection
+          productId={product.id}
+          productName={product.name}
+          availableSizes={availableSizes}
+          onSummaryChange={(nextSummary) => setReviewSummary(nextSummary)}
+        />
 
         {/* ========================================================== */}
         {/* 3. "Others Also Bought" Carousel Section (Screenshot 3 & 4) */}
@@ -1572,57 +1561,27 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
       )}
 
       {/* ========================================================================= */}
-      {/* 4B. FULLSCREEN ZOOM LIGHTBOX MODAL WITH ULTRA CLEAR DESIGN ZOOM (Snip 5)  */}
+      {/* 4B. FULLSCREEN ZOOM LIGHTBOX MODAL WITH HD ZOOM & TOUCH PINCH/PAN         */}
       {/* ========================================================================= */}
       {isZoomOpen && typeof document !== 'undefined' && createPortal(
-        <div 
+        <div
           style={{ zIndex: 9999 }}
-          className="fixed inset-0 z-[9999] bg-black/92 backdrop-blur-sm flex flex-col items-center justify-between select-none animate-in fade-in duration-200"
+          className="fixed inset-0 z-[9999] bg-black/94 backdrop-blur-sm flex flex-col items-center justify-between select-none animate-in fade-in duration-200"
           onClick={() => setIsZoomOpen(false)}
         >
-          {/* Top Bar with Zoom Controls & Close Button (Screenshot 5) */}
-          <div 
+          {/* Top Bar */}
+          <div
             className="w-full max-w-6xl px-4 py-3 flex items-center justify-between text-white z-20"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Zoom Tool Controls */}
-            <div className="flex items-center gap-2 bg-neutral-900/80 backdrop-blur-md px-3 py-1.5 rounded-full border border-neutral-700 text-xs">
-              <button
-                onClick={() => setZoomScale((s) => Math.max(1, s - 0.4))}
-                className="p-1 hover:text-red-400 transition cursor-pointer"
-                title="Zoom Out (-)"
-              >
-                <ZoomOut className="w-4 h-4" />
-              </button>
+            <span className="px-3 py-1 rounded-full bg-neutral-900/80 border border-neutral-700 text-xs font-mono font-bold text-neutral-200">
+              {zoomImgIndex + 1} / {galleryImages.length}
+            </span>
 
-              <span className="font-mono font-semibold text-neutral-200 min-w-[45px] text-center">
-                {Math.round(zoomScale * 100)}%
-              </span>
-
-              <button
-                onClick={() => setZoomScale((s) => Math.min(3.5, s + 0.4))}
-                className="p-1 hover:text-red-400 transition cursor-pointer"
-                title="Zoom In (+)"
-              >
-                <ZoomIn className="w-4 h-4" />
-              </button>
-
-              <div className="w-[1px] h-3.5 bg-neutral-700 mx-1" />
-
-              <button
-                onClick={() => setZoomScale(1)}
-                className="text-[10px] text-neutral-400 hover:text-white transition cursor-pointer px-1"
-                title="Reset Zoom"
-              >
-                Reset
-              </button>
+            <div className="text-[11px] text-neutral-400 hidden sm:block font-mono">
+              Pinch / scroll to zoom • Drag to pan • Double-tap or hover to inspect print &amp; fabric
             </div>
 
-            <div className="text-[11px] text-neutral-400 hidden sm:block">
-              Click image to toggle zoom • Move mouse to inspect print details &amp; fabric
-            </div>
-
-            {/* Close Button with Circle Border (Exact Screenshot 5) */}
             <button
               onClick={() => setIsZoomOpen(false)}
               className="min-w-[40px] min-h-[40px] rounded-full border border-white/60 bg-black/50 hover:bg-white hover:text-black transition flex items-center justify-center cursor-pointer"
@@ -1634,72 +1593,62 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
           </div>
 
           {/* Central Main Zoom Stage */}
-          <div 
+          <div
             className="relative flex-1 min-h-0 w-full max-w-5xl flex items-center justify-center px-4 py-2 overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Left Circular Navigation Arrow (Screenshot 5) */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setZoomImgIndex((prev) => (prev > 0 ? prev - 1 : galleryImages.length - 1));
-                setZoomScale(1.8);
-              }}
-              className="absolute left-4 sm:left-8 top-1/2 -translate-y-1/2 z-20 w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-white/90 hover:bg-white text-black shadow-xl flex items-center justify-center transition active:scale-95 cursor-pointer"
-              aria-label="Previous picture"
-            >
-              <ChevronLeft className="w-6 h-6" />
-            </button>
+            {galleryImages.length > 1 && (
+              <>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setZoomImgIndex((prev) => (prev > 0 ? prev - 1 : galleryImages.length - 1));
+                  }}
+                  className="absolute left-4 sm:left-8 top-1/2 -translate-y-1/2 z-20 w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-white/90 hover:bg-white text-black shadow-xl flex items-center justify-center transition active:scale-95 cursor-pointer"
+                  aria-label="Previous picture"
+                >
+                  <ChevronLeft className="w-6 h-6" />
+                </button>
 
-            {/* Right Circular Navigation Arrow (Screenshot 5) */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setZoomImgIndex((prev) => (prev < galleryImages.length - 1 ? prev + 1 : 0));
-                setZoomScale(1.8);
-              }}
-              className="absolute right-4 sm:right-8 top-1/2 -translate-y-1/2 z-20 w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-white/90 hover:bg-white text-black shadow-xl flex items-center justify-center transition active:scale-95 cursor-pointer"
-              aria-label="Next picture"
-            >
-              <ChevronRight className="w-6 h-6" />
-            </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setZoomImgIndex((prev) => (prev < galleryImages.length - 1 ? prev + 1 : 0));
+                  }}
+                  className="absolute right-4 sm:right-8 top-1/2 -translate-y-1/2 z-20 w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-white/90 hover:bg-white text-black shadow-xl flex items-center justify-center transition active:scale-95 cursor-pointer"
+                  aria-label="Next picture"
+                >
+                  <ChevronRight className="w-6 h-6" />
+                </button>
+              </>
+            )}
 
-            {/* Zoomable Image Container with Smooth Pan Follow on Cursor */}
-            <div 
-              ref={zoomContainerRef}
-              onMouseMove={handleZoomMouseMove}
-              onMouseEnter={() => setIsHoverZooming(true)}
-              onMouseLeave={() => setIsHoverZooming(false)}
-              onClick={handleToggleZoomScale}
-              className={`relative h-full max-h-[74vh] max-w-full aspect-[3/4] overflow-hidden bg-neutral-950 flex items-center justify-center rounded-xs shadow-2xl ${
-                zoomScale > 1 ? 'cursor-move' : 'cursor-zoom-in'
-              }`}
-            >
-              <img
-                src={galleryImages[zoomImgIndex]?.url}
-                alt={`${product.name} zoom view`}
-                style={{
-                  transformOrigin: `${panPosition.x}% ${panPosition.y}%`,
-                  transform: `scale(${zoomScale})`,
-                  transition: isHoverZooming && zoomScale > 1 ? 'none' : 'transform 0.25s ease-out',
-                }}
-                className="w-full h-full object-contain pointer-events-none select-none"
-              />
-            </div>
+            <ProductZoomViewer
+              src={galleryImages[zoomImgIndex]?.url || ''}
+              alt={`${product.name} zoom view`}
+              className="h-full max-h-[74vh] w-full max-w-3xl aspect-[3/4] bg-neutral-950 rounded-xs shadow-2xl"
+              imageClassName="w-full h-full object-contain"
+              initialScale={1.5}
+              enableHoverMagnify={true}
+              showToolbar={true}
+              onSwipeNext={() =>
+                setZoomImgIndex((prev) => (prev < galleryImages.length - 1 ? prev + 1 : 0))
+              }
+              onSwipePrev={() =>
+                setZoomImgIndex((prev) => (prev > 0 ? prev - 1 : galleryImages.length - 1))
+              }
+            />
           </div>
 
-          {/* Bottom Thumbnail Strip (Screenshot 5) */}
-          <div 
+          {/* Bottom Thumbnail Strip */}
+          <div
             className="w-full bg-white py-3 px-4 flex items-center justify-center gap-2.5 sm:gap-3 overflow-x-auto no-scrollbar z-20"
             onClick={(e) => e.stopPropagation()}
           >
             {galleryImages.map((thumb, idx) => (
               <button
                 key={idx}
-                onClick={() => {
-                  setZoomImgIndex(idx);
-                  setZoomScale(1.8);
-                }}
+                onClick={() => setZoomImgIndex(idx)}
                 className={`relative w-12 h-16 sm:w-14 sm:h-18 rounded-xs overflow-hidden transition cursor-pointer bg-neutral-100 shrink-0 ${
                   zoomImgIndex === idx
                     ? 'border-2 border-black scale-105 shadow-md'
@@ -1714,7 +1663,6 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
               </button>
             ))}
           </div>
-
         </div>,
         document.body
       )}

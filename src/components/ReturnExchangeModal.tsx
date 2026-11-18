@@ -2,10 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   X,
   RotateCcw,
-  Camera,
   Upload,
   CheckCircle2,
-  AlertCircle,
   ChevronRight,
   ArrowLeft,
   Trash2,
@@ -15,15 +13,22 @@ import {
   CreditCard,
   Wallet,
   ShieldCheck,
-  Video,
-  VideoOff,
-  Image as ImageIcon
+  Image as ImageIcon,
+  AlertCircle,
+  Loader2,
 } from 'lucide-react';
-import { OrderDetails } from '../types';
+import {
+  OrderDetails,
+  ReturnRequestRecord,
+  ReturnStatusHistoryEntry,
+} from '../types';
+import { apiClient } from '../services/apiClient';
 
 export interface CustomerReturnRequest {
   id: string;
+  returnNumber?: string;
   orderId: string;
+  orderNumber?: string;
   orderDate?: string;
   type: 'RETURN' | 'EXCHANGE';
   item: {
@@ -39,10 +44,20 @@ export interface CustomerReturnRequest {
     newSize: string;
     newColor?: string;
   };
-  reason: 'Wrong Size' | 'Damaged' | 'Wrong Product' | 'Product Defect' | 'Fabric Quality Issue' | 'Other';
+  reason: string;
   comments?: string;
   photos: string[];
+  proofUrls?: string[];
   refundPreference?: 'WALLET_CREDIT' | 'ORIGINAL_PAYMENT';
+  refundMethod?: string;
+  refundTransactionId?: string | null;
+  refundStatus?: string | null;
+  refundedAmount?: number;
+  pickupCourier?: string | null;
+  pickupAwb?: string | null;
+  pickupScheduledAt?: string | null;
+  rejectionReason?: string | null;
+  statusHistory?: ReturnStatusHistoryEntry[];
   pickupAddress: {
     fullName: string;
     phone: string;
@@ -51,10 +66,68 @@ export interface CustomerReturnRequest {
     state: string;
     pincode: string;
   };
-  status: 'REQUESTED' | 'APPROVED' | 'PICKUP_SCHEDULED' | 'PRODUCT_RECEIVED' | 'QC_PASSED' | 'REFUNDED' | 'EXCHANGED';
+  status: string;
   createdAt: string;
   estimatedPickupDate?: string;
   refundAmount: number;
+}
+
+export function mapServerReturnToCustomerReturn(rec: ReturnRequestRecord): CustomerReturnRequest {
+  const firstItem = rec.items && rec.items.length > 0 ? rec.items[0] : undefined;
+  return {
+    id: rec.id,
+    returnNumber: rec.returnNumber,
+    orderId: rec.orderNumber || rec.orderId,
+    orderNumber: rec.orderNumber,
+    type: rec.requestType === 'EXCHANGE' ? 'EXCHANGE' : 'RETURN',
+    item: {
+      productId: firstItem?.productId,
+      productName: firstItem?.productName || 'TORI-WEAR Apparel',
+      productImage: firstItem?.image || '/assets/toriwear-official-logo.png',
+      size: firstItem?.size || 'L',
+      color: firstItem?.color || 'Standard',
+      price: Number(firstItem?.unitPrice || rec.refundAmount || 0),
+      quantity: Number(firstItem?.quantity || 1),
+    },
+    exchangeDetails: rec.exchangeSize
+      ? { newSize: rec.exchangeSize }
+      : undefined,
+    reason: rec.reason,
+    comments: rec.comments,
+    photos: Array.isArray(rec.proofUrls) ? rec.proofUrls : [],
+    proofUrls: Array.isArray(rec.proofUrls) ? rec.proofUrls : [],
+    refundMethod: rec.refundMethod,
+    refundTransactionId: rec.refundTransactionId || rec.refundId || null,
+    refundStatus: rec.refundStatus || null,
+    refundedAmount: Number(rec.refundedAmount || 0),
+    pickupCourier: rec.pickupCourier || rec.courierPartner || null,
+    pickupAwb: rec.pickupAwb || rec.awbNumber || null,
+    pickupScheduledAt: rec.pickupScheduledAt || null,
+    rejectionReason: rec.rejectionReason || null,
+    statusHistory: Array.isArray(rec.statusHistory) ? rec.statusHistory : [],
+    pickupAddress: rec.pickupAddress || {
+      fullName: rec.customerName,
+      phone: rec.customerPhone,
+      addressLine1: '',
+      city: '',
+      state: '',
+      pincode: '',
+    },
+    status: rec.status,
+    createdAt: new Date(rec.createdAt).toLocaleDateString('en-IN', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+    }),
+    estimatedPickupDate: rec.pickupScheduledAt
+      ? new Date(rec.pickupScheduledAt).toLocaleDateString('en-IN', {
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+        })
+      : undefined,
+    refundAmount: Number(rec.refundAmount || 0),
+  };
 }
 
 interface ReturnExchangeModalProps {
@@ -74,37 +147,64 @@ const REASONS = [
   { id: 'Other', label: 'Other / Change of Mind', description: 'No longer needed or other reason' },
 ] as const;
 
-const AVAILABLE_SIZES = ['S', 'M', 'L', 'XL', '2XL'];
+const AVAILABLE_SIZES = ['S', 'M', 'L', 'XL', 'XXL'];
+const ALLOWED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp']);
+const MAX_PROOF_BYTES = 5 * 1024 * 1024;
+
+interface UploadedProofItem {
+  url: string;
+  filename: string;
+  previewDataUrl: string;
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') resolve(reader.result);
+      else reject(new Error(`Unable to read ${file.name}`));
+    };
+    reader.onerror = () => reject(new Error(`Unable to read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+export function isOrderWithinReturnWindow(order: OrderDetails, returnWindowDays: number): boolean {
+  const statusUpper = String(order.status || '').toUpperCase();
+  if (statusUpper !== 'DELIVERED' && statusUpper !== 'RETURN REQUESTED' && statusUpper !== 'RETURN_REQUESTED') {
+    return false;
+  }
+  const deliveredEntry = [...(order.timeline || [])]
+    .reverse()
+    .find((t) => String(t.status || t.title || '').toUpperCase().includes('DELIVERED'));
+  const rawDate = deliveredEntry?.timestamp || order.date;
+  if (!rawDate) return true;
+  const parsed = new Date(rawDate).getTime();
+  if (!Number.isFinite(parsed)) return true;
+  const deadline = parsed + Math.max(1, returnWindowDays) * 24 * 60 * 60 * 1000;
+  return Date.now() <= deadline;
+}
 
 export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
   isOpen,
   onClose,
   order,
   initialItem,
-  onSuccess
+  onSuccess,
 }) => {
-  // Wizard steps: 1: Type & Item, 2: Reason, 3: Photos (Camera/Upload), 4: Pickup & Refund, 5: Success
   const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
   const [requestType, setRequestType] = useState<'RETURN' | 'EXCHANGE'>('RETURN');
-  
-  // Selected line item
   const [selectedItemIndex, setSelectedItemIndex] = useState<number>(0);
-  
-  // Exchange preference
   const [exchangeSize, setExchangeSize] = useState<string>('L');
   const [exchangeColor, setExchangeColor] = useState<string>('');
-
-  // Reason & comment
   const [reason, setReason] = useState<typeof REASONS[number]['id']>('Wrong Size');
   const [comments, setComments] = useState('');
 
-  // Photos captured/uploaded
-  const [photos, setPhotos] = useState<string[]>([]);
-  const [cameraActive, setCameraActive] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [uploadedProofs, setUploadedProofs] = useState<UploadedProofItem[]>([]);
+  const [isUploadingProof, setIsUploadingProof] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
-  // Refund preference & Pickup address
-  const [refundPreference, setRefundPreference] = useState<'WALLET_CREDIT' | 'ORIGINAL_PAYMENT'>('WALLET_CREDIT');
+  const [refundPreference, setRefundPreference] = useState<'WALLET_CREDIT' | 'ORIGINAL_PAYMENT'>('ORIGINAL_PAYMENT');
   const [pickupAddress, setPickupAddress] = useState({
     fullName: '',
     phone: '',
@@ -114,27 +214,36 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
     pincode: '',
   });
 
-  // Generated return response
+  const [returnWindowDays, setReturnWindowDays] = useState<number>(7);
   const [createdReturn, setCreatedReturn] = useState<CustomerReturnRequest | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // References for live camera & file inputs
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
 
-  // Set default values when modal opens or order changes
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    apiClient.getStoreContact().then((res) => {
+      if (active && res.success && res.data?.returnWindowDays) {
+        setReturnWindowDays(Math.max(1, Number(res.data.returnWindowDays) || 7));
+      }
+    }).catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [isOpen]);
+
   useEffect(() => {
     if (isOpen && order) {
       setStep(1);
       setRequestType('RETURN');
-      setPhotos([]);
+      setUploadedProofs([]);
+      setUploadError(null);
+      setSubmitError(null);
       setComments('');
-      setCameraError(null);
-      stopCameraStream();
+      setCreatedReturn(null);
 
-      // Find item index if initialItem provided
       const items = order.items || [];
       if (initialItem && items.length > 0) {
         const idx = items.findIndex(
@@ -145,33 +254,23 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
         setSelectedItemIndex(0);
       }
 
-      // Default pickup address from order shipping address
       setPickupAddress({
         fullName: order.shippingAddress?.fullName || 'Customer',
         phone: order.shippingAddress?.phone || '',
         addressLine1: order.shippingAddress?.addressLine1 || '',
-        city: order.shippingAddress?.city || 'Visakhapatnam',
-        state: order.shippingAddress?.state || 'Andhra Pradesh',
-        pincode: order.shippingAddress?.pincode || '530018',
+        city: order.shippingAddress?.city || '',
+        state: order.shippingAddress?.state || '',
+        pincode: order.shippingAddress?.pincode || '',
       });
 
-      // Default exchange size to something different from current size
       const currentItem = items[0];
       const currentSize = currentItem?.size || 'L';
-      const altSize = currentSize === 'L' ? 'XL' : 'L';
-      setExchangeSize(altSize);
-      setExchangeColor(currentItem?.color || 'Original Color');
+      setExchangeSize(currentSize === 'L' ? 'XL' : 'L');
+      setExchangeColor(currentItem?.color || '');
+      setRefundPreference(order.paymentMethod === 'cod' ? 'WALLET_CREDIT' : 'ORIGINAL_PAYMENT');
     }
   }, [isOpen, order, initialItem]);
 
-  // Clean up camera on unmount or modal close
-  useEffect(() => {
-    return () => {
-      stopCameraStream();
-    };
-  }, []);
-
-  // Prevent background page scrolling when modal is open
   useEffect(() => {
     if (!isOpen) return;
     const originalOverflow = document.body.style.overflow;
@@ -181,7 +280,6 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
     };
   }, [isOpen]);
 
-  // Capture Escape key specifically for this modal without bubbling to parent account modal
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -194,202 +292,140 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, [isOpen, onClose]);
 
-  const stopCameraStream = () => {
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      mediaStreamRef.current = null;
-    }
-    setCameraActive(false);
-  };
-
   if (!isOpen || !order) return null;
 
   const currentItem = order.items && order.items.length > 0 ? order.items[selectedItemIndex] || order.items[0] : null;
-  const itemPrice = currentItem?.product?.price || order.total || 1199;
+  const itemPrice = currentItem?.product?.price || order.total || 0;
   const itemQty = currentItem?.quantity || 1;
   const refundTotal = itemPrice * itemQty;
 
-  // Handle live webcam start
-  const handleStartLiveCamera = async () => {
-    try {
-      setCameraError(null);
-      stopCameraStream();
+  const isDelivered = String(order.status || '').toUpperCase() === 'DELIVERED';
+  const isWithinWindow = isOrderWithinReturnWindow(order, returnWindowDays);
+  const canInitiateReturn = isDelivered && isWithinWindow;
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      });
-
-      mediaStreamRef.current = stream;
-      setCameraActive(true);
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
-      }
-    } catch (err: any) {
-      console.warn('Live camera stream not available:', err);
-      setCameraError('Direct webcam preview could not be opened. You can still use the "Take Photo with Device Camera" button below.');
-      setCameraActive(false);
-    }
-  };
-
-  // Capture photo from live webcam
-  const handleCaptureLiveSnapshot = () => {
-    if (!videoRef.current) return;
-    try {
-      const video = videoRef.current;
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-        setPhotos((prev) => [...prev, dataUrl]);
-      }
-    } catch (err) {
-      console.error('Snapshot failed', err);
-    }
-  };
-
-  // Handle photo file input (both device camera capture & file gallery)
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
-
-    Array.from(files).forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        if (event.target?.result) {
-          setPhotos((prev) => [...prev, event.target!.result as string]);
-        }
-      };
-      reader.readAsDataURL(file);
-    });
-
-    // Reset input so user can pick the same file or take another photo
     e.target.value = '';
+
+    setUploadError(null);
+    setIsUploadingProof(true);
+
+    try {
+      const selectedFiles = Array.from(files).slice(0, Math.max(0, 6 - uploadedProofs.length));
+      for (const file of selectedFiles) {
+        if (!ALLOWED_IMAGE_MIME_TYPES.has(file.type.toLowerCase())) {
+          setUploadError(`"${file.name}" is not a supported image format. Use PNG, JPG, or WEBP.`);
+          continue;
+        }
+        if (file.size > MAX_PROOF_BYTES) {
+          setUploadError(`"${file.name}" exceeds the 5 MB limit.`);
+          continue;
+        }
+
+        const dataUrl = await readFileAsDataUrl(file);
+        const uploadRes = await apiClient.uploadReturnProof({
+          dataUrl,
+          mimeType: file.type,
+          filename: file.name,
+          orderId: order.orderId,
+        });
+
+        if (!uploadRes.success || !uploadRes.data?.url) {
+          setUploadError(uploadRes.error || `Failed to upload "${file.name}".`);
+          continue;
+        }
+
+        setUploadedProofs((prev) => [
+          ...prev,
+          {
+            url: uploadRes.data!.url,
+            filename: uploadRes.data!.filename,
+            previewDataUrl: dataUrl,
+          },
+        ]);
+      }
+    } catch (err: any) {
+      setUploadError(err?.message || 'Error uploading proof photo.');
+    } finally {
+      setIsUploadingProof(false);
+    }
   };
 
   const handleRemovePhoto = (idx: number) => {
-    setPhotos((prev) => prev.filter((_, i) => i !== idx));
+    setUploadedProofs((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  // Submission handler
-  const handleSubmitReturn = () => {
+  const handleSubmitReturn = async () => {
+    if (!canInitiateReturn) {
+      setSubmitError(`Returns are only eligible within ${returnWindowDays} days of delivery.`);
+      return;
+    }
+
+    setSubmitError(null);
     setIsSubmitting(true);
-    stopCameraStream();
 
-    const returnId = `RET-${Math.floor(100000 + Math.random() * 900000)}`;
-    const now = new Date();
-    const formattedDate = now.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric'
-    });
-
-    const pickupDate = new Date(Date.now() + 48 * 60 * 60 * 1000).toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric'
-    });
-
-    const newReturn: CustomerReturnRequest = {
-      id: returnId,
-      orderId: order.orderId,
-      orderDate: order.date,
-      type: requestType,
-      item: {
-        productName: currentItem?.product?.name || 'Tori Wear Apparel',
-        productImage: currentItem?.product?.images?.[0] || '/assets/toriwear-official-logo.png',
-        size: currentItem?.size || 'L',
-        color: currentItem?.color || 'Standard',
-        price: itemPrice,
-        quantity: itemQty,
-        productId: currentItem?.product?.id,
-      },
-      exchangeDetails: requestType === 'EXCHANGE' ? {
-        newSize: exchangeSize,
-        newColor: exchangeColor,
-      } : undefined,
-      reason,
-      comments: comments.trim() || undefined,
-      photos,
-      refundPreference: requestType === 'RETURN' ? refundPreference : undefined,
-      pickupAddress,
-      status: 'REQUESTED',
-      createdAt: formattedDate,
-      estimatedPickupDate: pickupDate,
-      refundAmount: refundTotal,
-    };
-
-    // 1. Save in local customer returns storage
     try {
-      const stored = localStorage.getItem('toriwear_customer_returns');
-      const list: CustomerReturnRequest[] = stored ? JSON.parse(stored) : [];
-      list.unshift(newReturn);
-      localStorage.setItem('toriwear_customer_returns', JSON.stringify(list));
-    } catch (e) {
-      console.error('Error saving return request', e);
-    }
-
-    // 2. Also sync to admin returnRequests storage so store owners see it in admin panel
-    try {
-      const storedAdmin = localStorage.getItem('returnRequests');
-      const adminList = storedAdmin ? JSON.parse(storedAdmin) : [];
-      adminList.unshift({
-        id: newReturn.id,
-        orderId: newReturn.orderId,
-        orderNumber: newReturn.orderId,
-        customerName: pickupAddress.fullName,
-        customerEmail: order.shippingAddress?.email || 'customer@toriwear.com',
-        customerPhone: pickupAddress.phone,
-        productName: newReturn.item.productName,
-        size: newReturn.item.size,
-        reason: (newReturn.reason === 'Fabric Quality Issue' ? 'Product Defect' : newReturn.reason) as any,
-        status: 'REQUESTED',
-        refundAmount: newReturn.refundAmount,
-        date: newReturn.createdAt,
-        notes: `${newReturn.type} requested. Reason: ${newReturn.reason}. ${newReturn.comments || ''}`
+      const res = await apiClient.createReturnRequest({
+        orderId: order.orderId,
+        requestType,
+        reason,
+        comments: comments.trim() || undefined,
+        proofUrls: uploadedProofs.map((p) => p.url),
+        refundMethod:
+          requestType === 'EXCHANGE'
+            ? 'EXCHANGE'
+            : refundPreference === 'WALLET_CREDIT'
+              ? 'TORI_CREDIT'
+              : order.paymentMethod === 'cod'
+                ? 'BANK_UPI_MANUAL'
+                : 'RAZORPAY',
+        pickupAddress,
+        exchangeProductId: requestType === 'EXCHANGE' ? currentItem?.product?.id : undefined,
+        exchangeSize: requestType === 'EXCHANGE' ? exchangeSize : undefined,
+        items: [
+          {
+            productId: currentItem?.product?.id || '',
+            variantId: (currentItem as any)?.variantId,
+            sku: currentItem?.product?.sku,
+            productName: currentItem?.product?.name || 'TORI-WEAR Apparel',
+            size: currentItem?.size || 'L',
+            color: currentItem?.color || 'Standard',
+            quantity: itemQty,
+            unitPrice: itemPrice,
+            image: currentItem?.product?.images?.[0],
+          },
+        ],
       });
-      localStorage.setItem('returnRequests', JSON.stringify(adminList));
-    } catch (e) {
-      console.error('Error syncing return request to admin storage', e);
-    }
 
-    setTimeout(() => {
-      setIsSubmitting(false);
-      setCreatedReturn(newReturn);
+      if (!res.success || !res.data) {
+        setSubmitError(res.error || 'Could not submit return request. Please review order eligibility.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      const mapped = mapServerReturnToCustomerReturn(res.data);
+      setCreatedReturn(mapped);
       setStep(5);
       if (onSuccess) {
-        onSuccess(newReturn);
+        onSuccess(mapped);
       }
-    }, 700);
+    } catch (err: any) {
+      setSubmitError(err?.message || 'Network failure submitting return request.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
-    <div 
+    <div
       style={{ zIndex: 10000 }}
       className="fixed inset-0 z-[10000] flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-fadeIn"
     >
-      {/* Hidden file inputs for Camera and Gallery */}
-      <input
-        type="file"
-        ref={cameraInputRef}
-        accept="image/*"
-        capture="environment"
-        onChange={handleFileChange}
-        className="hidden"
-      />
       <input
         type="file"
         ref={fileInputRef}
-        accept="image/*"
+        accept="image/png,image/jpeg,image/webp"
         multiple
         onChange={handleFileChange}
         className="hidden"
@@ -412,16 +448,13 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                 </span>
               </div>
               <p className="text-[11px] text-neutral-400 font-mono mt-0.5">
-                Easy 7-day doorstep return & replacement with photo verification
+                Easy {returnWindowDays}-day doorstep return & replacement with photo verification
               </p>
             </div>
           </div>
 
           <button
-            onClick={() => {
-              stopCameraStream();
-              onClose();
-            }}
+            onClick={onClose}
             className="min-w-[40px] min-h-[40px] flex items-center justify-center p-2 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800 transition cursor-pointer"
             aria-label="Close Return/Exchange"
             title="Close (Esc)"
@@ -430,22 +463,20 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
           </button>
         </div>
 
-        {/* Step Progress Indicators (Step 1 to 4) */}
+        {/* Step Progress Indicators */}
         {step < 5 && (
           <div className="px-4 sm:px-6 py-2.5 bg-neutral-900/60 border-b border-neutral-800/80 flex items-center justify-between text-xs font-mono shrink-0">
             {[
               { num: 1, label: 'Type & Item' },
               { num: 2, label: 'Reason' },
-              { num: 3, label: 'Photos / Camera' },
+              { num: 3, label: 'Photo Proof' },
               { num: 4, label: 'Refund & Pickup' },
             ].map((s, idx) => (
               <React.Fragment key={s.num}>
                 <div className="flex items-center gap-1.5">
                   <div
                     className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                      step >= s.num
-                        ? 'bg-red-600 text-white'
-                        : 'bg-neutral-800 text-neutral-500'
+                      step >= s.num ? 'bg-red-600 text-white' : 'bg-neutral-800 text-neutral-500'
                     }`}
                   >
                     {step > s.num ? '✓' : s.num}
@@ -464,14 +495,30 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
           </div>
         )}
 
-        {/* Body Content - Scrollable */}
+        {/* Body Content */}
         <div className="p-4 sm:p-6 overflow-y-auto flex-1 space-y-5">
-          {/* ========================================================
-              STEP 1: REQUEST TYPE & ITEM SELECTION
-             ======================================================== */}
+          {!canInitiateReturn && step < 5 && (
+            <div className="p-4 rounded-xl bg-amber-950/60 border border-amber-700/70 text-amber-200 text-xs font-mono flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold text-white mb-0.5">Return Window / Eligibility Notice</div>
+                {!isDelivered
+                  ? `Returns can only be requested after delivery. Current order status: ${order.status}.`
+                  : `This order is outside our ${returnWindowDays}-day return window from delivery.`}
+              </div>
+            </div>
+          )}
+
+          {submitError && (
+            <div className="p-3.5 rounded-xl bg-red-950/70 border border-red-800 text-red-200 text-xs font-mono flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+              <div className="flex-1">{submitError}</div>
+            </div>
+          )}
+
+          {/* STEP 1 */}
           {step === 1 && (
             <div className="space-y-4">
-              {/* Type Toggle: Return vs Exchange */}
               <div>
                 <label className="block text-xs font-mono font-bold text-neutral-300 uppercase mb-2">
                   Select Action
@@ -494,7 +541,7 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                       {requestType === 'RETURN' && <CheckCircle2 className="w-4 h-4 text-red-400" />}
                     </div>
                     <p className="text-[11px] text-neutral-400 font-mono">
-                      Pickup from doorstep and refund to wallet or source account
+                      Pickup from doorstep and refund via Razorpay or bank payout
                     </p>
                   </button>
 
@@ -521,25 +568,12 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                 </div>
               </div>
 
-              {/* Item Selection */}
               <div>
                 <label className="block text-xs font-mono font-bold text-neutral-300 uppercase mb-2">
                   Select Item to {requestType === 'EXCHANGE' ? 'Exchange' : 'Return'}
                 </label>
                 <div className="space-y-2">
-                  {(order.items && order.items.length > 0 ? order.items : [
-                    {
-                      product: {
-                        name: 'Shadow Monarch Oversized Streetwear Tee',
-                        franchise: 'Solo Leveling',
-                        images: ['/assets/toriwear-official-logo.png'],
-                        price: order.total || 1199,
-                      },
-                      size: 'L',
-                      color: 'Obsidian Black',
-                      quantity: 1,
-                    }
-                  ]).map((item: any, idx: number) => {
+                  {(order.items || []).map((item: any, idx: number) => {
                     const isSelected = selectedItemIndex === idx;
                     const img = item.product?.images?.[0] || '/assets/toriwear-official-logo.png';
 
@@ -569,7 +603,7 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                               {item.product?.name || 'Tori Wear Piece'}
                             </div>
                             <div className="text-[11px] text-neutral-400 font-mono flex items-center gap-2 mt-0.5">
-                              <span className="text-red-400">Current Size: {item.size || 'L'}</span>
+                              <span className="text-red-400">Size: {item.size || 'L'}</span>
                               <span>•</span>
                               <span>Color: {item.color || 'Standard'}</span>
                               <span>•</span>
@@ -580,10 +614,10 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
 
                         <div className="text-right shrink-0">
                           <div className="text-white text-xs font-mono font-bold">
-                            ₹{((item.product?.price || 1199) * (item.quantity || 1)).toLocaleString('en-IN')}
+                            ₹{((item.product?.price || 0) * (item.quantity || 1)).toLocaleString('en-IN')}
                           </div>
                           <div className="text-[10px] text-emerald-400 font-mono mt-0.5">
-                            Delivered
+                            {order.status}
                           </div>
                         </div>
                       </div>
@@ -592,7 +626,6 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                 </div>
               </div>
 
-              {/* If Exchange: Select New Desired Size & Color */}
               {requestType === 'EXCHANGE' && (
                 <div className="p-4 rounded-xl bg-neutral-900/70 border border-neutral-800 space-y-3">
                   <div className="text-xs font-mono font-bold text-blue-400 uppercase flex items-center gap-1.5">
@@ -604,7 +637,7 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                     <label className="block text-[11px] font-mono text-neutral-300 mb-1.5">
                       New Requested Size:
                     </label>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       {AVAILABLE_SIZES.map((sz) => (
                         <button
                           key={sz}
@@ -624,13 +657,13 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
 
                   <div>
                     <label className="block text-[11px] font-mono text-neutral-300 mb-1">
-                      Preferred Color / Style Variant (Optional):
+                      Preferred Color Variant (Optional):
                     </label>
                     <input
                       type="text"
                       value={exchangeColor}
                       onChange={(e) => setExchangeColor(e.target.value)}
-                      placeholder="e.g. Same as original, or Obsidian Black, Cyber Red"
+                      placeholder="e.g. Same as original, or Obsidian Black"
                       className="w-full px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-white text-xs font-mono focus:outline-none focus:border-blue-500"
                     />
                   </div>
@@ -639,9 +672,7 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
             </div>
           )}
 
-          {/* ========================================================
-              STEP 2: REASON SELECTION & COMMENTS
-             ======================================================== */}
+          {/* STEP 2 */}
           {step === 2 && (
             <div className="space-y-4">
               <div>
@@ -663,9 +694,7 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                       >
                         <div
                           className={`w-4 h-4 rounded-full border mt-0.5 flex items-center justify-center shrink-0 ${
-                            isChecked
-                              ? 'border-red-500 bg-red-600'
-                              : 'border-neutral-600 bg-neutral-900'
+                            isChecked ? 'border-red-500 bg-red-600' : 'border-neutral-600 bg-neutral-900'
                           }`}
                         >
                           {isChecked && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
@@ -688,150 +717,75 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                   value={comments}
                   onChange={(e) => setComments(e.target.value)}
                   rows={3}
-                  placeholder="Tell us what went wrong (e.g. chest fit was tighter than size chart, stitching pull near sleeve, etc.)"
+                  placeholder="Describe fit issue, transit damage, or defect details"
                   className="w-full p-3 rounded-xl bg-neutral-950 border border-neutral-800 text-white text-xs font-mono focus:outline-none focus:border-red-500 resize-none"
                 />
               </div>
             </div>
           )}
 
-          {/* ========================================================
-              STEP 3: PHOTO UPLOAD VIA CAMERA & FILE UPLOAD
-             ======================================================== */}
+          {/* STEP 3 */}
           {step === 3 && (
             <div className="space-y-4">
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="text-xs font-mono font-bold text-neutral-300 uppercase">
-                    Item Photo Proof (Camera or Upload)
+                    Item Photo Proof (Secure Upload · Max 5 MB / Photo)
                   </label>
-                  <span className="text-[11px] text-neutral-400 font-mono">
-                    {photos.length} photo{photos.length !== 1 ? 's' : ''} added
+                  <span className="text-[11px] text-neutral-400 font-mono tabular-nums">
+                    {uploadedProofs.length}/6 uploaded
                   </span>
                 </div>
                 <p className="text-[11px] text-neutral-400 font-mono mb-3">
-                  Upload clear photos of the item, tags, or defect area. You can take a live photo using your phone/webcam camera or choose files from your device.
+                  Upload clear PNG, JPG, or WEBP photos of the item, brand tags, or defect. Images are stored privately for QC review only.
                 </p>
 
-                {/* Primary Action Buttons: Device Camera & Gallery Upload */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-                  {/* Take Photo with Device Camera */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      // Trigger native device camera input
-                      if (cameraInputRef.current) {
-                        cameraInputRef.current.click();
-                      }
-                    }}
-                    className="p-3.5 rounded-xl bg-neutral-900 border border-red-500/50 hover:bg-neutral-800/90 text-white transition cursor-pointer flex items-center justify-center gap-2.5 shadow-sm group"
-                  >
-                    <div className="w-8 h-8 rounded-lg bg-red-600/30 text-red-400 flex items-center justify-center group-hover:scale-105 transition">
-                      <Camera className="w-4 h-4" />
-                    </div>
-                    <div className="text-left font-mono">
-                      <div className="text-xs font-bold text-white">Device Camera</div>
-                      <div className="text-[10px] text-neutral-400">Snap directly with camera</div>
-                    </div>
-                  </button>
-
-                  {/* Upload from Gallery / Files */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (fileInputRef.current) {
-                        fileInputRef.current.click();
-                      }
-                    }}
-                    className="p-3.5 rounded-xl bg-neutral-900 border border-neutral-700 hover:bg-neutral-800 text-white transition cursor-pointer flex items-center justify-center gap-2.5 shadow-sm group"
-                  >
-                    <div className="w-8 h-8 rounded-lg bg-neutral-800 text-neutral-300 flex items-center justify-center group-hover:scale-105 transition">
-                      <Upload className="w-4 h-4" />
-                    </div>
-                    <div className="text-left font-mono">
-                      <div className="text-xs font-bold text-white">Choose Files</div>
-                      <div className="text-[10px] text-neutral-400">Upload from photo gallery</div>
-                    </div>
-                  </button>
-                </div>
-
-                {/* Optional Live Webcam Viewfinder */}
-                <div className="p-3.5 rounded-xl bg-neutral-900/60 border border-neutral-800 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-mono font-bold text-neutral-300 flex items-center gap-1.5">
-                      <Video className="w-3.5 h-3.5 text-red-400" />
-                      In-Browser Live Webcam Preview
-                    </span>
-                    {!cameraActive ? (
-                      <button
-                        type="button"
-                        onClick={handleStartLiveCamera}
-                        className="px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-[11px] font-mono font-bold transition cursor-pointer"
-                      >
-                        Start Live Stream
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={stopCameraStream}
-                        className="px-2.5 py-1 rounded bg-red-950 text-red-400 hover:bg-red-900 text-[11px] font-mono font-bold transition cursor-pointer flex items-center gap-1"
-                      >
-                        <VideoOff className="w-3 h-3" />
-                        Stop Stream
-                      </button>
-                    )}
+                {uploadError && (
+                  <div className="mb-3 p-2.5 rounded-lg bg-red-950/70 border border-red-800 text-red-200 text-[11px] font-mono flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                    <span>{uploadError}</span>
                   </div>
+                )}
 
-                  {cameraError && (
-                    <div className="p-2 rounded bg-amber-950/40 border border-amber-800 text-amber-300 text-[11px] font-mono flex items-center gap-1.5">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                      <span>{cameraError}</span>
+                <button
+                  type="button"
+                  disabled={isUploadingProof || uploadedProofs.length >= 6}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full p-4 rounded-xl bg-neutral-900 border border-neutral-700 hover:bg-neutral-800 disabled:opacity-50 text-white transition cursor-pointer flex items-center justify-center gap-3 shadow-sm group"
+                >
+                  <div className="w-9 h-9 rounded-lg bg-neutral-800 text-neutral-200 flex items-center justify-center group-hover:scale-105 transition">
+                    {isUploadingProof ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                  </div>
+                  <div className="text-left font-mono">
+                    <div className="text-xs font-bold text-white">
+                      {isUploadingProof ? 'Uploading Proof Image...' : 'Choose Image Files (PNG, JPG, WEBP)'}
                     </div>
-                  )}
+                    <div className="text-[10px] text-neutral-400">Up to 6 photos • Max 5 MB each</div>
+                  </div>
+                </button>
 
-                  {cameraActive && (
-                    <div className="relative rounded-xl overflow-hidden bg-black aspect-video flex items-center justify-center border border-neutral-800">
-                      <video
-                        ref={videoRef}
-                        className="w-full h-full object-cover"
-                        playsInline
-                        muted
-                      />
-                      <button
-                        type="button"
-                        onClick={handleCaptureLiveSnapshot}
-                        className="absolute bottom-3 px-4 py-2 rounded-full bg-red-600 hover:bg-red-500 text-white font-mono font-bold text-xs shadow-lg flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <Camera className="w-3.5 h-3.5" />
-                        <span>Snap Photo</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                {/* Uploaded / Snapped Photos Preview Gallery */}
                 <div className="mt-4">
-                  <div className="text-xs font-mono font-bold text-neutral-400 mb-2">
-                    Photos Attached ({photos.length})
+                  <div className="text-xs font-mono font-bold text-neutral-400 mb-2 tabular-nums">
+                    Verified Proofs Attached ({uploadedProofs.length})
                   </div>
 
-                  {photos.length === 0 ? (
+                  {uploadedProofs.length === 0 ? (
                     <div className="p-6 rounded-xl border border-dashed border-neutral-800 text-center font-mono">
                       <ImageIcon className="w-8 h-8 text-neutral-600 mx-auto mb-2" />
-                      <div className="text-neutral-400 text-xs font-bold">No photos attached yet</div>
+                      <div className="text-neutral-400 text-xs font-bold">No photos uploaded yet</div>
                       <div className="text-neutral-600 text-[11px] mt-0.5">
-                        Click "Device Camera" or "Choose Files" above to add photo proof
+                        Click "Choose Image Files" above to upload proof for faster QC approval
                       </div>
                     </div>
                   ) : (
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                      {photos.map((photo, pIdx) => (
+                      {uploadedProofs.map((proof, pIdx) => (
                         <div
-                          key={pIdx}
+                          key={proof.filename}
                           className="relative aspect-square rounded-xl overflow-hidden border border-neutral-700 bg-neutral-900 group"
                         >
                           <img
-                            src={photo}
+                            src={proof.previewDataUrl}
                             alt={`Proof photo ${pIdx + 1}`}
                             className="w-full h-full object-cover"
                           />
@@ -843,8 +797,8 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                           >
                             <Trash2 className="w-3 h-3" />
                           </button>
-                          <div className="absolute bottom-1 left-1.5 px-1.5 py-0.5 rounded bg-black/70 text-[9px] font-mono text-neutral-300">
-                            Photo #{pIdx + 1}
+                          <div className="absolute bottom-1 left-1.5 px-1.5 py-0.5 rounded bg-black/75 text-[9px] font-mono text-emerald-300">
+                            Uploaded ✓
                           </div>
                         </div>
                       ))}
@@ -855,44 +809,15 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
             </div>
           )}
 
-          {/* ========================================================
-              STEP 4: REFUND METHOD & PICKUP ADDRESS
-             ======================================================== */}
+          {/* STEP 4 */}
           {step === 4 && (
             <div className="space-y-4 font-mono">
-              {/* Refund Method (Only for Returns) */}
               {requestType === 'RETURN' && (
                 <div>
                   <label className="block text-xs font-bold text-neutral-300 uppercase mb-2">
                     Select Refund Mode
                   </label>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setRefundPreference('WALLET_CREDIT')}
-                      className={`p-3.5 rounded-xl border text-left transition cursor-pointer flex flex-col justify-between ${
-                        refundPreference === 'WALLET_CREDIT'
-                          ? 'bg-emerald-950/40 border-emerald-500/80 ring-1 ring-emerald-500/50'
-                          : 'bg-neutral-900/40 border-neutral-800 hover:border-neutral-700'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-white text-xs font-bold font-sans flex items-center gap-1.5">
-                          <Wallet className="w-4 h-4 text-emerald-400" />
-                          Tori Store Credit + 5% Bonus
-                        </span>
-                        {refundPreference === 'WALLET_CREDIT' && (
-                          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                        )}
-                      </div>
-                      <div className="text-[11px] text-emerald-400 font-bold mt-1">
-                        ₹{(refundTotal * 1.05).toFixed(0)} credited instantly
-                      </div>
-                      <p className="text-[10px] text-neutral-400 mt-1">
-                        Instant credit on courier pickup with extra 5% shopping boost
-                      </p>
-                    </button>
-
                     <button
                       type="button"
                       onClick={() => setRefundPreference('ORIGINAL_PAYMENT')}
@@ -907,22 +832,45 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                           <CreditCard className="w-4 h-4 text-blue-400" />
                           Original Payment Source
                         </span>
-                        {refundPreference === 'ORIGINAL_PAYMENT' && (
-                          <CheckCircle2 className="w-4 h-4 text-neutral-200" />
-                        )}
+                        {refundPreference === 'ORIGINAL_PAYMENT' && <CheckCircle2 className="w-4 h-4 text-neutral-200" />}
                       </div>
                       <div className="text-[11px] text-white font-bold mt-1">
                         ₹{refundTotal.toLocaleString('en-IN')}
                       </div>
                       <p className="text-[10px] text-neutral-400 mt-1">
-                        Refunded to {order.paymentMethod?.toUpperCase() || 'Bank / Card'} within 3-5 days
+                        {order.paymentMethod === 'cod'
+                          ? 'Manual UPI / Bank transfer settlement after warehouse QC'
+                          : 'Refunded via Razorpay to original source upon QC verification'}
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setRefundPreference('WALLET_CREDIT')}
+                      className={`p-3.5 rounded-xl border text-left transition cursor-pointer flex flex-col justify-between ${
+                        refundPreference === 'WALLET_CREDIT'
+                          ? 'bg-emerald-950/40 border-emerald-500/80 ring-1 ring-emerald-500/50'
+                          : 'bg-neutral-900/40 border-neutral-800 hover:border-neutral-700'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-white text-xs font-bold font-sans flex items-center gap-1.5">
+                          <Wallet className="w-4 h-4 text-emerald-400" />
+                          Tori Store Credit / Bank UPI
+                        </span>
+                        {refundPreference === 'WALLET_CREDIT' && <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
+                      </div>
+                      <div className="text-[11px] text-emerald-400 font-bold mt-1">
+                        ₹{refundTotal.toLocaleString('en-IN')}
+                      </div>
+                      <p className="text-[10px] text-neutral-400 mt-1">
+                        Fastest settlement after reverse pickup passes warehouse inspection
                       </p>
                     </button>
                   </div>
                 </div>
               )}
 
-              {/* Doorstep Pickup Address */}
               <div>
                 <label className="block text-xs font-bold text-neutral-300 uppercase mb-2">
                   Doorstep Pickup Address
@@ -991,11 +939,10 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                 </div>
               </div>
 
-              {/* Request Summary Card */}
               <div className="p-3.5 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2 text-xs">
                 <div className="flex items-center justify-between text-neutral-400">
                   <span>Item:</span>
-                  <span className="text-white font-bold truncate max-w-[200px]">
+                  <span className="text-white font-bold truncate max-w-[240px]">
                     {currentItem?.product?.name || 'Tori Wear Piece'} ({currentItem?.size || 'L'})
                   </span>
                 </div>
@@ -1012,12 +959,12 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                   <span className="text-neutral-200">{reason}</span>
                 </div>
                 <div className="flex items-center justify-between text-neutral-400">
-                  <span>Photos Attached:</span>
-                  <span className="text-neutral-200">{photos.length} photo(s)</span>
+                  <span>Uploaded Proof Photos:</span>
+                  <span className="text-neutral-200">{uploadedProofs.length} photo(s)</span>
                 </div>
                 {requestType === 'RETURN' && (
                   <div className="flex items-center justify-between pt-1 border-t border-neutral-800 font-bold">
-                    <span className="text-white">Estimated Refund:</span>
+                    <span className="text-white">Eligible Refund Value:</span>
                     <span className="text-emerald-400">₹{refundTotal.toLocaleString('en-IN')}</span>
                   </div>
                 )}
@@ -1025,21 +972,19 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
             </div>
           )}
 
-          {/* ========================================================
-              STEP 5: CONFIRMATION & SUCCESS SCREEN
-             ======================================================== */}
+          {/* STEP 5 */}
           {step === 5 && createdReturn && (
             <div className="py-4 text-center space-y-4 font-mono">
-              <div className="w-16 h-16 rounded-full bg-emerald-950/80 border border-emerald-600/80 flex items-center justify-center text-emerald-400 mx-auto shadow-lg shadow-emerald-950/60 animate-bounce">
+              <div className="w-16 h-16 rounded-full bg-emerald-950/80 border border-emerald-600/80 flex items-center justify-center text-emerald-400 mx-auto shadow-lg shadow-emerald-950/60">
                 <CheckCircle2 className="w-8 h-8" />
               </div>
 
               <div>
                 <h4 className="text-white text-lg font-bold font-sans">
-                  {createdReturn.type === 'EXCHANGE' ? 'Exchange Request Placed!' : 'Return Request Initiated!'}
+                  {createdReturn.type === 'EXCHANGE' ? 'Exchange Request Submitted!' : 'Return Request Submitted!'}
                 </h4>
                 <div className="text-xs text-neutral-400 mt-1">
-                  Reference Request ID: <span className="text-red-400 font-bold">{createdReturn.id}</span>
+                  Reference Number: <span className="text-red-400 font-bold">{createdReturn.returnNumber || createdReturn.id}</span>
                 </div>
               </div>
 
@@ -1049,20 +994,16 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
                   <span className="text-white font-bold">#{createdReturn.orderId}</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-neutral-400">Scheduled Pickup:</span>
-                  <span className="text-neutral-200">{createdReturn.estimatedPickupDate}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-neutral-400">Pickup Courier:</span>
-                  <span className="text-neutral-200 flex items-center gap-1">
-                    <Truck className="w-3.5 h-3.5 text-blue-400" />
-                    BlueDart Express Reverse Logistics
+                  <span className="text-neutral-400">Request Status:</span>
+                  <span className="px-2 py-0.5 rounded-full bg-amber-950 text-amber-300 border border-amber-800 text-[10px] font-bold">
+                    {createdReturn.status.replace(/_/g, ' ')}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-neutral-400">Current Status:</span>
-                  <span className="px-2 py-0.5 rounded-full bg-amber-950 text-amber-300 border border-amber-800 text-[10px] font-bold">
-                    Pickup Scheduled
+                  <span className="text-neutral-400">Reverse Pickup:</span>
+                  <span className="text-neutral-200 flex items-center gap-1">
+                    <Truck className="w-3.5 h-3.5 text-blue-400" />
+                    Scheduled after review & approval
                   </span>
                 </div>
               </div>
@@ -1070,22 +1011,19 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
               <div className="p-3 rounded-lg bg-neutral-950 border border-neutral-800 text-[11px] text-neutral-400 text-left flex items-start gap-2">
                 <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                 <span>
-                  Please keep the apparel folded in its original polybag with brand tags intact. The pickup agent will scan the barcode on doorstep arrival.
+                  Please keep the apparel folded in its original polybag with brand tags intact. You can track real-time review, pickup AWB, and refund settlement inside Order History.
                 </span>
               </div>
             </div>
           )}
         </div>
 
-        {/* Footer Navigation Buttons */}
+        {/* Footer */}
         <div className="p-4 sm:p-5 border-t border-neutral-800 flex items-center justify-between bg-neutral-950/90 shrink-0">
           {step > 1 && step < 5 ? (
             <button
               type="button"
-              onClick={() => {
-                stopCameraStream();
-                setStep((prev) => (prev - 1) as any);
-              }}
+              onClick={() => setStep((prev) => (prev - 1) as any)}
               className="px-3.5 py-2 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-neutral-300 text-xs font-mono font-medium transition cursor-pointer flex items-center gap-1.5"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
@@ -1098,11 +1036,9 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
           {step < 4 && (
             <button
               type="button"
-              onClick={() => {
-                stopCameraStream();
-                setStep((prev) => (prev + 1) as any);
-              }}
-              className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-mono font-bold transition cursor-pointer flex items-center gap-1.5 shadow-md shadow-red-950/60"
+              disabled={!canInitiateReturn || isUploadingProof}
+              onClick={() => setStep((prev) => (prev + 1) as any)}
+              className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white text-xs font-mono font-bold transition cursor-pointer flex items-center gap-1.5 shadow-md shadow-red-950/60"
             >
               <span>Continue</span>
               <ChevronRight className="w-3.5 h-3.5" />
@@ -1112,7 +1048,7 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
           {step === 4 && (
             <button
               type="button"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !canInitiateReturn}
               onClick={handleSubmitReturn}
               className="px-6 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-mono font-bold transition cursor-pointer flex items-center gap-2 shadow-lg shadow-red-950/60"
             >
@@ -1133,10 +1069,7 @@ export const ReturnExchangeModal: React.FC<ReturnExchangeModalProps> = ({
           {step === 5 && (
             <button
               type="button"
-              onClick={() => {
-                stopCameraStream();
-                onClose();
-              }}
+              onClick={onClose}
               className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-mono font-bold transition cursor-pointer flex items-center justify-center gap-2 shadow-md shadow-emerald-950/60"
             >
               <span>Back to Order History</span>

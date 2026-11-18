@@ -3,13 +3,15 @@ import { useAdmin } from '../AdminDataContext';
 import { FileText, Printer } from 'lucide-react';
 
 export const CatalogView: React.FC = () => {
-  const { products } = useAdmin();
+  const { products, settings } = useAdmin();
 
   const [selectedFranchise, setSelectedFranchise] = useState<string>('ALL');
   const [pricingMode, setPricingMode] = useState<'RETAIL' | 'WHOLESALE' | 'BOTH'>('BOTH');
   const [catalogTitle, setCatalogTitle] = useState('TORIWEAR • THE ANIMATED STREETWEAR UNIVERSE');
   const [seasonSubtitle] = useState('AUTUMN / WINTER 2026 OFFICIAL LINE SHEET & LOOKBOOK');
-  const [contactInfo] = useState('orders@toriwear.com • Mumbai, India • +91 98200 12345');
+  const contactInfo = [settings?.supportEmail || 'support@thetoriwearstore.in', settings?.phone, settings?.businessAddress]
+    .filter(Boolean)
+    .join(' • ');
 
   const filteredProducts = products.filter(p => {
     if (selectedFranchise !== 'ALL' && p.franchise !== selectedFranchise) return false;

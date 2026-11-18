@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, Truck, RotateCcw, Lock, ArrowUp, Sparkles, Globe, Mail, Phone, MapPin, Clock } from 'lucide-react';
 import { InstagramIcon, WhatsAppIcon, FacebookIcon, XTwitterIcon, YouTubeIcon, DiscordIcon } from './SocialIcons';
-import { Department } from '../types';
+import { Department, StoreContactConfig } from '../types';
 import { MEN_WORLDS, KIDS_WORLDS } from '../data/constants';
 import { OfficialToriwearLogo } from './OfficialToriwearLogo';
 import { loadFrontPageCmsData } from '../admin/data/frontPageCmsData';
 import { normalizeSocialUrl, DEFAULT_INSTAGRAM_URL } from '../utils/socialLinks';
+import { apiClient } from '../services/apiClient';
+import { buildWhatsAppHref } from './ContactSupportModal';
 
 interface FooterProps {
   onSelectDepartment: (dept: Department | 'ALL') => void;
@@ -27,14 +29,30 @@ export const Footer: React.FC<FooterProps> = ({
   onOpenContact,
 }) => {
   const [footerCms, setFooterCms] = useState(() => loadFrontPageCmsData().footer);
+  const [contactConfig, setContactConfig] = useState<StoreContactConfig | null>(null);
 
   useEffect(() => {
-    const sync = () => setFooterCms(loadFrontPageCmsData().footer);
-    window.addEventListener('tori-cms-updated', sync);
-    window.addEventListener('storage', sync);
+    let mounted = true;
+    const syncCms = () => setFooterCms(loadFrontPageCmsData().footer);
+    const syncContact = () => {
+      apiClient
+        .getStoreContact()
+        .then((res) => {
+          if (mounted && res.success && res.data) {
+            setContactConfig(res.data);
+          }
+        })
+        .catch(() => {});
+    };
+    syncContact();
+    window.addEventListener('tori-cms-updated', syncCms);
+    window.addEventListener('tori_contact_updated', syncContact);
+    window.addEventListener('storage', syncCms);
     return () => {
-      window.removeEventListener('tori-cms-updated', sync);
-      window.removeEventListener('storage', sync);
+      mounted = false;
+      window.removeEventListener('tori-cms-updated', syncCms);
+      window.removeEventListener('tori_contact_updated', syncContact);
+      window.removeEventListener('storage', syncCms);
     };
   }, []);
 
@@ -64,66 +82,70 @@ export const Footer: React.FC<FooterProps> = ({
                 CONNECT WITH THE SQUAD
               </div>
               <div className="flex flex-wrap items-center gap-2.5">
-                {(footerCms?.socialLinks && footerCms.socialLinks.length > 0
-                  ? footerCms.socialLinks.filter((s) => s.enabled !== false && s.url?.trim())
-                  : [
-                      { platform: 'Instagram', url: 'https://instagram.com/toriwear.apparel', enabled: true },
-                      { platform: 'WhatsApp', url: 'https://wa.me/919876543210', enabled: true },
-                      { platform: 'Facebook', url: 'https://facebook.com/toriwear', enabled: true },
-                      { platform: 'X / Twitter', url: 'https://x.com/toriwear', enabled: true },
-                      { platform: 'YouTube', url: 'https://youtube.com/@toriwear', enabled: true },
-                      { platform: 'Discord', url: 'https://discord.gg/toriwear', enabled: true },
-                    ]
-                ).map((link, idx) => {
-                  const p = (link.platform || '').toLowerCase();
-                  let iconEl = <Globe className="w-4 h-4 group-hover:scale-110 transition-transform" />;
-                  let hoverCls = 'hover:text-white hover:border-neutral-500';
-                  if (p.includes('insta')) {
-                    iconEl = <InstagramIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
-                    hoverCls = 'hover:text-white hover:border-[#FF2028]';
-                  } else if (p.includes('whatsapp') || p.includes('wa')) {
-                    iconEl = <WhatsAppIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
-                    hoverCls = 'hover:text-[#25D366] hover:border-[#25D366]';
-                  } else if (p.includes('facebook') || p === 'fb') {
-                    iconEl = <FacebookIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
-                    hoverCls = 'hover:text-sky-400 hover:border-sky-400';
-                  } else if (p.includes('twitter') || p === 'x' || p.includes('x /')) {
-                    iconEl = <XTwitterIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
-                    hoverCls = 'hover:text-white hover:border-neutral-500';
-                  } else if (p.includes('youtube') || p.includes('yt')) {
-                    iconEl = <YouTubeIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
-                    hoverCls = 'hover:text-[#FF2028] hover:border-[#FF2028]';
-                  } else if (p.includes('discord')) {
-                    iconEl = <DiscordIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
-                    hoverCls = 'hover:text-indigo-400 hover:border-indigo-400';
-                  }
+                {(() => {
+                  const waDirect = buildWhatsAppHref(contactConfig);
+                  const liveChannels =
+                    contactConfig?.channels && contactConfig.channels.length > 0
+                      ? contactConfig.channels
+                          .filter((s) => s.enabled !== false && (s.url?.trim() || (s.platform || '').toLowerCase().includes('whatsapp')))
+                          .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0))
+                      : footerCms?.socialLinks && footerCms.socialLinks.length > 0
+                        ? footerCms.socialLinks.filter((s) => s.enabled !== false && s.url?.trim())
+                        : [];
 
-                  const resolvedHref = p.includes('insta')
-                    ? normalizeSocialUrl(link.url, DEFAULT_INSTAGRAM_URL)
-                    : normalizeSocialUrl(link.url, link.url);
+                  return liveChannels.map((link: any, idx: number) => {
+                    const p = (link.platform || '').toLowerCase();
+                    let iconEl = <Globe className="w-4 h-4 group-hover:scale-110 transition-transform" />;
+                    let hoverCls = 'hover:text-white hover:border-neutral-500';
+                    if (p.includes('insta')) {
+                      iconEl = <InstagramIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
+                      hoverCls = 'hover:text-white hover:border-[#FF2028]';
+                    } else if (p.includes('whatsapp') || p.includes('wa')) {
+                      iconEl = <WhatsAppIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
+                      hoverCls = 'hover:text-[#25D366] hover:border-[#25D366]';
+                    } else if (p.includes('facebook') || p === 'fb') {
+                      iconEl = <FacebookIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
+                      hoverCls = 'hover:text-sky-400 hover:border-sky-400';
+                    } else if (p.includes('twitter') || p === 'x' || p.includes('x /')) {
+                      iconEl = <XTwitterIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
+                      hoverCls = 'hover:text-white hover:border-neutral-500';
+                    } else if (p.includes('youtube') || p.includes('yt')) {
+                      iconEl = <YouTubeIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
+                      hoverCls = 'hover:text-[#FF2028] hover:border-[#FF2028]';
+                    } else if (p.includes('discord')) {
+                      iconEl = <DiscordIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />;
+                      hoverCls = 'hover:text-indigo-400 hover:border-indigo-400';
+                    }
 
-                  return (
-                    <a
-                      key={`${link.platform}-${idx}`}
-                      href={resolvedHref}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className={`w-9 h-9 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:bg-neutral-800 transition group ${hoverCls}`}
-                      aria-label={link.platform}
-                      title={link.platform}
-                    >
-                      {iconEl}
-                    </a>
-                  );
-                })}
+                    const resolvedHref = p.includes('whatsapp') && waDirect
+                      ? waDirect
+                      : p.includes('insta')
+                        ? normalizeSocialUrl(link.url, DEFAULT_INSTAGRAM_URL)
+                        : normalizeSocialUrl(link.url, link.url);
+
+                    if (!resolvedHref) return null;
+
+                    return (
+                      <a
+                        key={`${link.platform}-${idx}`}
+                        href={resolvedHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={`w-9 h-9 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-300 hover:bg-neutral-800 transition group ${hoverCls}`}
+                        aria-label={link.label || link.platform}
+                        title={link.label || link.platform}
+                      >
+                        {iconEl}
+                      </a>
+                    );
+                  });
+                })()}
               </div>
 
               {/* Direct WhatsApp Concierge Link */}
               {(() => {
-                const waSocial = footerCms?.socialLinks?.find((s) => s.enabled !== false && s.platform.toLowerCase().includes('whatsapp') && s.url?.trim());
-                const cleanDigits = (footerCms?.supportPhone || '').replace(/\D/g, '');
-                const waHref = waSocial?.url
-                  || (cleanDigits ? `https://wa.me/${cleanDigits}?text=Hi%20TORIWEAR%20Concierge!%20Need%20quick%20assistance.` : 'https://wa.me/919876543210?text=Hi%20TORIWEAR%20Concierge!%20Need%20quick%20assistance.');
+                const waHref = buildWhatsAppHref(contactConfig);
+                if (!waHref) return null;
                 return (
                   <div className="mt-3">
                     <a
@@ -141,36 +163,45 @@ export const Footer: React.FC<FooterProps> = ({
             </div>
 
             {/* Support Contact & Atelier Info */}
-            {(footerCms?.supportEmail || footerCms?.supportPhone || footerCms?.operatingHours || footerCms?.atelierAddress) && (
-              <div className="pt-2 space-y-1.5 text-[11px] font-mono text-neutral-400">
-                {footerCms?.supportEmail && (
-                  <div className="flex items-center gap-2">
-                    <Mail className="w-3.5 h-3.5 text-[#FF2028] shrink-0" />
-                    <a href={`mailto:${footerCms.supportEmail}`} className="hover:text-white transition truncate">
-                      {footerCms.supportEmail}
-                    </a>
-                  </div>
-                )}
-                {footerCms?.supportPhone && (
-                  <div className="flex items-center gap-2">
-                    <Phone className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    <span>{footerCms.supportPhone}</span>
-                  </div>
-                )}
-                {footerCms?.operatingHours && (
-                  <div className="flex items-center gap-2">
-                    <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                    <span>{footerCms.operatingHours}</span>
-                  </div>
-                )}
-                {footerCms?.atelierAddress && (
-                  <div className="flex items-start gap-2">
-                    <MapPin className="w-3.5 h-3.5 text-sky-400 shrink-0 mt-0.5" />
-                    <span>{footerCms.atelierAddress}</span>
-                  </div>
-                )}
-              </div>
-            )}
+            {(() => {
+              const email = contactConfig?.supportEmail || footerCms?.supportEmail;
+              const phone = contactConfig?.phone || footerCms?.supportPhone;
+              const hours = contactConfig?.operatingHours || footerCms?.operatingHours;
+              const addr = contactConfig?.businessAddress || footerCms?.atelierAddress;
+              if (!email && !phone && !hours && !addr) return null;
+              return (
+                <div className="pt-2 space-y-1.5 text-[11px] font-mono text-neutral-400">
+                  {email && (
+                    <div className="flex items-center gap-2">
+                      <Mail className="w-3.5 h-3.5 text-[#FF2028] shrink-0" />
+                      <a href={`mailto:${email}`} className="hover:text-white transition truncate">
+                        {email}
+                      </a>
+                    </div>
+                  )}
+                  {phone && (
+                    <div className="flex items-center gap-2">
+                      <Phone className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <a href={`tel:${phone.replace(/\s+/g, '')}`} className="hover:text-white transition">
+                        {phone}
+                      </a>
+                    </div>
+                  )}
+                  {hours && (
+                    <div className="flex items-center gap-2">
+                      <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <span>{hours}</span>
+                    </div>
+                  )}
+                  {addr && (
+                    <div className="flex items-start gap-2">
+                      <MapPin className="w-3.5 h-3.5 text-sky-400 shrink-0 mt-0.5" />
+                      <span>{addr}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* In-House Notice */}
             <div className="pt-2 text-[11px] font-mono text-neutral-400 border-l-2 border-[#FF2028] pl-3 py-1">
@@ -343,7 +374,9 @@ export const Footer: React.FC<FooterProps> = ({
           >
             <RotateCcw className="w-5 h-5 text-sky-400 flex-shrink-0 group-hover:scale-110 transition-transform" />
             <div>
-              <div className="text-white font-semibold group-hover:text-sky-300 transition-colors">{footerCms?.trustBadges?.[2]?.title || '7-Day Exchanges'}</div>
+              <div className="text-white font-semibold group-hover:text-sky-300 transition-colors">
+                {footerCms?.trustBadges?.[2]?.title || `${contactConfig?.returnWindowDays || 7}-Day Exchanges`}
+              </div>
               <div className="text-neutral-400 text-[11px]">{footerCms?.trustBadges?.[2]?.subtitle || 'Hassle-free doorstep pickup'}</div>
             </div>
           </div>
