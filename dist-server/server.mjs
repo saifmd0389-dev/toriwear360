@@ -3857,9 +3857,9 @@ var metaCapiService_exports = {};
 __export(metaCapiService_exports, {
   dispatchMetaCapiEvent: () => dispatchMetaCapiEvent
 });
-import crypto14 from "crypto";
+import crypto15 from "crypto";
 function sha256Normalized(value) {
-  return crypto14.createHash("sha256").update(value.trim().toLowerCase()).digest("hex");
+  return crypto15.createHash("sha256").update(value.trim().toLowerCase()).digest("hex");
 }
 async function dispatchMetaCapiEvent(input) {
   try {
@@ -3932,8 +3932,8 @@ var init_metaCapiService = __esm({
 import "dotenv/config";
 import express2 from "express";
 import http from "http";
-import path19 from "path";
-import fs21 from "fs";
+import path21 from "path";
+import fs23 from "fs";
 
 // server/geminiImageService.ts
 import { GoogleGenAI } from "@google/genai";
@@ -6497,7 +6497,7 @@ var AuthStore = class {
         }
         this.sessionsHydratedFromDb = true;
         if (rows.length > 0) {
-          console.log(`[AUTH] Hydrated ${rows.length} persistent admin session(s) from PostgreSQL.`);
+          console.log(`[AUTH] Hydrated ${rows.length} persistent admin session(s) from MySQL.`);
         }
       } catch (err) {
         console.warn("[AUTH] Note hydrating sessions from DB:", err);
@@ -6523,11 +6523,11 @@ var AuthStore = class {
       });
       const envPassword = (process.env.TORI_INITIAL_ADMIN_PASSWORD || process.env.TORI_BOOTSTRAP_ADMIN_PASSWORD || "").trim();
       if (userCount === 0 && envPassword.length >= 8) {
-        console.log("[AUTH] Empty PostgreSQL users table detected. Running initial database seed...");
+        console.log("[AUTH] Empty MySQL users table detected. Running initial database seed...");
         const { runDatabaseSeed: runDatabaseSeed2 } = await Promise.resolve().then(() => (init_seed(), seed_exports));
         const seedRes = await runDatabaseSeed2();
         if (seedRes.success) {
-          console.log("[AUTH] Initial PostgreSQL seed completed.");
+          console.log("[AUTH] Initial MySQL seed completed.");
           return;
         }
       }
@@ -6555,9 +6555,9 @@ var AuthStore = class {
             accountStatus: "ACTIVE"
           }
         });
-        console.log("[AUTH] Bootstrapped Super Admin credential record in PostgreSQL from environment configuration.");
+        console.log("[AUTH] Bootstrapped Super Admin credential record in MySQL from environment configuration.");
       } else if (userCount === 0 && !envPassword) {
-        console.warn('[AUTH] PostgreSQL users table is empty and TORI_INITIAL_ADMIN_PASSWORD is not set. Run "npm run seed" with TORI_INITIAL_ADMIN_PASSWORD or set it in environment variables.');
+        console.warn('[AUTH] MySQL users table is empty and TORI_INITIAL_ADMIN_PASSWORD is not set. Run "npm run seed" with TORI_INITIAL_ADMIN_PASSWORD or set it in environment variables.');
       }
     } catch (err) {
       console.warn("[AUTH] Production bootstrap check note:", err?.message || err);
@@ -6602,7 +6602,7 @@ var AuthStore = class {
         }
       }
     } catch (err) {
-      console.warn("[AUTH] Note loading credential from PostgreSQL:", err);
+      console.warn("[AUTH] Note loading credential from MySQL:", err);
     }
     if (!cred?.passwordHash && userId === "usr-saif") {
       const envPassword = (process.env.TORI_BOOTSTRAP_ADMIN_PASSWORD || process.env.TORI_INITIAL_ADMIN_PASSWORD || "").trim();
@@ -6824,7 +6824,7 @@ var AuthStore = class {
         }
       }
     } catch (err) {
-      console.warn("[AUTH] Note looking up user in PostgreSQL:", err);
+      console.warn("[AUTH] Note looking up user in MySQL:", err);
     }
     return void 0;
   }
@@ -7447,7 +7447,7 @@ var AuthStore = class {
           createdAt: new Date(now)
         }
       }).catch((err) => {
-        console.warn("[AUTH] Error persisting admin session to PostgreSQL:", err?.message || err);
+        console.warn("[AUTH] Error persisting admin session to MySQL:", err?.message || err);
       });
     }
     return { token, sessionId };
@@ -7749,7 +7749,7 @@ var AuthStore = class {
           })
         ]);
       } catch (err) {
-        console.warn("[AUTH] Error updating password in PostgreSQL:", err);
+        console.warn("[AUTH] Error updating password in MySQL:", err);
       }
     }
     this.revokeAllUserSessions(record.userId);
@@ -7887,7 +7887,7 @@ var AuthStore = class {
           }
         });
       } catch (err) {
-        console.warn("[AUTH] Error updating password in PostgreSQL:", err);
+        console.warn("[AUTH] Error updating password in MySQL:", err);
       }
     }
     this.revokeAllUserSessions(userId);
@@ -8629,7 +8629,7 @@ var ProductRepository = class {
           }
         }
       } catch (err) {
-        console.error("[REPO] Error persisting product to PostgreSQL Prisma:", err);
+        console.error("[REPO] Error persisting product to MySQL Prisma:", err);
       }
     }
     this.persistCustomProductsToFile();
@@ -18989,7 +18989,7 @@ var ShippingService = class {
   }
   /**
    * Process authenticated Shiprocket tracking webhook events.
-   * Enforces fail-closed webhook token verification, PostgreSQL-backed deduplication, cancellation sync, and automated RTO restock.
+   * Enforces fail-closed webhook token verification, MySQL-backed deduplication, cancellation sync, and automated RTO restock.
    */
   async processShiprocketWebhook(tokenHeader, payload) {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
@@ -20393,7 +20393,20 @@ var ReturnService = class {
       if (!order) {
         return { success: false, error: "Associated order not found." };
       }
-      const refundRupees = input.amount && Number(input.amount) > 0 ? Math.min(Number(input.amount), ret.refundAmount || order.total) : ret.refundAmount || order.total;
+      const maxEligibleRefund = ret.refundAmount || order.total;
+      if (input.amount !== void 0) {
+        const requestedAmount = Number(input.amount);
+        if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+          return { success: false, error: "Refund amount must be greater than \u20B90." };
+        }
+        if (requestedAmount > maxEligibleRefund) {
+          return {
+            success: false,
+            error: `Refund amount \u20B9${requestedAmount} exceeds maximum eligible return amount \u20B9${maxEligibleRefund}.`
+          };
+        }
+      }
+      const refundRupees = input.amount && Number(input.amount) > 0 ? Number(input.amount) : maxEligibleRefund;
       const method = input.method || (order.paymentMethod?.toUpperCase() === "COD" ? "BANK_UPI_MANUAL" : "RAZORPAY");
       const nowIso = (/* @__PURE__ */ new Date()).toISOString();
       if (method === "RAZORPAY") {
@@ -21276,21 +21289,6 @@ apiRouter.post("/v1/customers/auth/firebase", async (req, res) => {
       lastActiveAt: nowIso,
       createdAt: nowIso
     });
-    const prisma2 = getPrismaClient();
-    if (prisma2?.session) {
-      await prisma2.session.create({
-        data: {
-          token: sessionToken,
-          customerId: savedCustomer.id,
-          ipAddress: (req.ip || req.socket.remoteAddress || "127.0.0.1").replace("::ffff:", ""),
-          userAgent: String(req.headers["user-agent"] || "").slice(0, 255),
-          expiresAt,
-          isValid: true
-        }
-      }).catch((err) => {
-        console.warn("[CustomerAuth] MySQL session insert skipped (disk fallback active):", err?.message || err);
-      });
-    }
     return res.json({
       success: true,
       sessionToken,
@@ -23729,9 +23727,986 @@ financeRouter.post("/reset", requireFinanceAccess("delete"), async (req, res) =>
 // server/routes/cmsRouter.ts
 init_cmsRepository();
 import express, { Router as Router4 } from "express";
+import fs21 from "fs";
+import path19 from "path";
+import crypto16 from "crypto";
+
+// server/services/storage/imageOptimizer.ts
+import sharp from "sharp";
+var DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+var DEFAULT_REGULAR_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+var DEFAULT_MAX_DIMENSION = 2560;
+var DEFAULT_WEBP_QUALITY = 82;
+var MAX_INPUT_PIXELS = 64e6;
+var ImageValidationError = class extends Error {
+  constructor(message, statusCode = 400, code = "INVALID_IMAGE") {
+    super(message);
+    this.name = "ImageValidationError";
+    this.statusCode = statusCode;
+    this.code = code;
+  }
+};
+var SUPPORTED_RASTER_FORMATS = /* @__PURE__ */ new Set(["jpeg", "png", "webp", "avif", "gif"]);
+function getConfiguredMaxUploadBytes(fallback = DEFAULT_MAX_UPLOAD_BYTES) {
+  const raw = Number(process.env.MAX_IMAGE_UPLOAD_BYTES);
+  if (Number.isFinite(raw) && raw >= 1024 * 1024 && raw <= 100 * 1024 * 1024) {
+    return Math.floor(raw);
+  }
+  return fallback;
+}
+function isLikelySvgBuffer(buffer, filename, mimeType) {
+  const mimeLower = String(mimeType || "").toLowerCase();
+  const extLower = String(filename || "").toLowerCase();
+  const headText = buffer.subarray(0, Math.min(buffer.length, 4096)).toString("utf8").trimStart();
+  const hasSvgTag = /<svg[\s>]/i.test(headText);
+  if (hasSvgTag) return true;
+  if (mimeLower.includes("svg") || extLower.endsWith(".svg")) {
+    return /<svg[\s>]/i.test(buffer.toString("utf8"));
+  }
+  return false;
+}
+function validateSafeSvg(buffer) {
+  if (buffer.includes(0)) {
+    throw new ImageValidationError("Uploaded SVG file contains invalid binary data.", 400, "INVALID_SVG");
+  }
+  const text = buffer.toString("utf8");
+  if (!/<svg[\s>]/i.test(text) || !/<\/svg>/i.test(text)) {
+    throw new ImageValidationError("Uploaded SVG file is malformed or incomplete.", 400, "INVALID_SVG");
+  }
+  if (/<script[\s>]/i.test(text) || /javascript\s*:/i.test(text) || /\bon[a-z]+\s*=/i.test(text) || /<foreignObject[\s>]/i.test(text)) {
+    throw new ImageValidationError(
+      "Uploaded SVG contains disallowed active scripting elements.",
+      400,
+      "UNSAFE_SVG"
+    );
+  }
+}
+async function optimizeImageForStorage(inputBuffer, options = {}) {
+  if (!Buffer.isBuffer(inputBuffer) || inputBuffer.length === 0) {
+    throw new ImageValidationError("Uploaded image file is empty.", 400, "EMPTY_IMAGE");
+  }
+  const maxBytes = options.maxBytes ?? getConfiguredMaxUploadBytes();
+  if (inputBuffer.length > maxBytes) {
+    const maxMb = (maxBytes / (1024 * 1024)).toFixed(0);
+    throw new ImageValidationError(
+      `Image size exceeds the maximum allowed limit of ${maxMb} MB.`,
+      413,
+      "IMAGE_TOO_LARGE"
+    );
+  }
+  const originalSizeBytes = inputBuffer.length;
+  if (isLikelySvgBuffer(inputBuffer, options.filename, options.mimeType)) {
+    validateSafeSvg(inputBuffer);
+    return {
+      buffer: inputBuffer,
+      contentType: "image/svg+xml",
+      extension: "svg",
+      originalSizeBytes,
+      optimizedSizeBytes: inputBuffer.length,
+      optimized: false,
+      preservedOriginal: true,
+      sourceFormat: "svg"
+    };
+  }
+  let metadata;
+  try {
+    metadata = await sharp(inputBuffer, {
+      animated: true,
+      limitInputPixels: MAX_INPUT_PIXELS
+    }).metadata();
+  } catch {
+    throw new ImageValidationError(
+      "Unsupported or corrupted image file. Allowed formats: JPEG, PNG, WebP, AVIF, GIF, SVG.",
+      400,
+      "UNSUPPORTED_IMAGE"
+    );
+  }
+  const detectedFormat = String(metadata.format || "").toLowerCase();
+  if (!SUPPORTED_RASTER_FORMATS.has(detectedFormat)) {
+    throw new ImageValidationError(
+      `Unsupported image format "${detectedFormat || "unknown"}". Allowed formats: JPEG, PNG, WebP, AVIF, GIF, SVG.`,
+      400,
+      "UNSUPPORTED_IMAGE"
+    );
+  }
+  if (detectedFormat === "gif" && (metadata.pages ?? 1) > 1) {
+    return {
+      buffer: inputBuffer,
+      contentType: "image/gif",
+      extension: "gif",
+      originalSizeBytes,
+      optimizedSizeBytes: inputBuffer.length,
+      width: metadata.width,
+      height: metadata.pageHeight || metadata.height,
+      optimized: false,
+      preservedOriginal: true,
+      sourceFormat: "gif"
+    };
+  }
+  const maxWidth = options.maxWidth ?? DEFAULT_MAX_DIMENSION;
+  const maxHeight = options.maxHeight ?? DEFAULT_MAX_DIMENSION;
+  const quality = options.webpQuality ?? DEFAULT_WEBP_QUALITY;
+  try {
+    const pipeline = sharp(inputBuffer, {
+      limitInputPixels: MAX_INPUT_PIXELS
+    }).rotate().resize({
+      width: maxWidth,
+      height: maxHeight,
+      fit: "inside",
+      withoutEnlargement: true
+    }).webp({
+      quality,
+      effort: 4
+    });
+    const { data, info } = await pipeline.toBuffer({ resolveWithObject: true });
+    return {
+      buffer: data,
+      contentType: "image/webp",
+      extension: "webp",
+      originalSizeBytes,
+      optimizedSizeBytes: data.length,
+      width: info.width,
+      height: info.height,
+      optimized: true,
+      preservedOriginal: false,
+      sourceFormat: detectedFormat
+    };
+  } catch (err) {
+    throw new ImageValidationError(
+      err?.message ? `Failed to process image: ${err.message}` : "Failed to process uploaded image.",
+      400,
+      "IMAGE_PROCESSING_FAILED"
+    );
+  }
+}
+
+// server/services/storage/storageAdapter.ts
 import fs19 from "fs";
 import path17 from "path";
-import crypto15 from "crypto";
+import { Storage } from "@google-cloud/storage";
+var IMMUTABLE_IMAGE_CACHE_CONTROL = "public, max-age=31536000, immutable";
+function sanitizeRelativeStoragePath(destinationPath) {
+  const normalized = String(destinationPath || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const segments = normalized.split("/").filter((seg) => seg && seg !== "." && seg !== "..");
+  if (segments.length === 0) {
+    throw new Error("Invalid destination storage path.");
+  }
+  return segments.join("/");
+}
+function guessContentTypeFromPath(filePath) {
+  const ext = path17.extname(filePath).toLowerCase();
+  switch (ext) {
+    case ".webp":
+      return "image/webp";
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".svg":
+      return "image/svg+xml";
+    case ".avif":
+      return "image/avif";
+    default:
+      return "application/octet-stream";
+  }
+}
+var LocalStorageAdapter = class {
+  constructor(baseDir, publicPrefix = "/generated-assets") {
+    this.providerName = "local";
+    this.baseDir = path17.resolve(baseDir || path17.resolve(process.cwd(), "public", "generated-assets"));
+    this.publicPrefix = publicPrefix.replace(/\/+$/, "");
+    if (!fs19.existsSync(this.baseDir)) {
+      fs19.mkdirSync(this.baseDir, { recursive: true });
+    }
+  }
+  resolveSafeFullPath(destinationPath) {
+    const cleanRelative = sanitizeRelativeStoragePath(destinationPath);
+    const fullPath = path17.resolve(this.baseDir, cleanRelative);
+    if (fullPath !== this.baseDir && !fullPath.startsWith(`${this.baseDir}${path17.sep}`)) {
+      throw new Error("Path traversal rejected by local storage adapter.");
+    }
+    return { cleanRelative, fullPath };
+  }
+  getConfigStatus() {
+    return {
+      provider: "local",
+      configured: true,
+      publicBaseUrl: this.publicPrefix
+    };
+  }
+  async uploadFile(buffer, destinationPath, contentType, _options) {
+    try {
+      const { cleanRelative, fullPath } = this.resolveSafeFullPath(destinationPath);
+      const parentDir = path17.dirname(fullPath);
+      if (!fs19.existsSync(parentDir)) {
+        fs19.mkdirSync(parentDir, { recursive: true });
+      }
+      const tmpPath = `${fullPath}.tmp-${process.pid}-${Date.now()}`;
+      fs19.writeFileSync(tmpPath, buffer);
+      fs19.renameSync(tmpPath, fullPath);
+      const url = this.getFileUrl(cleanRelative);
+      return {
+        success: true,
+        url,
+        destinationPath: cleanRelative,
+        sizeBytes: buffer.length,
+        contentType: contentType || guessContentTypeFromPath(cleanRelative),
+        provider: "local"
+      };
+    } catch (err) {
+      console.error("[STORAGE:LOCAL] Failed to write uploaded file:", err?.message || err);
+      return {
+        success: false,
+        url: "",
+        destinationPath,
+        provider: "local",
+        statusCode: 500,
+        error: "Failed to save uploaded image to local storage."
+      };
+    }
+  }
+  async getFile(destinationPath) {
+    try {
+      const { cleanRelative, fullPath } = this.resolveSafeFullPath(destinationPath);
+      if (!fs19.existsSync(fullPath)) {
+        return { success: false, error: "File not found in local storage." };
+      }
+      const buffer = fs19.readFileSync(fullPath);
+      return {
+        success: true,
+        buffer,
+        contentType: guessContentTypeFromPath(cleanRelative),
+        sizeBytes: buffer.length
+      };
+    } catch (err) {
+      return {
+        success: false,
+        error: err?.message || "Failed to read file from local storage."
+      };
+    }
+  }
+  async deleteFile(destinationPath) {
+    try {
+      const { fullPath } = this.resolveSafeFullPath(destinationPath);
+      if (fs19.existsSync(fullPath)) {
+        fs19.unlinkSync(fullPath);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+  getFileUrl(destinationPath) {
+    const cleanRelative = sanitizeRelativeStoragePath(destinationPath);
+    const encoded = cleanRelative.split("/").map(encodeURIComponent).join("/");
+    return `${this.publicPrefix}/${encoded}`;
+  }
+  async fileExists(destinationPath) {
+    try {
+      const { fullPath } = this.resolveSafeFullPath(destinationPath);
+      return fs19.existsSync(fullPath);
+    } catch {
+      return false;
+    }
+  }
+};
+function isPlaceholderValue(value) {
+  const lower = value.trim().toLowerCase();
+  return !lower || lower.includes("your_") || lower.includes("your-") || lower.includes("<from-") || lower.includes("placeholder") || lower === "changeme";
+}
+function parseServiceAccountJson(raw) {
+  const trimmed = raw.trim();
+  const tryParse = (input) => JSON.parse(input);
+  try {
+    return tryParse(trimmed);
+  } catch {
+    const decoded = Buffer.from(trimmed, "base64").toString("utf8").trim();
+    return tryParse(decoded);
+  }
+}
+function resolveGcsConfiguration(overrideBucketName) {
+  const bucketName = String(overrideBucketName || process.env.GCS_BUCKET_NAME || "").trim();
+  const envProjectId = String(process.env.GCS_PROJECT_ID || "").trim();
+  const rawJson = String(process.env.GCS_SERVICE_ACCOUNT_JSON || "").trim();
+  const clientEmail = String(process.env.GCS_CLIENT_EMAIL || "").trim();
+  const privateKeyRaw = String(process.env.GCS_PRIVATE_KEY || "").trim();
+  const keyFilename = String(process.env.GOOGLE_APPLICATION_CREDENTIALS || "").trim();
+  const rawPublicPrefix = String(process.env.GCS_PUBLIC_URL_PREFIX || "").trim().replace(/\/+$/, "");
+  const defaultPublicBase = bucketName ? `https://storage.googleapis.com/${bucketName}` : "";
+  const publicBaseUrl = rawPublicPrefix && !isPlaceholderValue(rawPublicPrefix) ? rawPublicPrefix : defaultPublicBase;
+  if (!bucketName || isPlaceholderValue(bucketName)) {
+    return {
+      valid: false,
+      bucketName: "",
+      publicBaseUrl: "",
+      error: "Cloud storage is not properly configured: GCS_BUCKET_NAME is missing."
+    };
+  }
+  if (!/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
+    return {
+      valid: false,
+      bucketName,
+      publicBaseUrl,
+      error: "Cloud storage is not properly configured: GCS_BUCKET_NAME format is invalid."
+    };
+  }
+  if (rawPublicPrefix && !isPlaceholderValue(rawPublicPrefix) && !/^https:\/\/.+/i.test(rawPublicPrefix)) {
+    return {
+      valid: false,
+      bucketName,
+      publicBaseUrl,
+      error: "Cloud storage is not properly configured: GCS_PUBLIC_URL_PREFIX must use HTTPS."
+    };
+  }
+  if (rawJson && !isPlaceholderValue(rawJson)) {
+    try {
+      const parsed = parseServiceAccountJson(rawJson);
+      const parsedEmail = String(parsed.client_email || "").trim();
+      const parsedKey = String(parsed.private_key || "").replace(/\\n/g, "\n").trim();
+      const projectId = (!isPlaceholderValue(envProjectId) ? envProjectId : "") || String(parsed.project_id || "").trim();
+      if (!parsedEmail || !parsedKey || !parsedKey.includes("BEGIN")) {
+        return {
+          valid: false,
+          bucketName,
+          publicBaseUrl,
+          error: "Cloud storage is not properly configured: GCS_SERVICE_ACCOUNT_JSON is missing valid service account credentials."
+        };
+      }
+      return {
+        valid: true,
+        bucketName,
+        projectId: projectId || void 0,
+        publicBaseUrl,
+        credentials: {
+          client_email: parsedEmail,
+          private_key: parsedKey
+        }
+      };
+    } catch {
+      return {
+        valid: false,
+        bucketName,
+        publicBaseUrl,
+        error: "Cloud storage is not properly configured: GCS_SERVICE_ACCOUNT_JSON could not be parsed as valid JSON."
+      };
+    }
+  }
+  if (clientEmail && privateKeyRaw && !isPlaceholderValue(clientEmail) && !isPlaceholderValue(privateKeyRaw)) {
+    const normalizedKey = privateKeyRaw.replace(/\\n/g, "\n").trim();
+    if (!normalizedKey.includes("BEGIN")) {
+      return {
+        valid: false,
+        bucketName,
+        publicBaseUrl,
+        error: "Cloud storage is not properly configured: GCS_PRIVATE_KEY is invalid."
+      };
+    }
+    return {
+      valid: true,
+      bucketName,
+      projectId: !isPlaceholderValue(envProjectId) ? envProjectId : void 0,
+      publicBaseUrl,
+      credentials: {
+        client_email: clientEmail,
+        private_key: normalizedKey
+      }
+    };
+  }
+  if (keyFilename && !isPlaceholderValue(keyFilename)) {
+    if (!fs19.existsSync(keyFilename)) {
+      return {
+        valid: false,
+        bucketName,
+        publicBaseUrl,
+        error: "Cloud storage is not properly configured: credentials file referenced by GOOGLE_APPLICATION_CREDENTIALS was not found."
+      };
+    }
+    return {
+      valid: true,
+      bucketName,
+      projectId: !isPlaceholderValue(envProjectId) ? envProjectId : void 0,
+      publicBaseUrl,
+      keyFilename
+    };
+  }
+  return {
+    valid: false,
+    bucketName,
+    publicBaseUrl,
+    error: "Cloud storage is not properly configured: provide GCS_SERVICE_ACCOUNT_JSON (or GCS_CLIENT_EMAIL and GCS_PRIVATE_KEY)."
+  };
+}
+var warnedDeprecatedGcsMakePublic = false;
+var GoogleCloudStorageAdapter = class {
+  constructor(bucketNameOrOptions) {
+    this.providerName = "gcs";
+    this.storageClient = null;
+    this.bucket = null;
+    if (String(process.env.GCS_MAKE_PUBLIC || "").trim() && !warnedDeprecatedGcsMakePublic) {
+      warnedDeprecatedGcsMakePublic = true;
+      console.warn(
+        "[STORAGE:GCS] Ignoring deprecated GCS_MAKE_PUBLIC setting. Configure Uniform Bucket-Level Access and bucket-level IAM on your storefront media bucket instead."
+      );
+    }
+    const opts = typeof bucketNameOrOptions === "string" ? { bucketName: bucketNameOrOptions } : bucketNameOrOptions || {};
+    if (opts.storageClient) {
+      const bucketName = String(opts.bucketName || process.env.GCS_BUCKET_NAME || "").trim();
+      const publicBaseUrl = (opts.publicBaseUrl || (bucketName ? `https://storage.googleapis.com/${bucketName}` : "")).replace(/\/+$/, "");
+      if (!bucketName || !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
+        this.config = {
+          valid: false,
+          bucketName,
+          publicBaseUrl,
+          error: "Cloud storage is not properly configured: GCS_BUCKET_NAME is missing or invalid."
+        };
+      } else {
+        this.config = {
+          valid: true,
+          bucketName,
+          publicBaseUrl
+        };
+        this.storageClient = opts.storageClient;
+        this.bucket = this.storageClient.bucket(bucketName);
+      }
+      return;
+    }
+    this.config = resolveGcsConfiguration(opts.bucketName);
+    if (this.config.valid) {
+      const storageOpts = {};
+      if (this.config.projectId) storageOpts.projectId = this.config.projectId;
+      if (this.config.credentials) storageOpts.credentials = this.config.credentials;
+      if (this.config.keyFilename) storageOpts.keyFilename = this.config.keyFilename;
+      this.storageClient = new Storage(storageOpts);
+      this.bucket = this.storageClient.bucket(this.config.bucketName);
+    }
+  }
+  getConfigStatus() {
+    return {
+      provider: "gcs",
+      configured: this.config.valid,
+      bucketName: this.config.bucketName || void 0,
+      publicBaseUrl: this.config.publicBaseUrl || void 0,
+      error: this.config.error
+    };
+  }
+  async verifyBucketAccess() {
+    if (!this.config.valid || !this.bucket) {
+      return { ok: false, error: this.config.error || "Google Cloud Storage is not configured." };
+    }
+    try {
+      const [exists] = await this.bucket.exists();
+      if (!exists) {
+        return { ok: false, error: "Configured Google Cloud Storage bucket does not exist or is unreachable." };
+      }
+      return { ok: true };
+    } catch (err) {
+      console.error("[STORAGE:GCS] Bucket verification failed:", err?.message || err);
+      return {
+        ok: false,
+        error: "Unable to verify Google Cloud Storage bucket access. Check credentials and bucket IAM permissions."
+      };
+    }
+  }
+  async uploadFile(buffer, destinationPath, contentType = "application/octet-stream", options) {
+    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+    if (!this.config.valid || !this.bucket) {
+      return {
+        success: false,
+        url: "",
+        destinationPath: cleanPath,
+        provider: "gcs",
+        statusCode: 503,
+        error: this.config.error || "Cloud storage is not properly configured."
+      };
+    }
+    try {
+      const file = this.bucket.file(cleanPath);
+      const cacheControl = options?.cacheControl || IMMUTABLE_IMAGE_CACHE_CONTROL;
+      await file.save(buffer, {
+        resumable: false,
+        validation: "crc32c",
+        contentType,
+        metadata: {
+          contentType,
+          cacheControl
+        }
+      });
+      const [exists] = await file.exists();
+      if (!exists) {
+        throw new Error("Uploaded object could not be verified in Google Cloud Storage.");
+      }
+      return {
+        success: true,
+        url: this.getFileUrl(cleanPath),
+        destinationPath: cleanPath,
+        sizeBytes: buffer.length,
+        contentType,
+        provider: "gcs"
+      };
+    } catch (err) {
+      const errCode = Number(err?.code);
+      console.error("[STORAGE:GCS] Upload failed:", err?.code || "", err?.message || err);
+      if (errCode === 403 || errCode === 401) {
+        return {
+          success: false,
+          url: "",
+          destinationPath: cleanPath,
+          provider: "gcs",
+          statusCode: 403,
+          error: "Cloud storage permission denied. Verify service-account IAM roles on the configured Google Cloud Storage bucket."
+        };
+      }
+      return {
+        success: false,
+        url: "",
+        destinationPath: cleanPath,
+        provider: "gcs",
+        statusCode: 502,
+        error: "Cloud storage upload failed. Verify Google Cloud Storage credentials, bucket permissions, and network availability."
+      };
+    }
+  }
+  async getFile(destinationPath) {
+    if (!this.config.valid || !this.bucket) {
+      return {
+        success: false,
+        statusCode: 503,
+        error: this.config.error || "Cloud storage is not properly configured."
+      };
+    }
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      const file = this.bucket.file(cleanPath);
+      const [[buffer], [metadata]] = await Promise.all([file.download(), file.getMetadata()]);
+      return {
+        success: true,
+        buffer,
+        contentType: metadata?.contentType || guessContentTypeFromPath(cleanPath),
+        sizeBytes: buffer.length,
+        statusCode: 200
+      };
+    } catch (err) {
+      const errCode = Number(err?.code);
+      console.error("[STORAGE:GCS] File retrieval failed:", err?.code || "", err?.message || err);
+      if (errCode === 404) {
+        return {
+          success: false,
+          statusCode: 404,
+          error: "File not found in cloud storage."
+        };
+      }
+      if (errCode === 403 || errCode === 401) {
+        return {
+          success: false,
+          statusCode: 403,
+          error: "Cloud storage permission denied while retrieving file."
+        };
+      }
+      return {
+        success: false,
+        statusCode: 502,
+        error: "Failed to retrieve file from cloud storage."
+      };
+    }
+  }
+  async deleteFile(destinationPath) {
+    if (!this.config.valid || !this.bucket) {
+      return false;
+    }
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      const file = this.bucket.file(cleanPath);
+      const [exists] = await file.exists();
+      if (!exists) return false;
+      await file.delete({ ignoreNotFound: true });
+      return true;
+    } catch (err) {
+      console.error("[STORAGE:GCS] File deletion failed:", err?.code || "", err?.message || err);
+      return false;
+    }
+  }
+  getFileUrl(destinationPath) {
+    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+    const encoded = cleanPath.split("/").map(encodeURIComponent).join("/");
+    return `${this.config.publicBaseUrl}/${encoded}`;
+  }
+  async fileExists(destinationPath) {
+    if (!this.config.valid || !this.bucket) {
+      return false;
+    }
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      const [exists] = await this.bucket.file(cleanPath).exists();
+      return Boolean(exists);
+    } catch (err) {
+      console.error("[STORAGE:GCS] Existence check failed:", err?.code || "", err?.message || err);
+      return false;
+    }
+  }
+};
+var activeStorageAdapter = null;
+var activeProviderKey = null;
+function getConfiguredStorageProvider() {
+  const provider = String(process.env.STORAGE_PROVIDER || "local").toLowerCase().trim();
+  if (provider === "gcs" || provider === "google" || provider === "google-cloud-storage") {
+    return "gcs";
+  }
+  return "local";
+}
+function getStorageAdapter() {
+  const provider = getConfiguredStorageProvider();
+  if (activeStorageAdapter && activeProviderKey === provider) {
+    return activeStorageAdapter;
+  }
+  activeProviderKey = provider;
+  if (provider === "gcs") {
+    const gcsAdapter = new GoogleCloudStorageAdapter();
+    activeStorageAdapter = gcsAdapter;
+    const status = gcsAdapter.getConfigStatus();
+    if (status.configured) {
+      console.log(`[STORAGE] Initialized GoogleCloudStorageAdapter (bucket=${status.bucketName}).`);
+    } else {
+      console.warn(`[STORAGE] GoogleCloudStorageAdapter selected via STORAGE_PROVIDER=gcs, but configuration is incomplete: ${status.error}`);
+    }
+  } else {
+    activeStorageAdapter = new LocalStorageAdapter();
+    console.log("[STORAGE] Initialized LocalStorageAdapter (Provider: Local).");
+  }
+  return activeStorageAdapter;
+}
+
+// server/services/storage/chunkUploadSessionManager.ts
+import fs20 from "fs";
+import os from "os";
+import path18 from "path";
+import crypto14 from "crypto";
+var DEFAULT_CHUNK_SESSION_TTL_MS = 15 * 60 * 1e3;
+var MAX_TOTAL_CHUNKS = 64;
+var ChunkUploadError = class extends Error {
+  constructor(message, statusCode, code) {
+    super(message);
+    this.name = "ChunkUploadError";
+    this.statusCode = statusCode;
+    this.code = code;
+  }
+};
+var ChunkUploadSessionManager = class {
+  constructor(options) {
+    this.sessions = /* @__PURE__ */ new Map();
+    this.sweepTimer = null;
+    this.stagingDir = path18.resolve(options?.stagingDir || path18.join(os.tmpdir(), "toriwear-upload-chunks"));
+    this.ttlMs = options?.ttlMs ?? DEFAULT_CHUNK_SESSION_TTL_MS;
+    if (options?.enablePeriodicSweep !== false) {
+      const intervalMs = Math.max(6e4, Math.min(this.ttlMs, 5 * 60 * 1e3));
+      this.sweepTimer = setInterval(() => {
+        this.sweepExpiredSessions();
+      }, intervalMs);
+      if (typeof this.sweepTimer.unref === "function") {
+        this.sweepTimer.unref();
+      }
+    }
+  }
+  getStagingDir() {
+    if (!fs20.existsSync(this.stagingDir)) {
+      fs20.mkdirSync(this.stagingDir, { recursive: true, mode: 448 });
+    }
+    return this.stagingDir;
+  }
+  getTtlMs() {
+    return this.ttlMs;
+  }
+  /** Used in tests to verify expiration behavior deterministically without waiting 15 minutes. */
+  setTtlMsForTests(ttlMs) {
+    this.ttlMs = ttlMs;
+  }
+  getActiveSessionCount() {
+    return this.sessions.size;
+  }
+  buildSessionKey(ownerId, uploadId) {
+    return `${ownerId}::${uploadId}`;
+  }
+  safeUnlink(filePath) {
+    if (!filePath) return;
+    try {
+      if (fs20.existsSync(filePath)) {
+        fs20.unlinkSync(filePath);
+      }
+    } catch {
+    }
+  }
+  destroySession(sessionKey) {
+    const existing = this.sessions.get(sessionKey);
+    if (!existing) return;
+    this.sessions.delete(sessionKey);
+    this.safeUnlink(existing.tmpFilePath);
+  }
+  hasActiveSessionForUploadIdByOtherOwner(uploadId, ownerId) {
+    for (const session of this.sessions.values()) {
+      if (session.uploadId === uploadId && session.ownerId !== ownerId) {
+        return true;
+      }
+    }
+    return false;
+  }
+  /**
+   * Removes expired sessions from memory and unlinks their temp files, plus any
+   * orphaned staging files older than TTL left behind by previous server crashes.
+   */
+  sweepExpiredSessions(now = Date.now()) {
+    let cleaned = 0;
+    const activePaths = /* @__PURE__ */ new Set();
+    for (const [key, session] of this.sessions.entries()) {
+      if (now - session.updatedAt > this.ttlMs) {
+        this.sessions.delete(key);
+        this.safeUnlink(session.tmpFilePath);
+        cleaned++;
+      } else {
+        activePaths.add(path18.resolve(session.tmpFilePath));
+      }
+    }
+    if (fs20.existsSync(this.stagingDir)) {
+      try {
+        const entries = fs20.readdirSync(this.stagingDir);
+        for (const name of entries) {
+          if (!name.startsWith("chunk-") || !name.endsWith(".bin")) continue;
+          const fullPath = path18.resolve(this.stagingDir, name);
+          if (activePaths.has(fullPath)) continue;
+          try {
+            const stat = fs20.statSync(fullPath);
+            if (now - stat.mtimeMs > this.ttlMs) {
+              this.safeUnlink(fullPath);
+              cleaned++;
+            }
+          } catch {
+          }
+        }
+      } catch {
+      }
+    }
+    return cleaned;
+  }
+  /**
+   * Validates and appends a single binary chunk to an authenticated admin upload session.
+   * When the final chunk arrives, reads the assembled buffer and removes the temp staging file
+   * immediately so no temporary file can leak even if downstream Sharp/GCS processing throws.
+   */
+  appendChunk(input) {
+    const now = Date.now();
+    this.sweepExpiredSessions(now);
+    const ownerId = String(input.ownerId || "").trim();
+    if (!ownerId) {
+      throw new ChunkUploadError("Authenticated admin identity is required for chunk uploads.", 401, "MISSING_ADMIN_IDENTITY");
+    }
+    const uploadId = String(input.uploadId || "").trim();
+    if (!/^[a-zA-Z0-9_-]{8,64}$/.test(uploadId)) {
+      throw new ChunkUploadError("Invalid upload session ID.", 400, "INVALID_UPLOAD_ID");
+    }
+    const { chunkIndex, totalChunks, chunkBuffer, maxUploadBytes } = input;
+    if (!Number.isInteger(chunkIndex) || !Number.isInteger(totalChunks) || chunkIndex < 0 || totalChunks < 1 || totalChunks > MAX_TOTAL_CHUNKS || chunkIndex >= totalChunks) {
+      throw new ChunkUploadError("Invalid chunk index parameters.", 400, "INVALID_CHUNK_INDEX");
+    }
+    if (!Buffer.isBuffer(chunkBuffer) || chunkBuffer.length === 0) {
+      throw new ChunkUploadError("Received empty upload chunk.", 400, "EMPTY_CHUNK");
+    }
+    const normalizedFilename = String(input.filename || "").trim();
+    const normalizedMimeType = String(input.mimeType || "").trim().toLowerCase();
+    const sessionKey = this.buildSessionKey(ownerId, uploadId);
+    const existing = this.sessions.get(sessionKey);
+    if (chunkIndex === 0) {
+      if (existing) {
+        this.destroySession(sessionKey);
+        throw new ChunkUploadError(
+          "Duplicate initial chunk or upload session ID already in use. Start a new upload with a unique uploadId.",
+          409,
+          "DUPLICATE_CHUNK"
+        );
+      }
+      if (chunkBuffer.length > maxUploadBytes) {
+        const maxMb = (maxUploadBytes / (1024 * 1024)).toFixed(0);
+        throw new ChunkUploadError(
+          `Image size exceeds the maximum allowed limit of ${maxMb} MB.`,
+          413,
+          "UPLOAD_TOO_LARGE"
+        );
+      }
+      const stagingDir = this.getStagingDir();
+      const uniqueToken = crypto14.randomBytes(16).toString("hex");
+      const tmpFilePath = path18.join(stagingDir, `chunk-${uniqueToken}.bin`);
+      const session = {
+        sessionKey,
+        uploadId,
+        ownerId,
+        totalChunks,
+        filename: normalizedFilename,
+        mimeType: normalizedMimeType,
+        nextExpectedIndex: 0,
+        totalBytesReceived: 0,
+        tmpFilePath,
+        createdAt: now,
+        updatedAt: now,
+        inFlight: true
+      };
+      this.sessions.set(sessionKey, session);
+      try {
+        fs20.writeFileSync(tmpFilePath, chunkBuffer, { flag: "wx", mode: 384 });
+        session.totalBytesReceived = chunkBuffer.length;
+        session.nextExpectedIndex = 1;
+        session.updatedAt = Date.now();
+        session.inFlight = false;
+      } catch (err) {
+        this.destroySession(sessionKey);
+        throw err;
+      }
+      if (totalChunks === 1) {
+        return this.finalizeAndCleanupSession(session, chunkIndex);
+      }
+      return {
+        completed: false,
+        sessionKey,
+        tmpFilePath,
+        chunkIndex,
+        totalChunks,
+        totalBytesReceived: session.totalBytesReceived
+      };
+    }
+    if (!existing) {
+      if (this.hasActiveSessionForUploadIdByOtherOwner(uploadId, ownerId)) {
+        throw new ChunkUploadError(
+          "Upload session belongs to a different authenticated admin identity.",
+          403,
+          "UPLOAD_SESSION_FORBIDDEN"
+        );
+      }
+      throw new ChunkUploadError(
+        "Upload session not found, expired, or missing initial chunk (chunkIndex 0 must be uploaded first).",
+        400,
+        "MISSING_OR_EXPIRED_SESSION"
+      );
+    }
+    if (existing.inFlight) {
+      this.destroySession(sessionKey);
+      throw new ChunkUploadError(
+        "Concurrent write detected for the same upload session.",
+        409,
+        "CONCURRENT_CHUNK_CONFLICT"
+      );
+    }
+    if (existing.totalChunks !== totalChunks) {
+      this.destroySession(sessionKey);
+      throw new ChunkUploadError(
+        `Inconsistent totalChunks for upload session (expected ${existing.totalChunks}, received ${totalChunks}).`,
+        400,
+        "INCONSISTENT_TOTAL_CHUNKS"
+      );
+    }
+    if (existing.filename !== normalizedFilename) {
+      this.destroySession(sessionKey);
+      throw new ChunkUploadError(
+        "Inconsistent filename across chunks in upload session.",
+        400,
+        "INCONSISTENT_FILENAME"
+      );
+    }
+    if (existing.mimeType !== normalizedMimeType) {
+      this.destroySession(sessionKey);
+      throw new ChunkUploadError(
+        "Inconsistent MIME type across chunks in upload session.",
+        400,
+        "INCONSISTENT_MIME_TYPE"
+      );
+    }
+    if (chunkIndex < existing.nextExpectedIndex) {
+      this.destroySession(sessionKey);
+      throw new ChunkUploadError(
+        `Duplicate chunk received (chunkIndex ${chunkIndex} was already processed; expected ${existing.nextExpectedIndex}).`,
+        409,
+        "DUPLICATE_CHUNK"
+      );
+    }
+    if (chunkIndex > existing.nextExpectedIndex) {
+      this.destroySession(sessionKey);
+      throw new ChunkUploadError(
+        `Out-of-order chunk received (expected chunkIndex ${existing.nextExpectedIndex}, received ${chunkIndex}).`,
+        400,
+        "OUT_OF_ORDER_CHUNK"
+      );
+    }
+    if (!fs20.existsSync(existing.tmpFilePath)) {
+      this.destroySession(sessionKey);
+      throw new ChunkUploadError(
+        "Upload staging file is missing or expired.",
+        400,
+        "MISSING_STAGING_FILE"
+      );
+    }
+    if (existing.totalBytesReceived + chunkBuffer.length > maxUploadBytes) {
+      this.destroySession(sessionKey);
+      const maxMb = (maxUploadBytes / (1024 * 1024)).toFixed(0);
+      throw new ChunkUploadError(
+        `Image size exceeds the maximum allowed limit of ${maxMb} MB.`,
+        413,
+        "UPLOAD_TOO_LARGE"
+      );
+    }
+    existing.inFlight = true;
+    try {
+      fs20.appendFileSync(existing.tmpFilePath, chunkBuffer);
+      existing.totalBytesReceived += chunkBuffer.length;
+      existing.nextExpectedIndex = chunkIndex + 1;
+      existing.updatedAt = Date.now();
+      existing.inFlight = false;
+    } catch (err) {
+      this.destroySession(sessionKey);
+      throw err;
+    }
+    if (existing.nextExpectedIndex === existing.totalChunks) {
+      return this.finalizeAndCleanupSession(existing, chunkIndex);
+    }
+    return {
+      completed: false,
+      sessionKey,
+      tmpFilePath: existing.tmpFilePath,
+      chunkIndex,
+      totalChunks: existing.totalChunks,
+      totalBytesReceived: existing.totalBytesReceived
+    };
+  }
+  finalizeAndCleanupSession(session, chunkIndex) {
+    const tmpFilePath = session.tmpFilePath;
+    const totalChunks = session.totalChunks;
+    const totalBytesReceived = session.totalBytesReceived;
+    const sessionKey = session.sessionKey;
+    try {
+      const assembledBuffer = fs20.readFileSync(tmpFilePath);
+      this.destroySession(sessionKey);
+      return {
+        completed: true,
+        sessionKey,
+        tmpFilePath,
+        chunkIndex,
+        totalChunks,
+        totalBytesReceived,
+        assembledBuffer
+      };
+    } catch (err) {
+      this.destroySession(sessionKey);
+      throw err;
+    }
+  }
+  /** Cleans up all active sessions and temp files (used in graceful shutdown / tests). */
+  clearAllSessions() {
+    for (const key of Array.from(this.sessions.keys())) {
+      this.destroySession(key);
+    }
+  }
+};
+var chunkUploadSessionManager = new ChunkUploadSessionManager();
+
+// server/routes/cmsRouter.ts
 var cmsRouter = Router4();
 function requireAdminAuth(requiredAction = "edit") {
   return async (req, res, next) => {
@@ -23818,15 +24793,15 @@ cmsRouter.get(["/hero", "/cms/hero", "/admin/hero", "/admin/cms/hero", "/cms/adm
   }
 });
 var resolveExistingBrandAssetUrl = (preferred, candidates) => {
-  const publicDir2 = path17.resolve(process.cwd(), "public");
+  const publicDir2 = path19.resolve(process.cwd(), "public");
   const toCheck = [preferred, ...candidates].filter((v) => Boolean(v && v.trim()));
   for (const url of toCheck) {
     if (!url.startsWith("/")) {
       return url;
     }
     const cleanRel = (url.split("?")[0] ?? url).replace(/^\/+/, "");
-    const fullPath = path17.resolve(publicDir2, cleanRel);
-    if (fs19.existsSync(fullPath)) {
+    const fullPath = path19.resolve(publicDir2, cleanRel);
+    if (fs21.existsSync(fullPath)) {
       return url;
     }
   }
@@ -23967,7 +24942,7 @@ cmsRouter.post(["/v1/store/meta/event", "/store/meta/event"], async (req, res) =
     if (!validEvents.has(eventName)) {
       return res.status(400).json({ success: false, error: "Unsupported Meta event name." });
     }
-    const eventId = String(body.eventId || crypto15.randomUUID());
+    const eventId = String(body.eventId || crypto16.randomUUID());
     const ip = (req.ip || req.socket.remoteAddress || "").replace("::ffff:", "");
     const result = await dispatchMetaCapiEvent2({
       eventName,
@@ -24052,46 +25027,63 @@ cmsRouter.put(["/admin/settings", "/settings", "/cms/settings", "/admin/cms/sett
     res.status(500).json({ success: false, error: err.message || "Failed to update store settings" });
   }
 });
+function buildUniqueAssetFilename(rawFilename, extension) {
+  const baseName = rawFilename ? path19.basename(rawFilename, path19.extname(rawFilename)) : "cms";
+  const safePrefix = baseName.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 20) || "cms";
+  return `cms-${safePrefix}-${Date.now()}-${crypto16.randomBytes(6).toString("hex")}.${extension}`;
+}
 cmsRouter.post(["/upload-asset", "/cms/upload-asset", "/admin/upload-asset", "/admin/cms/upload-asset"], requireAdminAuth(), async (req, res) => {
   try {
     const { dataUrl, filename } = req.body || {};
     if (!dataUrl || typeof dataUrl !== "string") {
       return res.status(400).json({ success: false, error: "Missing image dataUrl payload." });
     }
-    const match = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,(.+)$/i);
+    const match = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml|avif);base64,(.+)$/i);
     if (!match || !match[1] || !match[2]) {
       return res.status(400).json({
         success: false,
-        error: "Unsupported image format. Allowed types: PNG, JPEG, WEBP, GIF, SVG."
+        error: "Unsupported image format. Allowed types: PNG, JPEG, WEBP, AVIF, GIF, SVG."
       });
     }
-    const rawMimeSub = match[1].toLowerCase();
-    const ext = rawMimeSub === "jpeg" ? "jpg" : rawMimeSub === "svg+xml" ? "svg" : rawMimeSub;
-    const buffer = Buffer.from(match[2], "base64");
-    if (buffer.length === 0) {
-      return res.status(400).json({ success: false, error: "Uploaded image file is empty." });
+    const declaredMimeType = `image/${match[1].toLowerCase()}`;
+    const rawBuffer = Buffer.from(match[2], "base64");
+    const optimized = await optimizeImageForStorage(rawBuffer, {
+      filename: typeof filename === "string" ? filename : void 0,
+      mimeType: declaredMimeType,
+      maxBytes: DEFAULT_REGULAR_MAX_UPLOAD_BYTES
+    });
+    const storage = getStorageAdapter();
+    const outName = buildUniqueAssetFilename(typeof filename === "string" ? filename : void 0, optimized.extension);
+    const uploadRes = await storage.uploadFile(optimized.buffer, outName, optimized.contentType, {
+      cacheControl: IMMUTABLE_IMAGE_CACHE_CONTROL
+    });
+    if (!uploadRes.success || !uploadRes.url) {
+      return res.status(uploadRes.statusCode || 502).json({
+        success: false,
+        error: uploadRes.error || "Failed to persist uploaded image asset."
+      });
     }
-    if (buffer.length > 10 * 1024 * 1024) {
-      return res.status(413).json({ success: false, error: "Image size exceeds 10 MB limit." });
-    }
-    const assetsDir2 = path17.resolve(process.cwd(), "public/generated-assets");
-    if (!fs19.existsSync(assetsDir2)) {
-      fs19.mkdirSync(assetsDir2, { recursive: true });
-    }
-    const safePrefix = typeof filename === "string" ? filename.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 20) || "cms" : "cms";
-    const outName = `cms-${safePrefix}-${Date.now()}-${crypto15.randomBytes(3).toString("hex")}.${ext}`;
-    const outPath = path17.join(assetsDir2, outName);
-    const tmpPath = `${outPath}.tmp`;
-    fs19.writeFileSync(tmpPath, buffer);
-    fs19.renameSync(tmpPath, outPath);
     return res.json({
       success: true,
-      url: `/generated-assets/${outName}`,
-      sizeBytes: buffer.length
+      url: uploadRes.url,
+      contentType: uploadRes.contentType || optimized.contentType,
+      sizeBytes: uploadRes.sizeBytes ?? optimized.optimizedSizeBytes,
+      originalSizeBytes: optimized.originalSizeBytes,
+      width: optimized.width,
+      height: optimized.height,
+      optimized: optimized.optimized,
+      storageProvider: storage.providerName
     });
   } catch (err) {
-    console.error("[CMS] Asset upload error:", err);
-    return res.status(500).json({ success: false, error: err.message || "Failed to upload CMS image asset." });
+    if (err instanceof ImageValidationError) {
+      return res.status(err.statusCode).json({
+        success: false,
+        code: err.code,
+        error: err.message
+      });
+    }
+    console.error("[CMS] Asset upload error:", err?.message || err);
+    return res.status(500).json({ success: false, error: "Failed to upload CMS image asset." });
   }
 });
 cmsRouter.post(
@@ -24100,74 +25092,110 @@ cmsRouter.post(
   express.raw({ type: "application/octet-stream", limit: "8mb" }),
   async (req, res) => {
     try {
+      const ownerId = String(req.user?.id || req.user?.email || "").trim();
+      if (!ownerId) {
+        return res.status(401).json({
+          success: false,
+          code: "UNAUTHENTICATED",
+          error: "Authenticated admin identity is required for chunked uploads."
+        });
+      }
       const uploadId = String(req.query.uploadId || "").trim();
       const chunkIndex = Number(req.query.chunkIndex);
       const totalChunks = Number(req.query.totalChunks);
-      const rawFilename = String(req.query.filename || "image.png");
-      const mimeType = String(req.query.mimeType || "").toLowerCase();
-      if (!/^[a-zA-Z0-9_-]{8,64}$/.test(uploadId)) {
-        return res.status(400).json({ success: false, error: "Invalid upload session ID." });
-      }
-      if (!Number.isInteger(chunkIndex) || !Number.isInteger(totalChunks) || chunkIndex < 0 || totalChunks < 1 || chunkIndex >= totalChunks) {
-        return res.status(400).json({ success: false, error: "Invalid chunk index parameters." });
-      }
+      const rawFilename = String(req.query.filename || "image.png").trim();
+      const mimeType = String(req.query.mimeType || "").trim().toLowerCase();
+      const maxUploadBytes = getConfiguredMaxUploadBytes();
       const chunkBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || "");
-      if (chunkBuffer.length === 0) {
-        return res.status(400).json({ success: false, error: "Received empty upload chunk." });
+      if (chunkIndex === 0) {
+        const extFromName = path19.extname(rawFilename).toLowerCase().replace(".", "");
+        const allowedExts = /* @__PURE__ */ new Set(["png", "jpg", "jpeg", "webp", "gif", "svg", "avif"]);
+        let ext = allowedExts.has(extFromName) ? extFromName === "jpeg" ? "jpg" : extFromName : "";
+        if (!ext) {
+          if (mimeType.includes("png")) ext = "png";
+          else if (mimeType.includes("webp")) ext = "webp";
+          else if (mimeType.includes("gif")) ext = "gif";
+          else if (mimeType.includes("svg")) ext = "svg";
+          else if (mimeType.includes("avif")) ext = "avif";
+          else if (mimeType.includes("jpeg") || mimeType.includes("jpg")) ext = "jpg";
+        }
+        if (!ext) {
+          return res.status(400).json({
+            success: false,
+            error: "Unsupported image format. Allowed types: PNG, JPEG, WEBP, GIF, SVG, AVIF."
+          });
+        }
       }
-      const extFromName = path17.extname(rawFilename).toLowerCase().replace(".", "");
-      const allowedExts = /* @__PURE__ */ new Set(["png", "jpg", "jpeg", "webp", "gif", "svg", "avif"]);
-      let ext = allowedExts.has(extFromName) ? extFromName === "jpeg" ? "jpg" : extFromName : "";
-      if (!ext) {
-        if (mimeType.includes("png")) ext = "png";
-        else if (mimeType.includes("webp")) ext = "webp";
-        else if (mimeType.includes("gif")) ext = "gif";
-        else if (mimeType.includes("svg")) ext = "svg";
-        else if (mimeType.includes("avif")) ext = "avif";
-        else if (mimeType.includes("jpeg") || mimeType.includes("jpg")) ext = "jpg";
-      }
-      if (!ext) {
-        return res.status(400).json({
+      const storage = getStorageAdapter();
+      const storageStatus = storage.getConfigStatus();
+      if (!storageStatus.configured) {
+        return res.status(503).json({
           success: false,
-          error: "Unsupported image format. Allowed types: PNG, JPEG, WEBP, GIF, SVG, AVIF."
+          error: storageStatus.error || "Configured storage provider is unavailable."
         });
       }
-      const assetsDir2 = path17.resolve(process.cwd(), "public/generated-assets");
-      if (!fs19.existsSync(assetsDir2)) {
-        fs19.mkdirSync(assetsDir2, { recursive: true });
-      }
-      const tmpChunkPath = path17.join(assetsDir2, `.tmp-chunk-${uploadId}.bin`);
-      if (chunkIndex === 0) {
-        fs19.writeFileSync(tmpChunkPath, chunkBuffer);
-      } else {
-        if (!fs19.existsSync(tmpChunkPath)) {
-          return res.status(400).json({ success: false, error: "Upload session expired or missing initial chunk." });
-        }
-        fs19.appendFileSync(tmpChunkPath, chunkBuffer);
-      }
-      if (chunkIndex < totalChunks - 1) {
+      const outcome = chunkUploadSessionManager.appendChunk({
+        ownerId,
+        uploadId,
+        chunkIndex,
+        totalChunks,
+        filename: rawFilename,
+        mimeType,
+        chunkBuffer,
+        maxUploadBytes
+      });
+      if (!outcome.completed || !outcome.assembledBuffer) {
         return res.json({
           success: true,
           completed: false,
-          chunkIndex,
-          totalChunks
+          chunkIndex: outcome.chunkIndex,
+          totalChunks: outcome.totalChunks
         });
       }
-      const stats = fs19.statSync(tmpChunkPath);
-      const baseName = path17.basename(rawFilename, path17.extname(rawFilename));
-      const safePrefix = baseName.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 20) || "cms";
-      const outName = `cms-${safePrefix}-${Date.now()}-${crypto15.randomBytes(3).toString("hex")}.${ext}`;
-      const outPath = path17.join(assetsDir2, outName);
-      fs19.renameSync(tmpChunkPath, outPath);
+      const optimized = await optimizeImageForStorage(outcome.assembledBuffer, {
+        filename: rawFilename,
+        mimeType,
+        maxBytes: maxUploadBytes
+      });
+      const outName = buildUniqueAssetFilename(rawFilename, optimized.extension);
+      const uploadRes = await storage.uploadFile(optimized.buffer, outName, optimized.contentType, {
+        cacheControl: IMMUTABLE_IMAGE_CACHE_CONTROL
+      });
+      if (!uploadRes.success || !uploadRes.url) {
+        return res.status(uploadRes.statusCode || 502).json({
+          success: false,
+          error: uploadRes.error || "Failed to persist uploaded image asset."
+        });
+      }
       return res.json({
         success: true,
         completed: true,
-        url: `/generated-assets/${outName}`,
-        sizeBytes: stats.size
+        url: uploadRes.url,
+        contentType: uploadRes.contentType || optimized.contentType,
+        sizeBytes: uploadRes.sizeBytes ?? optimized.optimizedSizeBytes,
+        originalSizeBytes: optimized.originalSizeBytes,
+        width: optimized.width,
+        height: optimized.height,
+        optimized: optimized.optimized,
+        storageProvider: storage.providerName
       });
     } catch (err) {
-      console.error("[CMS] Chunked asset upload error:", err);
-      return res.status(500).json({ success: false, error: err.message || "Failed to stream image chunk." });
+      if (err instanceof ChunkUploadError) {
+        return res.status(err.statusCode).json({
+          success: false,
+          code: err.code,
+          error: err.message
+        });
+      }
+      if (err instanceof ImageValidationError) {
+        return res.status(err.statusCode).json({
+          success: false,
+          code: err.code,
+          error: err.message
+        });
+      }
+      console.error("[CMS] Chunked asset upload error:", err?.message || err);
+      return res.status(500).json({ success: false, error: "Failed to process uploaded image chunk." });
     }
   }
 );
@@ -24177,11 +25205,11 @@ import { Router as Router5 } from "express";
 
 // server/services/earlyAccessService.ts
 init_prisma();
-import crypto18 from "crypto";
+import crypto19 from "crypto";
 
 // server/services/notifications/resendEmailService.ts
 init_prisma();
-import crypto16 from "crypto";
+import crypto17 from "crypto";
 function getEmailProviderStatus() {
   const provider = String(process.env.EMAIL_PROVIDER || "resend").trim().toLowerCase();
   const apiKey = String(process.env.RESEND_API_KEY || "").trim();
@@ -24449,7 +25477,7 @@ function verifyResendWebhookSignature(params) {
   }
   const keyBytes = secret.startsWith("whsec_") ? Buffer.from(secret.slice(6), "base64") : Buffer.from(secret, "utf8");
   const signedContent = `${svixId}.${svixTimestamp}.${params.rawBody}`;
-  const expectedSig = crypto16.createHmac("sha256", keyBytes).update(signedContent).digest("base64");
+  const expectedSig = crypto17.createHmac("sha256", keyBytes).update(signedContent).digest("base64");
   const signatures = svixSignature.split(/\s+/).map((part) => {
     const idx = part.indexOf(",");
     return idx !== -1 ? { version: part.slice(0, idx), sig: part.slice(idx + 1) } : null;
@@ -24457,7 +25485,7 @@ function verifyResendWebhookSignature(params) {
   const expectedBuf = Buffer.from(expectedSig, "utf8");
   for (const entry of signatures) {
     const providedBuf = Buffer.from(entry.sig, "utf8");
-    if (providedBuf.length === expectedBuf.length && crypto16.timingSafeEqual(providedBuf, expectedBuf)) {
+    if (providedBuf.length === expectedBuf.length && crypto17.timingSafeEqual(providedBuf, expectedBuf)) {
       return { valid: true };
     }
   }
@@ -24466,7 +25494,7 @@ function verifyResendWebhookSignature(params) {
 
 // server/services/notifications/whatsappCloudService.ts
 init_prisma();
-import crypto17 from "crypto";
+import crypto18 from "crypto";
 function getWhatsAppProviderStatus() {
   const accessToken = String(process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
   const phoneNumberId = String(process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
@@ -24667,10 +25695,10 @@ function verifyMetaWebhookSignature(params) {
     return { valid: false, reason: "Missing or invalid X-Hub-Signature-256 header." };
   }
   const providedHex = header.slice(7).trim();
-  const expectedHex = crypto17.createHmac("sha256", appSecret).update(params.rawBody, "utf8").digest("hex");
+  const expectedHex = crypto18.createHmac("sha256", appSecret).update(params.rawBody, "utf8").digest("hex");
   const providedBuf = Buffer.from(providedHex, "hex");
   const expectedBuf = Buffer.from(expectedHex, "hex");
-  if (providedBuf.length === 0 || providedBuf.length !== expectedBuf.length || !crypto17.timingSafeEqual(providedBuf, expectedBuf)) {
+  if (providedBuf.length === 0 || providedBuf.length !== expectedBuf.length || !crypto18.timingSafeEqual(providedBuf, expectedBuf)) {
     return { valid: false, reason: "WhatsApp webhook HMAC signature verification failed." };
   }
   return { valid: true };
@@ -24746,19 +25774,19 @@ function getUnsubscribeSecret() {
   return "toriwear-dev-unsubscribe-secret-local-only";
 }
 function hashUnsubscribeToken(token) {
-  return crypto18.createHash("sha256").update(token).digest("hex");
+  return crypto19.createHash("sha256").update(token).digest("hex");
 }
 function createSignedUnsubscribeToken(subscriberId) {
   const secret = getUnsubscribeSecret();
   const payload = Buffer.from(
     JSON.stringify({
       sid: subscriberId,
-      nonce: crypto18.randomBytes(12).toString("hex"),
+      nonce: crypto19.randomBytes(12).toString("hex"),
       iat: Date.now()
     }),
     "utf8"
   ).toString("base64url");
-  const sig = crypto18.createHmac("sha256", secret).update(payload).digest("hex");
+  const sig = crypto19.createHmac("sha256", secret).update(payload).digest("hex");
   const token = `${payload}.${sig}`;
   return {
     token,
@@ -24773,10 +25801,10 @@ function verifySignedUnsubscribeToken(token) {
   const sig = clean.slice(dotIdx + 1);
   try {
     const secret = getUnsubscribeSecret();
-    const expectedSig = crypto18.createHmac("sha256", secret).update(payload).digest("hex");
+    const expectedSig = crypto19.createHmac("sha256", secret).update(payload).digest("hex");
     const a = Buffer.from(sig, "hex");
     const b = Buffer.from(expectedSig, "hex");
-    if (a.length === 0 || a.length !== b.length || !crypto18.timingSafeEqual(a, b)) {
+    if (a.length === 0 || a.length !== b.length || !crypto19.timingSafeEqual(a, b)) {
       return { valid: false };
     }
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
@@ -24900,7 +25928,7 @@ async function registerSubscriber(input) {
       saved = existing;
     }
   } else {
-    const newId = `eas_${crypto18.randomBytes(10).toString("hex")}`;
+    const newId = `eas_${crypto19.randomBytes(10).toString("hex")}`;
     const generated = createSignedUnsubscribeToken(newId);
     unsubscribeTokenRaw = generated.token;
     saved = await prisma2.earlyAccessSubscriber.create({
@@ -24940,7 +25968,7 @@ async function registerSubscriber(input) {
     const idemKey = `confirm-email:${saved.id}:${Math.floor(now.getTime() / 1e3)}`;
     const delivery = await prisma2.notificationDelivery.create({
       data: {
-        id: `del_${crypto18.randomBytes(10).toString("hex")}`,
+        id: `del_${crypto19.randomBytes(10).toString("hex")}`,
         subscriberId: saved.id,
         campaignId: null,
         eventType: "REGISTRATION_CONFIRMATION",
@@ -24973,7 +26001,7 @@ async function registerSubscriber(input) {
       const idemKey = `confirm-wa:${saved.id}:${Math.floor(now.getTime() / 1e3)}`;
       const delivery = await prisma2.notificationDelivery.create({
         data: {
-          id: `del_${crypto18.randomBytes(10).toString("hex")}`,
+          id: `del_${crypto19.randomBytes(10).toString("hex")}`,
           subscriberId: saved.id,
           campaignId: null,
           eventType: "REGISTRATION_CONFIRMATION",
@@ -25220,7 +26248,7 @@ async function exportSubscribersCsvAdmin(params) {
 }
 
 // server/services/notifications/campaignOrchestrator.ts
-import crypto19 from "crypto";
+import crypto20 from "crypto";
 async function createDraftCampaign(input, actorUserId) {
   const prisma2 = await assertDatabaseReady();
   const name = String(input.name || "").trim();
@@ -25234,7 +26262,7 @@ async function createDraftCampaign(input, actorUserId) {
   const tmplName = String(input.whatsappTemplateName || process.env.WHATSAPP_TEMPLATE_NAME || "").trim() || null;
   const campaign = await prisma2.notificationCampaign.create({
     data: {
-      id: `camp_${crypto19.randomBytes(8).toString("hex")}`,
+      id: `camp_${crypto20.randomBytes(8).toString("hex")}`,
       name,
       campaignType: String(input.campaignType || "LAUNCH_ANNOUNCEMENT").trim(),
       subject: input.subject ? String(input.subject).trim() : null,
@@ -25318,7 +26346,7 @@ async function sendTestCampaignNotification(params) {
       html,
       text: campaign.emailText || generatedTmpl.text,
       unsubscribeUrl: unsubUrl,
-      idempotencyKey: `test:${campaign.id}:email:${crypto19.randomBytes(6).toString("hex")}`,
+      idempotencyKey: `test:${campaign.id}:email:${crypto20.randomBytes(6).toString("hex")}`,
       tags: [{ name: "test_mode", value: "true" }]
     });
     results.email = {
@@ -25524,7 +26552,7 @@ async function confirmAndDispatchCampaign(params) {
       if (!existingDel) {
         const del = await prisma2.notificationDelivery.create({
           data: {
-            id: `del_${crypto19.randomBytes(10).toString("hex")}`,
+            id: `del_${crypto20.randomBytes(10).toString("hex")}`,
             subscriberId: sub.id,
             campaignId: campaign.id,
             eventType: campaign.campaignType || "LAUNCH_ANNOUNCEMENT",
@@ -25546,7 +26574,7 @@ async function confirmAndDispatchCampaign(params) {
       if (!existingDel) {
         const del = await prisma2.notificationDelivery.create({
           data: {
-            id: `del_${crypto19.randomBytes(10).toString("hex")}`,
+            id: `del_${crypto20.randomBytes(10).toString("hex")}`,
             subscriberId: sub.id,
             campaignId: campaign.id,
             eventType: campaign.campaignType || "LAUNCH_ANNOUNCEMENT",
@@ -26500,17 +27528,17 @@ init_prisma();
 
 // server/db/init-mysql.ts
 init_mysqlConfig();
-import fs20 from "fs";
-import path18 from "path";
+import fs22 from "fs";
+import path20 from "path";
 import mysql from "mysql2/promise";
 function resolveMigrationSqlPath(relativePath) {
   const candidates = [
-    path18.resolve(process.cwd(), relativePath),
-    path18.resolve(import.meta.dirname || process.cwd(), "..", relativePath),
-    path18.resolve(import.meta.dirname || process.cwd(), "../..", relativePath)
+    path20.resolve(process.cwd(), relativePath),
+    path20.resolve(import.meta.dirname || process.cwd(), "..", relativePath),
+    path20.resolve(import.meta.dirname || process.cwd(), "../..", relativePath)
   ];
   for (const candidate of candidates) {
-    if (fs20.existsSync(candidate)) {
+    if (fs22.existsSync(candidate)) {
       return candidate;
     }
   }
@@ -26557,7 +27585,7 @@ async function ensureMySqlSchemaInitialized() {
         console.warn("[MYSQL-INIT] Migration file prisma/migrations/0_init/migration.sql not found; skipping auto-DDL.");
         return false;
       }
-      const migrationSql = fs20.readFileSync(initMigrationPath, "utf8").trim();
+      const migrationSql = fs22.readFileSync(initMigrationPath, "utf8").trim();
       if (migrationSql) {
         if (existingCoreTables === 0) {
           console.log("[MYSQL-INIT] Empty MySQL database detected. Initializing TORIWEAR schema tables...");
@@ -26584,7 +27612,7 @@ async function ensureMySqlSchemaInitialized() {
     if (existingEaTables < 3 || !hasCouponCols || !hasUsageCols) {
       const additivePath = resolveMigrationSqlPath("prisma/migrations/20261117_early_access_notifications/migration.sql");
       if (additivePath) {
-        const additiveSql = fs20.readFileSync(additivePath, "utf8");
+        const additiveSql = fs22.readFileSync(additivePath, "utf8");
         console.log("[MYSQL-INIT] Applying additive Early Access & Coupon schema updates...");
         await applyStatementsIdempotently(connection, additiveSql);
         console.log("[MYSQL-INIT] Additive Early Access & Coupon schema verified.");
@@ -26605,11 +27633,19 @@ async function ensureMySqlSchemaInitialized() {
     if (existingRetTables < 3 || !hasCatCols || !hasProdCatCols) {
       const masterPath = resolveMigrationSqlPath("prisma/migrations/20261118_master_update/migration.sql");
       if (masterPath) {
-        const masterSql = fs20.readFileSync(masterPath, "utf8");
+        const masterSql = fs22.readFileSync(masterPath, "utf8");
         console.log("[MYSQL-INIT] Applying additive Master Update schema (Categories & Returns/Refunds)...");
         await applyStatementsIdempotently(connection, masterSql);
         console.log("[MYSQL-INIT] Additive Master Update schema verified.");
       }
+    }
+    const [imgUrlColRows] = await connection.query(
+      "SELECT DATA_TYPE AS dataType FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'product_images' AND column_name = 'url'"
+    );
+    const imgUrlDataType = String(imgUrlColRows?.[0]?.dataType || "").toLowerCase();
+    if (imgUrlDataType && imgUrlDataType !== "longtext") {
+      await connection.query("ALTER TABLE `product_images` MODIFY COLUMN `url` LONGTEXT NOT NULL");
+      console.log("[MYSQL-INIT] Upgraded product_images.url column to LONGTEXT.");
     }
     return true;
   } catch (err) {
@@ -26673,7 +27709,7 @@ app.use((_req, res, next) => {
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   res.setHeader(
     "Content-Security-Policy",
-    "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://fonts.googleapis.com https://cdn.jsdelivr.net https://checkout.razorpay.com https://apis.google.com https://www.gstatic.com https://accounts.google.com https://connect.facebook.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://checkout.razorpay.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https: https://www.facebook.com; frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://api.razorpay.com https://checkout.razorpay.com https://www.facebook.com; media-src 'self' data: blob: https:; connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://cdn.jsdelivr.net https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://accounts.google.com https://apis.google.com https://firebase.googleapis.com https://firebaseinstallations.googleapis.com https://api.razorpay.com https://lumberjack.razorpay.com https://checkout.razorpay.com https://connect.facebook.net https://www.facebook.com ws: wss:;"
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://fonts.googleapis.com https://cdn.jsdelivr.net https://checkout.razorpay.com https://apis.google.com https://www.gstatic.com https://accounts.google.com https://connect.facebook.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://checkout.razorpay.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https: https://www.facebook.com; frame-src 'self' https://*.firebaseapp.com https://*.web.app https://accounts.google.com https://api.razorpay.com https://checkout.razorpay.com https://www.facebook.com; media-src 'self' data: blob: https:; connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://cdn.jsdelivr.net https://*.firebaseapp.com https://*.web.app https://www.gstatic.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://accounts.google.com https://apis.google.com https://firebase.googleapis.com https://firebaseinstallations.googleapis.com https://api.razorpay.com https://lumberjack.razorpay.com https://checkout.razorpay.com https://connect.facebook.net https://www.facebook.com ws: wss:;"
   );
   next();
 });
@@ -26746,22 +27782,22 @@ function requireStaffAuth(req, res, next) {
     next();
   });
 }
-var publicDir = path19.resolve(process.cwd(), "public");
-var assetsDir = path19.resolve(publicDir, "generated-assets");
-var brandAssetsDir = path19.resolve(publicDir, "assets");
-var modelsDir = path19.resolve(publicDir, "models");
-if (!fs21.existsSync(assetsDir)) {
-  fs21.mkdirSync(assetsDir, { recursive: true });
+var publicDir = path21.resolve(process.cwd(), "public");
+var assetsDir = path21.resolve(publicDir, "generated-assets");
+var brandAssetsDir = path21.resolve(publicDir, "assets");
+var modelsDir = path21.resolve(publicDir, "models");
+if (!fs23.existsSync(assetsDir)) {
+  fs23.mkdirSync(assetsDir, { recursive: true });
 }
-if (!fs21.existsSync(brandAssetsDir)) {
-  fs21.mkdirSync(brandAssetsDir, { recursive: true });
+if (!fs23.existsSync(brandAssetsDir)) {
+  fs23.mkdirSync(brandAssetsDir, { recursive: true });
 }
-if (!fs21.existsSync(modelsDir)) {
-  fs21.mkdirSync(modelsDir, { recursive: true });
+if (!fs23.existsSync(modelsDir)) {
+  fs23.mkdirSync(modelsDir, { recursive: true });
 }
 var blockSensitiveStaticFiles = (req, res, next) => {
   const cleanPath = (req.path || "").toLowerCase();
-  const base = path19.posix.basename(cleanPath);
+  const base = path21.posix.basename(cleanPath);
   if (base.startsWith(".") || cleanPath.endsWith(".json") || cleanPath.endsWith(".tmp") || cleanPath.endsWith(".bin") || cleanPath.includes(".tmp-chunk-")) {
     return res.status(404).json({ success: false, error: "Not found" });
   }
@@ -26790,20 +27826,20 @@ app.use("/models", express2.static(modelsDir, { maxAge: "7d" }));
 app.get(["/api/brand/logo-status", "/api/v1/brand/logo-status"], async (_req, res) => {
   try {
     const storeSettings = await cmsRepository.getStoreSettings();
-    const brandingDir = path19.join(brandAssetsDir, "branding");
+    const brandingDir = path21.join(brandAssetsDir, "branding");
     const resolveLogoPath = (baseName) => {
       const candidates = [
-        { url: `/assets/branding/${baseName}.svg`, filePath: path19.join(brandingDir, `${baseName}.svg`) },
-        { url: `/assets/${baseName}.svg`, filePath: path19.join(brandAssetsDir, `${baseName}.svg`) },
-        { url: `/assets/branding/${baseName}.png`, filePath: path19.join(brandingDir, `${baseName}.png`) },
-        { url: `/assets/${baseName}.png`, filePath: path19.join(brandAssetsDir, `${baseName}.png`) }
+        { url: `/assets/branding/${baseName}.svg`, filePath: path21.join(brandingDir, `${baseName}.svg`) },
+        { url: `/assets/${baseName}.svg`, filePath: path21.join(brandAssetsDir, `${baseName}.svg`) },
+        { url: `/assets/branding/${baseName}.png`, filePath: path21.join(brandingDir, `${baseName}.png`) },
+        { url: `/assets/${baseName}.png`, filePath: path21.join(brandAssetsDir, `${baseName}.png`) }
       ];
       for (const c of candidates) {
-        if (fs21.existsSync(c.filePath)) {
+        if (fs23.existsSync(c.filePath)) {
           return { exists: true, url: c.url, filePath: c.filePath };
         }
       }
-      return { exists: false, url: `/assets/${baseName}.png`, filePath: path19.join(brandAssetsDir, `${baseName}.png`) };
+      return { exists: false, url: `/assets/${baseName}.png`, filePath: path21.join(brandAssetsDir, `${baseName}.png`) };
     };
     const primary = resolveLogoPath("toriwear-official-logo");
     const secondary = resolveLogoPath("second-brand-logo");
@@ -26812,7 +27848,7 @@ app.get(["/api/brand/logo-status", "/api/v1/brand/logo-status"], async (_req, re
     let size = 0;
     let mtime = 0;
     if (primary.exists) {
-      const stat = fs21.statSync(primary.filePath);
+      const stat = fs23.statSync(primary.filePath);
       size = stat.size;
       mtime = Math.floor(stat.mtimeMs);
     }
@@ -26845,26 +27881,26 @@ app.post(["/api/brand/upload-logo", "/api/v1/brand/upload-logo"], requireStaffAu
     if (buffer.length === 0) {
       return res.status(400).json({ success: false, error: "Uploaded logo payload is empty." });
     }
-    const brandingDir = path19.join(brandAssetsDir, "branding");
-    if (!fs21.existsSync(brandingDir)) {
-      fs21.mkdirSync(brandingDir, { recursive: true });
+    const brandingDir = path21.join(brandAssetsDir, "branding");
+    if (!fs23.existsSync(brandingDir)) {
+      fs23.mkdirSync(brandingDir, { recursive: true });
     }
     const ext = isSvg ? "svg" : "png";
     const oppositeExt = isSvg ? "png" : "svg";
     const now = Date.now();
     const saveTargetFiles = (baseName) => {
-      const bPath = path19.join(brandingDir, `${baseName}.${ext}`);
-      const rPath = path19.join(brandAssetsDir, `${baseName}.${ext}`);
-      fs21.writeFileSync(bPath, buffer);
-      fs21.writeFileSync(rPath, buffer);
-      const oldB = path19.join(brandingDir, `${baseName}.${oppositeExt}`);
-      const oldR = path19.join(brandAssetsDir, `${baseName}.${oppositeExt}`);
-      if (fs21.existsSync(oldB)) fs21.unlinkSync(oldB);
-      if (fs21.existsSync(oldR)) fs21.unlinkSync(oldR);
+      const bPath = path21.join(brandingDir, `${baseName}.${ext}`);
+      const rPath = path21.join(brandAssetsDir, `${baseName}.${ext}`);
+      fs23.writeFileSync(bPath, buffer);
+      fs23.writeFileSync(rPath, buffer);
+      const oldB = path21.join(brandingDir, `${baseName}.${oppositeExt}`);
+      const oldR = path21.join(brandAssetsDir, `${baseName}.${oppositeExt}`);
+      if (fs23.existsSync(oldB)) fs23.unlinkSync(oldB);
+      if (fs23.existsSync(oldR)) fs23.unlinkSync(oldR);
       return `/assets/branding/${baseName}.${ext}`;
     };
     const currentSettings = await cmsRepository.getStoreSettings();
-    const defaultSecondaryFallback = fs21.existsSync(path19.join(brandingDir, "second-brand-logo.png")) ? "/assets/branding/second-brand-logo.png" : "/assets/second-brand-logo.png";
+    const defaultSecondaryFallback = fs23.existsSync(path21.join(brandingDir, "second-brand-logo.png")) ? "/assets/branding/second-brand-logo.png" : "/assets/second-brand-logo.png";
     let nextPrimaryUrl = currentSettings.logoUrl || "/assets/branding/toriwear-official-logo.png";
     let nextSecondaryUrl = currentSettings.secondaryLogoUrl || defaultSecondaryFallback;
     if (target === "secondary") {
@@ -26947,8 +27983,8 @@ app.post("/api/ai/image/test", requireStaffAuth, aiRateLimiter, async (_req, res
       imageSize: "1K"
     });
     const filename = `test-symbol-${Date.now()}.png`;
-    const filePath = path19.join(assetsDir, filename);
-    fs21.writeFileSync(filePath, Buffer.from(result.data, "base64"));
+    const filePath = path21.join(assetsDir, filename);
+    fs23.writeFileSync(filePath, Buffer.from(result.data, "base64"));
     const imageUrl = `/generated-assets/${filename}`;
     const durationMs = Date.now() - startTime;
     telemetryLogs.unshift({
@@ -27062,8 +28098,8 @@ app.post("/api/ai/design/generate", requireStaffAuth, aiRateLimiter, async (req,
       imageMimeType = result.mimeType;
       const assetId = `tori-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
       const filename = `${assetId}.png`;
-      const filePath = path19.join(assetsDir, filename);
-      fs21.writeFileSync(filePath, Buffer.from(result.data, "base64"));
+      const filePath = path21.join(assetsDir, filename);
+      fs23.writeFileSync(filePath, Buffer.from(result.data, "base64"));
       imageUrl = `/generated-assets/${filename}`;
       artworkStatus = "READY";
     } catch (imageErr) {
@@ -27191,8 +28227,8 @@ app.post("/api/ai/design/generate-artwork", requireStaffAuth, aiRateLimiter, asy
     const result = await imageManager.generateImage(prompt, { aspectRatio, imageSize });
     const assetId = `tori-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const filename = `${assetId}.png`;
-    const filePath = path19.join(assetsDir, filename);
-    fs21.writeFileSync(filePath, Buffer.from(result.data, "base64"));
+    const filePath = path21.join(assetsDir, filename);
+    fs23.writeFileSync(filePath, Buffer.from(result.data, "base64"));
     const imageUrl = `/generated-assets/${filename}`;
     return res.status(200).json({
       success: true,
@@ -27247,8 +28283,8 @@ Art Direction: Isolated original anime streetwear graphic on solid clean neutral
       mimeType = result.mimeType;
       const assetId = `tori-var-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
       const filename = `${assetId}.png`;
-      const filePath = path19.join(assetsDir, filename);
-      fs21.writeFileSync(filePath, Buffer.from(base64Data, "base64"));
+      const filePath = path21.join(assetsDir, filename);
+      fs23.writeFileSync(filePath, Buffer.from(base64Data, "base64"));
       imageUrl = `/generated-assets/${filename}`;
     } catch (err) {
       console.warn("[Variation Generation Notice]", err?.message || err);
@@ -27563,15 +28599,15 @@ async function startServer() {
     });
   } else {
     const candidateDistDirs = [
-      path19.resolve(process.cwd(), "dist"),
-      path19.resolve(import.meta.dirname || process.cwd(), "dist"),
-      path19.resolve(import.meta.dirname || process.cwd(), "..", "dist")
+      path21.resolve(process.cwd(), "dist"),
+      path21.resolve(import.meta.dirname || process.cwd(), "dist"),
+      path21.resolve(import.meta.dirname || process.cwd(), "..", "dist")
     ];
-    const distDir = candidateDistDirs.find((d) => fs21.existsSync(path19.join(d, "index.html"))) || candidateDistDirs[0];
-    const indexHtmlPath = path19.join(distDir, "index.html");
+    const distDir = candidateDistDirs.find((d) => fs23.existsSync(path21.join(d, "index.html"))) || candidateDistDirs[0];
+    const indexHtmlPath = path21.join(distDir, "index.html");
     const getRuntimeSpaHtml = async () => {
-      if (!fs21.existsSync(indexHtmlPath)) return null;
-      const rawHtml = fs21.readFileSync(indexHtmlPath, "utf8");
+      if (!fs23.existsSync(indexHtmlPath)) return null;
+      const rawHtml = fs23.readFileSync(indexHtmlPath, "utf8");
       let metaDomainCode = "";
       let metaPixelId = "";
       try {

@@ -38,6 +38,7 @@ export interface RetrieveFileResult {
   buffer?: Buffer;
   contentType?: string;
   sizeBytes?: number;
+  statusCode?: number;
   error?: string;
 }
 
@@ -388,9 +389,24 @@ function resolveGcsConfiguration(overrideBucketName?: string): ParsedGcsConfig {
   };
 }
 
+export interface GoogleCloudStorageAdapterOptions {
+  bucketName?: string;
+  publicBaseUrl?: string;
+  /** Optional injected @google-cloud/storage client (used for automated mocked SDK tests). */
+  storageClient?: Storage;
+}
+
+let warnedDeprecatedGcsMakePublic = false;
+
 /**
  * Genuine Google Cloud Storage adapter using official @google-cloud/storage SDK.
- * Fails closed whenever credentials or bucket configuration are missing/invalid.
+ *
+ * Public Access Model:
+ * - Public storefront images rely exclusively on Uniform Bucket-Level Access (UBLA)
+ *   and bucket-level IAM (e.g. roles/storage.objectViewer on a dedicated storefront media bucket).
+ * - Legacy per-object ACLs and file.makePublic() are intentionally disabled and never invoked.
+ * - Private customer files and unrelated application data must never be stored in a public bucket.
+ * - Fails closed whenever credentials or bucket configuration are missing/invalid.
  */
 export class GoogleCloudStorageAdapter implements StorageAdapter {
   public readonly providerName = 'gcs' as const;
@@ -398,8 +414,46 @@ export class GoogleCloudStorageAdapter implements StorageAdapter {
   private storageClient: Storage | null = null;
   private bucket: Bucket | null = null;
 
-  constructor(bucketName?: string) {
-    this.config = resolveGcsConfiguration(bucketName);
+  constructor(bucketNameOrOptions?: string | GoogleCloudStorageAdapterOptions) {
+    if (String(process.env.GCS_MAKE_PUBLIC || '').trim() && !warnedDeprecatedGcsMakePublic) {
+      warnedDeprecatedGcsMakePublic = true;
+      console.warn(
+        '[STORAGE:GCS] Ignoring deprecated GCS_MAKE_PUBLIC setting. Configure Uniform Bucket-Level Access and bucket-level IAM on your storefront media bucket instead.'
+      );
+    }
+
+    const opts: GoogleCloudStorageAdapterOptions =
+      typeof bucketNameOrOptions === 'string'
+        ? { bucketName: bucketNameOrOptions }
+        : (bucketNameOrOptions || {});
+
+    if (opts.storageClient) {
+      const bucketName = String(opts.bucketName || process.env.GCS_BUCKET_NAME || '').trim();
+      const publicBaseUrl = (
+        opts.publicBaseUrl ||
+        (bucketName ? `https://storage.googleapis.com/${bucketName}` : '')
+      ).replace(/\/+$/, '');
+
+      if (!bucketName || !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
+        this.config = {
+          valid: false,
+          bucketName,
+          publicBaseUrl,
+          error: 'Cloud storage is not properly configured: GCS_BUCKET_NAME is missing or invalid.',
+        };
+      } else {
+        this.config = {
+          valid: true,
+          bucketName,
+          publicBaseUrl,
+        };
+        this.storageClient = opts.storageClient;
+        this.bucket = this.storageClient.bucket(bucketName);
+      }
+      return;
+    }
+
+    this.config = resolveGcsConfiguration(opts.bucketName);
     if (this.config.valid) {
       const storageOpts: ConstructorParameters<typeof Storage>[0] = {};
       if (this.config.projectId) storageOpts.projectId = this.config.projectId;
@@ -462,6 +516,7 @@ export class GoogleCloudStorageAdapter implements StorageAdapter {
       const file = this.bucket.file(cleanPath);
       const cacheControl = options?.cacheControl || IMMUTABLE_IMAGE_CACHE_CONTROL;
 
+      // Upload without object-level ACLs; public access is governed strictly by Uniform Bucket-Level Access & bucket IAM.
       await file.save(buffer, {
         resumable: false,
         validation: 'crc32c',
@@ -471,11 +526,6 @@ export class GoogleCloudStorageAdapter implements StorageAdapter {
           cacheControl,
         },
       });
-
-      // Only invoke legacy ACL makePublic when explicitly opted in; modern GCS uses Uniform Bucket-Level Access.
-      if (String(process.env.GCS_MAKE_PUBLIC || '').toLowerCase() === 'true') {
-        await file.makePublic();
-      }
 
       const [exists] = await file.exists();
       if (!exists) {
@@ -491,7 +541,18 @@ export class GoogleCloudStorageAdapter implements StorageAdapter {
         provider: 'gcs',
       };
     } catch (err: any) {
+      const errCode = Number(err?.code);
       console.error('[STORAGE:GCS] Upload failed:', err?.code || '', err?.message || err);
+      if (errCode === 403 || errCode === 401) {
+        return {
+          success: false,
+          url: '',
+          destinationPath: cleanPath,
+          provider: 'gcs',
+          statusCode: 403,
+          error: 'Cloud storage permission denied. Verify service-account IAM roles on the configured Google Cloud Storage bucket.',
+        };
+      }
       return {
         success: false,
         url: '',
@@ -507,6 +568,7 @@ export class GoogleCloudStorageAdapter implements StorageAdapter {
     if (!this.config.valid || !this.bucket) {
       return {
         success: false,
+        statusCode: 503,
         error: this.config.error || 'Cloud storage is not properly configured.',
       };
     }
@@ -520,11 +582,28 @@ export class GoogleCloudStorageAdapter implements StorageAdapter {
         buffer,
         contentType: metadata?.contentType || guessContentTypeFromPath(cleanPath),
         sizeBytes: buffer.length,
+        statusCode: 200,
       };
     } catch (err: any) {
+      const errCode = Number(err?.code);
       console.error('[STORAGE:GCS] File retrieval failed:', err?.code || '', err?.message || err);
+      if (errCode === 404) {
+        return {
+          success: false,
+          statusCode: 404,
+          error: 'File not found in cloud storage.',
+        };
+      }
+      if (errCode === 403 || errCode === 401) {
+        return {
+          success: false,
+          statusCode: 403,
+          error: 'Cloud storage permission denied while retrieving file.',
+        };
+      }
       return {
         success: false,
+        statusCode: 502,
         error: 'Failed to retrieve file from cloud storage.',
       };
     }

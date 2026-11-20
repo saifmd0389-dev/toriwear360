@@ -12,7 +12,7 @@ import sharp, { type Metadata } from 'sharp';
 
 export const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MB safe default for chunked uploads
 export const DEFAULT_REGULAR_MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB for JSON Data URL uploads
-export const DEFAULT_MAX_DIMENSION = 2048; // Max width or height in px (no upscaling)
+export const DEFAULT_MAX_DIMENSION = 2560; // Max width or height in px (no upscaling)
 export const DEFAULT_WEBP_QUALITY = 82;
 const MAX_INPUT_PIXELS = 64_000_000; // ~8000x8000 safe Sharp decompression limit
 

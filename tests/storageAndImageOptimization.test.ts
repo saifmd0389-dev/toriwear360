@@ -7,15 +7,23 @@ import http from 'node:http';
 import express from 'express';
 import sharp from 'sharp';
 import {
+  DEFAULT_MAX_DIMENSION,
   ImageValidationError,
   optimizeImageForStorage,
 } from '../server/services/storage/imageOptimizer';
 import {
   GoogleCloudStorageAdapter,
+  IMMUTABLE_IMAGE_CACHE_CONTROL,
   LocalStorageAdapter,
   getStorageAdapter,
   resetStorageAdapterForTests,
 } from '../server/services/storage/storageAdapter';
+import {
+  ChunkUploadError,
+  ChunkUploadSessionManager,
+  chunkUploadSessionManager,
+} from '../server/services/storage/chunkUploadSessionManager';
+import type { Storage } from '@google-cloud/storage';
 
 async function createSampleRaster(
   format: 'jpeg' | 'png' | 'webp',
@@ -62,9 +70,11 @@ const SAMPLE_SVG = Buffer.from(
   'utf8'
 );
 
-test('ImageOptimizer: converts oversized JPEG to WebP, preserves aspect ratio & EXIF orientation', async () => {
-  // 3000x1500 with EXIF orientation 6 (90 deg CW -> visual 1500x3000 -> resized inside 2048x2048 -> 1024x2048)
-  const jpegBuf = await createSampleRaster('jpeg', 3000, 1500, { orientation: 6 });
+test('ImageOptimizer: converts oversized JPEG to WebP at 2560px max dimension, preserves aspect ratio & EXIF orientation', async () => {
+  assert.equal(DEFAULT_MAX_DIMENSION, 2560);
+
+  // 4000x2000 with EXIF orientation 6 (90 deg CW -> visual 2000x4000 -> resized inside 2560x2560 -> 1280x2560)
+  const jpegBuf = await createSampleRaster('jpeg', 4000, 2000, { orientation: 6 });
   const result = await optimizeImageForStorage(jpegBuf, {
     filename: 'hero-banner.jpg',
     mimeType: 'image/jpeg',
@@ -77,8 +87,18 @@ test('ImageOptimizer: converts oversized JPEG to WebP, preserves aspect ratio & 
 
   const outMeta = await sharp(result.buffer).metadata();
   assert.equal(outMeta.format, 'webp');
-  assert.equal(outMeta.width, 1024);
-  assert.equal(outMeta.height, 2048);
+  assert.equal(outMeta.width, 1280);
+  assert.equal(outMeta.height, 2560);
+
+  // 2400x1600 is within the 2560px max dimension and must NOT be downscaled or upscaled
+  const midResJpeg = await createSampleRaster('jpeg', 2400, 1600);
+  const midRes = await optimizeImageForStorage(midResJpeg, {
+    filename: 'banner-2400.jpg',
+    mimeType: 'image/jpeg',
+  });
+  const midMeta = await sharp(midRes.buffer).metadata();
+  assert.equal(midMeta.width, 2400);
+  assert.equal(midMeta.height, 1600);
 });
 
 test('ImageOptimizer: converts small PNG & WebP to WebP without enlarging', async () => {
@@ -398,6 +418,618 @@ test('CMS Router HTTP endpoints: regular & chunked uploads optimize and serve We
     else process.env.STORAGE_PROVIDER = prevProvider;
     if (prevBucket === undefined) delete process.env.GCS_BUCKET_NAME;
     else process.env.GCS_BUCKET_NAME = prevBucket;
+    resetStorageAdapterForTests();
+
+    for (const fileName of createdFiles) {
+      const p = path.resolve(process.cwd(), 'public/generated-assets', fileName);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('GoogleCloudStorageAdapter (mocked SDK): upload, retrieval, deletion, missing object (404), permission errors (403) & Uniform Bucket-Level Access (no makePublic)', async () => {
+  const prevMakePublic = process.env.GCS_MAKE_PUBLIC;
+  try {
+    // Even if legacy GCS_MAKE_PUBLIC is set, Uniform Bucket-Level Access mode must NEVER invoke file.makePublic()
+    process.env.GCS_MAKE_PUBLIC = 'true';
+
+    const objects = new Map<string, { data: Buffer; metadata: Record<string, any> }>();
+    const savedOptionsLog: Array<{ name: string; options: any }> = [];
+    let makePublicCalled = false;
+    let simulatePermissionDenied = false;
+
+    const makeError = (code: number, message: string) => {
+      const err: any = new Error(message);
+      err.code = code;
+      return err;
+    };
+
+    const mockStorageClient = {
+      bucket: (_bucketName: string) => ({
+        exists: async () => {
+          if (simulatePermissionDenied) throw makeError(403, 'Permission denied on bucket');
+          return [true];
+        },
+        file: (name: string) => ({
+          save: async (buffer: Buffer, options: any) => {
+            if (simulatePermissionDenied) throw makeError(403, 'storage.objects.create denied');
+            savedOptionsLog.push({ name, options });
+            objects.set(name, {
+              data: Buffer.from(buffer),
+              metadata: {
+                contentType: options?.contentType || options?.metadata?.contentType,
+                cacheControl: options?.metadata?.cacheControl,
+              },
+            });
+          },
+          makePublic: async () => {
+            makePublicCalled = true;
+            throw makeError(400, 'Cannot update ACLs when Uniform Bucket-Level Access is enabled.');
+          },
+          exists: async () => {
+            if (simulatePermissionDenied) throw makeError(403, 'storage.objects.get denied');
+            return [objects.has(name)];
+          },
+          download: async () => {
+            if (simulatePermissionDenied) throw makeError(403, 'storage.objects.get denied');
+            const obj = objects.get(name);
+            if (!obj) throw makeError(404, 'No such object');
+            return [Buffer.from(obj.data)];
+          },
+          getMetadata: async () => {
+            if (simulatePermissionDenied) throw makeError(403, 'storage.objects.get denied');
+            const obj = objects.get(name);
+            if (!obj) throw makeError(404, 'No such object');
+            return [obj.metadata];
+          },
+          delete: async () => {
+            if (simulatePermissionDenied) throw makeError(403, 'storage.objects.delete denied');
+            if (!objects.has(name)) throw makeError(404, 'No such object');
+            objects.delete(name);
+          },
+        }),
+      }),
+    } as unknown as Storage;
+
+    const adapter = new GoogleCloudStorageAdapter({
+      bucketName: 'toriwear-public-media',
+      storageClient: mockStorageClient,
+    });
+
+    assert.equal(adapter.getConfigStatus().configured, true);
+    assert.deepEqual(await adapter.verifyBucketAccess(), { ok: true });
+
+    // 1. Successful upload with Uniform Bucket-Level Access (no makePublic, no object ACL)
+    const sampleWebp = await createSampleRaster('webp', 120, 120);
+    const up = await adapter.uploadFile(sampleWebp, 'products/cms-drop-01.webp', 'image/webp');
+    assert.equal(up.success, true);
+    assert.equal(up.provider, 'gcs');
+    assert.equal(up.url, 'https://storage.googleapis.com/toriwear-public-media/products/cms-drop-01.webp');
+    assert.equal(up.contentType, 'image/webp');
+    assert.equal(up.sizeBytes, sampleWebp.length);
+    assert.equal(makePublicCalled, false, 'Legacy file.makePublic() must NEVER be called');
+    assert.equal(savedOptionsLog.length, 1);
+    assert.equal(savedOptionsLog[0].options.metadata.cacheControl, IMMUTABLE_IMAGE_CACHE_CONTROL);
+    assert.equal(savedOptionsLog[0].options.predefinedAcl, undefined);
+
+    // 2. Existence & Retrieval
+    assert.equal(await adapter.fileExists('products/cms-drop-01.webp'), true);
+    const retrieved = await adapter.getFile('products/cms-drop-01.webp');
+    assert.equal(retrieved.success, true);
+    assert.equal(retrieved.statusCode, 200);
+    assert.equal(retrieved.contentType, 'image/webp');
+    assert.equal(retrieved.sizeBytes, sampleWebp.length);
+    assert.equal(Buffer.compare(retrieved.buffer!, sampleWebp), 0);
+
+    // 3. Deletion & Missing Object (404)
+    assert.equal(await adapter.deleteFile('products/cms-drop-01.webp'), true);
+    assert.equal(await adapter.fileExists('products/cms-drop-01.webp'), false);
+    assert.equal(await adapter.deleteFile('products/cms-drop-01.webp'), false);
+
+    const missing = await adapter.getFile('products/does-not-exist.webp');
+    assert.equal(missing.success, false);
+    assert.equal(missing.statusCode, 404);
+
+    // 4. Permission Denied (403) across upload, retrieval, deletion, and bucket check
+    simulatePermissionDenied = true;
+    const permUpload = await adapter.uploadFile(sampleWebp, 'products/forbidden.webp', 'image/webp');
+    assert.equal(permUpload.success, false);
+    assert.equal(permUpload.statusCode, 403);
+    assert.match(String(permUpload.error), /permission denied/i);
+    assert.equal(
+      fs.existsSync(path.resolve(process.cwd(), 'public/generated-assets/products/forbidden.webp')),
+      false
+    );
+
+    const permGet = await adapter.getFile('products/forbidden.webp');
+    assert.equal(permGet.success, false);
+    assert.equal(permGet.statusCode, 403);
+
+    assert.equal(await adapter.deleteFile('products/forbidden.webp'), false);
+    assert.equal(await adapter.fileExists('products/forbidden.webp'), false);
+    const permBucket = await adapter.verifyBucketAccess();
+    assert.equal(permBucket.ok, false);
+  } finally {
+    if (prevMakePublic === undefined) delete process.env.GCS_MAKE_PUBLIC;
+    else process.env.GCS_MAKE_PUBLIC = prevMakePublic;
+  }
+});
+
+test('ChunkUploadSessionManager: sequential uploads, duplicates, out-of-order, mismatched metadata, concurrent IDs, admin binding & cleanup', async () => {
+  const tmpStagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'toriwear-chunk-mgr-test-'));
+  const manager = new ChunkUploadSessionManager({
+    stagingDir: tmpStagingDir,
+    ttlMs: 60_000,
+    enablePeriodicSweep: false,
+  });
+
+  const listStagingFiles = () =>
+    fs.existsSync(tmpStagingDir)
+      ? fs.readdirSync(tmpStagingDir).filter((f) => f.startsWith('chunk-') && f.endsWith('.bin'))
+      : [];
+
+  try {
+    // 1. Sequential 3-chunk upload succeeds and cleans up staging file immediately
+    const payload = Buffer.from('chunk-0-part|chunk-1-part|chunk-2-part');
+    const c0 = manager.appendChunk({
+      ownerId: 'admin-1',
+      uploadId: 'seq_upload_001',
+      chunkIndex: 0,
+      totalChunks: 3,
+      filename: 'tee.png',
+      mimeType: 'image/png',
+      chunkBuffer: payload.subarray(0, 12),
+      maxUploadBytes: 1024 * 1024,
+    });
+    assert.equal(c0.completed, false);
+    assert.equal(listStagingFiles().length, 1);
+
+    const c1 = manager.appendChunk({
+      ownerId: 'admin-1',
+      uploadId: 'seq_upload_001',
+      chunkIndex: 1,
+      totalChunks: 3,
+      filename: 'tee.png',
+      mimeType: 'image/png',
+      chunkBuffer: payload.subarray(12, 25),
+      maxUploadBytes: 1024 * 1024,
+    });
+    assert.equal(c1.completed, false);
+
+    const c2 = manager.appendChunk({
+      ownerId: 'admin-1',
+      uploadId: 'seq_upload_001',
+      chunkIndex: 2,
+      totalChunks: 3,
+      filename: 'tee.png',
+      mimeType: 'image/png',
+      chunkBuffer: payload.subarray(25),
+      maxUploadBytes: 1024 * 1024,
+    });
+    assert.equal(c2.completed, true);
+    assert.equal(Buffer.compare(c2.assembledBuffer!, payload), 0);
+    assert.equal(listStagingFiles().length, 0);
+    assert.equal(manager.getActiveSessionCount(), 0);
+
+    // 2. Duplicate chunk 0 and duplicate chunk 1 are rejected with 409 & cleaned up
+    manager.appendChunk({
+      ownerId: 'admin-1',
+      uploadId: 'dup_upload_001',
+      chunkIndex: 0,
+      totalChunks: 3,
+      filename: 'dup.png',
+      mimeType: 'image/png',
+      chunkBuffer: Buffer.from('aaa'),
+      maxUploadBytes: 1024 * 1024,
+    });
+    assert.throws(
+      () =>
+        manager.appendChunk({
+          ownerId: 'admin-1',
+          uploadId: 'dup_upload_001',
+          chunkIndex: 0,
+          totalChunks: 3,
+          filename: 'dup.png',
+          mimeType: 'image/png',
+          chunkBuffer: Buffer.from('aaa'),
+          maxUploadBytes: 1024 * 1024,
+        }),
+      (err: any) => err instanceof ChunkUploadError && err.statusCode === 409 && err.code === 'DUPLICATE_CHUNK'
+    );
+    assert.equal(listStagingFiles().length, 0);
+
+    // Duplicate chunk 1 after chunk 1 already received
+    manager.appendChunk({
+      ownerId: 'admin-1',
+      uploadId: 'dup_upload_002',
+      chunkIndex: 0,
+      totalChunks: 3,
+      filename: 'dup2.png',
+      mimeType: 'image/png',
+      chunkBuffer: Buffer.from('aaa'),
+      maxUploadBytes: 1024 * 1024,
+    });
+    manager.appendChunk({
+      ownerId: 'admin-1',
+      uploadId: 'dup_upload_002',
+      chunkIndex: 1,
+      totalChunks: 3,
+      filename: 'dup2.png',
+      mimeType: 'image/png',
+      chunkBuffer: Buffer.from('bbb'),
+      maxUploadBytes: 1024 * 1024,
+    });
+    assert.throws(
+      () =>
+        manager.appendChunk({
+          ownerId: 'admin-1',
+          uploadId: 'dup_upload_002',
+          chunkIndex: 1,
+          totalChunks: 3,
+          filename: 'dup2.png',
+          mimeType: 'image/png',
+          chunkBuffer: Buffer.from('bbb'),
+          maxUploadBytes: 1024 * 1024,
+        }),
+      (err: any) => err instanceof ChunkUploadError && err.statusCode === 409 && err.code === 'DUPLICATE_CHUNK'
+    );
+    assert.equal(listStagingFiles().length, 0);
+
+    // 3. Out-of-order chunks rejected & cleaned up
+    assert.throws(
+      () =>
+        manager.appendChunk({
+          ownerId: 'admin-1',
+          uploadId: 'ooo_upload_001',
+          chunkIndex: 1,
+          totalChunks: 2,
+          filename: 'ooo.png',
+          mimeType: 'image/png',
+          chunkBuffer: Buffer.from('bbb'),
+          maxUploadBytes: 1024 * 1024,
+        }),
+      (err: any) => err instanceof ChunkUploadError && err.statusCode === 400
+    );
+
+    manager.appendChunk({
+      ownerId: 'admin-1',
+      uploadId: 'ooo_upload_002',
+      chunkIndex: 0,
+      totalChunks: 3,
+      filename: 'ooo2.png',
+      mimeType: 'image/png',
+      chunkBuffer: Buffer.from('aaa'),
+      maxUploadBytes: 1024 * 1024,
+    });
+    assert.throws(
+      () =>
+        manager.appendChunk({
+          ownerId: 'admin-1',
+          uploadId: 'ooo_upload_002',
+          chunkIndex: 2,
+          totalChunks: 3,
+          filename: 'ooo2.png',
+          mimeType: 'image/png',
+          chunkBuffer: Buffer.from('ccc'),
+          maxUploadBytes: 1024 * 1024,
+        }),
+      (err: any) => err instanceof ChunkUploadError && err.statusCode === 400 && err.code === 'OUT_OF_ORDER_CHUNK'
+    );
+    assert.equal(listStagingFiles().length, 0);
+
+    // 4. Mismatched totalChunks, filename, and mimeType rejected & cleaned up
+    for (const mismatch of [
+      { field: 'totalChunks', totalChunks: 3, filename: 'same.png', mimeType: 'image/png', code: 'INCONSISTENT_TOTAL_CHUNKS' },
+      { field: 'filename', totalChunks: 2, filename: 'different.png', mimeType: 'image/png', code: 'INCONSISTENT_FILENAME' },
+      { field: 'mimeType', totalChunks: 2, filename: 'same.png', mimeType: 'image/jpeg', code: 'INCONSISTENT_MIME_TYPE' },
+    ]) {
+      const uid = `mismatch_${mismatch.field}_001`;
+      manager.appendChunk({
+        ownerId: 'admin-1',
+        uploadId: uid,
+        chunkIndex: 0,
+        totalChunks: 2,
+        filename: 'same.png',
+        mimeType: 'image/png',
+        chunkBuffer: Buffer.from('part0'),
+        maxUploadBytes: 1024 * 1024,
+      });
+      assert.throws(
+        () =>
+          manager.appendChunk({
+            ownerId: 'admin-1',
+            uploadId: uid,
+            chunkIndex: 1,
+            totalChunks: mismatch.totalChunks,
+            filename: mismatch.filename,
+            mimeType: mismatch.mimeType,
+            chunkBuffer: Buffer.from('part1'),
+            maxUploadBytes: 1024 * 1024,
+          }),
+        (err: any) => err instanceof ChunkUploadError && err.statusCode === 400 && err.code === mismatch.code
+      );
+      assert.equal(listStagingFiles().length, 0);
+    }
+
+    // 5. Concurrent upload IDs (both distinct IDs and same ID across different admins) never collide
+    const sharedUploadId = 'concurrent_shared_id_01';
+    const a0 = manager.appendChunk({
+      ownerId: 'admin-A',
+      uploadId: sharedUploadId,
+      chunkIndex: 0,
+      totalChunks: 2,
+      filename: 'alpha.png',
+      mimeType: 'image/png',
+      chunkBuffer: Buffer.from('ALPHA-0|'),
+      maxUploadBytes: 1024 * 1024,
+    });
+    const b0 = manager.appendChunk({
+      ownerId: 'admin-B',
+      uploadId: sharedUploadId,
+      chunkIndex: 0,
+      totalChunks: 2,
+      filename: 'beta.png',
+      mimeType: 'image/png',
+      chunkBuffer: Buffer.from('BETA-0|'),
+      maxUploadBytes: 1024 * 1024,
+    });
+    assert.notEqual(a0.tmpFilePath, b0.tmpFilePath, 'Concurrent sessions must use isolated staging files');
+    assert.equal(listStagingFiles().length, 2);
+
+    // Admin C trying to append chunk 1 to sharedUploadId (owned by A & B) must be forbidden (403) without harming A or B
+    assert.throws(
+      () =>
+        manager.appendChunk({
+          ownerId: 'admin-C',
+          uploadId: sharedUploadId,
+          chunkIndex: 1,
+          totalChunks: 2,
+          filename: 'alpha.png',
+          mimeType: 'image/png',
+          chunkBuffer: Buffer.from('HIJACK'),
+          maxUploadBytes: 1024 * 1024,
+        }),
+      (err: any) => err instanceof ChunkUploadError && err.statusCode === 403 && err.code === 'UPLOAD_SESSION_FORBIDDEN'
+    );
+
+    const a1 = manager.appendChunk({
+      ownerId: 'admin-A',
+      uploadId: sharedUploadId,
+      chunkIndex: 1,
+      totalChunks: 2,
+      filename: 'alpha.png',
+      mimeType: 'image/png',
+      chunkBuffer: Buffer.from('ALPHA-1'),
+      maxUploadBytes: 1024 * 1024,
+    });
+    const b1 = manager.appendChunk({
+      ownerId: 'admin-B',
+      uploadId: sharedUploadId,
+      chunkIndex: 1,
+      totalChunks: 2,
+      filename: 'beta.png',
+      mimeType: 'image/png',
+      chunkBuffer: Buffer.from('BETA-1'),
+      maxUploadBytes: 1024 * 1024,
+    });
+    assert.equal(a1.assembledBuffer!.toString('utf8'), 'ALPHA-0|ALPHA-1');
+    assert.equal(b1.assembledBuffer!.toString('utf8'), 'BETA-0|BETA-1');
+    assert.equal(listStagingFiles().length, 0);
+
+    // 6. Expiration & maxUploadBytes failure cleanup
+    manager.appendChunk({
+      ownerId: 'admin-1',
+      uploadId: 'oversize_upload_01',
+      chunkIndex: 0,
+      totalChunks: 2,
+      filename: 'big.png',
+      mimeType: 'image/png',
+      chunkBuffer: Buffer.alloc(600, 1),
+      maxUploadBytes: 1000,
+    });
+    assert.throws(
+      () =>
+        manager.appendChunk({
+          ownerId: 'admin-1',
+          uploadId: 'oversize_upload_01',
+          chunkIndex: 1,
+          totalChunks: 2,
+          filename: 'big.png',
+          mimeType: 'image/png',
+          chunkBuffer: Buffer.alloc(500, 2),
+          maxUploadBytes: 1000,
+        }),
+      (err: any) => err instanceof ChunkUploadError && err.statusCode === 413 && err.code === 'UPLOAD_TOO_LARGE'
+    );
+    assert.equal(listStagingFiles().length, 0);
+
+    manager.setTtlMsForTests(5);
+    manager.appendChunk({
+      ownerId: 'admin-1',
+      uploadId: 'expire_upload_01',
+      chunkIndex: 0,
+      totalChunks: 2,
+      filename: 'exp.png',
+      mimeType: 'image/png',
+      chunkBuffer: Buffer.from('temp'),
+      maxUploadBytes: 1024 * 1024,
+    });
+    assert.equal(listStagingFiles().length, 1);
+    await new Promise((r) => setTimeout(r, 20));
+    const swept = manager.sweepExpiredSessions();
+    assert.equal(swept, 1);
+    assert.equal(listStagingFiles().length, 0);
+  } finally {
+    manager.clearAllSessions();
+    fs.rmSync(tmpStagingDir, { recursive: true, force: true });
+  }
+});
+
+test('CMS Router HTTP chunked upload hardening: sequential, duplicate, out-of-order, mismatched totalChunks, concurrent IDs, admin binding & cleanup after failure', async () => {
+  const { cmsRouter } = await import('../server/routes/cmsRouter');
+  const { authStore } = await import('../server/authStore');
+  const { userStore } = await import('../server/userStore');
+
+  const users = userStore.getAllUsers();
+  const adminA = users.find((u) => u.role === 'SUPER_ADMIN') || users[0]!;
+  const adminB = users.find((u) => u.id !== adminA.id && String(u.role) !== 'CUSTOMER') || {
+    ...adminA,
+    id: `${adminA.id}_second_admin`,
+    email: 'second-admin@thetoriwearstore.in',
+  };
+
+  const sessionA = (authStore as any).createSession(adminA, { ip: '127.0.0.1', userAgent: 'node-test-A' });
+  const sessionB = (authStore as any).createSession(adminB, { ip: '127.0.0.1', userAgent: 'node-test-B' });
+  const headersA = { Authorization: `Bearer ${sessionA.token}`, 'Content-Type': 'application/octet-stream' };
+  const headersB = { Authorization: `Bearer ${sessionB.token}`, 'Content-Type': 'application/octet-stream' };
+
+  const app = express();
+  app.use(express.json({ limit: '20mb' }));
+  app.use('/api/v1/admin/cms', cmsRouter);
+
+  const server = await new Promise<http.Server>((resolve) => {
+    const srv = app.listen(0, '127.0.0.1', () => resolve(srv));
+  });
+  const port = (server.address() as any).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const createdFiles: string[] = [];
+  const prevProvider = process.env.STORAGE_PROVIDER;
+
+  const listStagingFiles = () => {
+    const dir = chunkUploadSessionManager.getStagingDir();
+    return fs.existsSync(dir)
+      ? fs.readdirSync(dir).filter((f) => f.startsWith('chunk-') && f.endsWith('.bin'))
+      : [];
+  };
+
+  try {
+    process.env.STORAGE_PROVIDER = 'local';
+    resetStorageAdapterForTests();
+    chunkUploadSessionManager.clearAllSessions();
+
+    const imgA = await createSampleRaster('png', 240, 240);
+    const imgB = await createSampleRaster('jpeg', 300, 180);
+
+    // 1. Concurrent upload IDs (two different IDs interleaved by Admin A + same ID by Admin B)
+    const uid1 = `http_conc_1_${Date.now()}`;
+    const uid2 = `http_conc_2_${Date.now()}`;
+    const midA = Math.floor(imgA.length / 2);
+    const midB = Math.floor(imgB.length / 2);
+
+    const r1c0 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${uid1}&chunkIndex=0&totalChunks=2&filename=front.png&mimeType=image/png`,
+      { method: 'POST', headers: headersA, body: new Uint8Array(imgA.subarray(0, midA)) }
+    );
+    assert.equal(r1c0.status, 200);
+
+    // Admin B starts concurrent session using the EXACT same uploadId (isolated by admin identity & unique temp file)
+    const rBc0 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${uid1}&chunkIndex=0&totalChunks=2&filename=back.jpg&mimeType=image/jpeg`,
+      { method: 'POST', headers: headersB, body: new Uint8Array(imgB.subarray(0, midB)) }
+    );
+    assert.equal(rBc0.status, 200);
+
+    // Admin A starts second concurrent upload with uid2
+    const r2c0 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${uid2}&chunkIndex=0&totalChunks=2&filename=detail.jpg&mimeType=image/jpeg`,
+      { method: 'POST', headers: headersA, body: new Uint8Array(imgB.subarray(0, midB)) }
+    );
+    assert.equal(r2c0.status, 200);
+
+    // Admin B attempts to append chunk 1 to Admin A's uid2 -> rejected with 403 Forbidden
+    const hijackRes = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${uid2}&chunkIndex=1&totalChunks=2&filename=detail.jpg&mimeType=image/jpeg`,
+      { method: 'POST', headers: headersB, body: new Uint8Array(imgB.subarray(midB)) }
+    );
+    assert.equal(hijackRes.status, 403);
+
+    // Finish all 3 legitimate concurrent sessions cleanly
+    const [r1c1, rBc1, r2c1] = await Promise.all([
+      fetch(
+        `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${uid1}&chunkIndex=1&totalChunks=2&filename=front.png&mimeType=image/png`,
+        { method: 'POST', headers: headersA, body: new Uint8Array(imgA.subarray(midA)) }
+      ),
+      fetch(
+        `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${uid1}&chunkIndex=1&totalChunks=2&filename=back.jpg&mimeType=image/jpeg`,
+        { method: 'POST', headers: headersB, body: new Uint8Array(imgB.subarray(midB)) }
+      ),
+      fetch(
+        `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${uid2}&chunkIndex=1&totalChunks=2&filename=detail.jpg&mimeType=image/jpeg`,
+        { method: 'POST', headers: headersA, body: new Uint8Array(imgB.subarray(midB)) }
+      ),
+    ]);
+    for (const res of [r1c1, rBc1, r2c1]) {
+      assert.equal(res.status, 200);
+      const j: any = await res.json();
+      assert.equal(j.success, true);
+      assert.equal(j.completed, true);
+      assert.equal(j.contentType, 'image/webp');
+      createdFiles.push(path.basename(j.url));
+    }
+    assert.equal(chunkUploadSessionManager.getActiveSessionCount(), 0);
+
+    // 2. Duplicate chunk via HTTP returns 409 and cleans up temp file
+    const dupId = `http_dup_${Date.now()}`;
+    const d0 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${dupId}&chunkIndex=0&totalChunks=2&filename=dup.png&mimeType=image/png`,
+      { method: 'POST', headers: headersA, body: new Uint8Array(imgA.subarray(0, midA)) }
+    );
+    assert.equal(d0.status, 200);
+    const d0Again = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${dupId}&chunkIndex=0&totalChunks=2&filename=dup.png&mimeType=image/png`,
+      { method: 'POST', headers: headersA, body: new Uint8Array(imgA.subarray(0, midA)) }
+    );
+    assert.equal(d0Again.status, 409);
+    assert.equal(chunkUploadSessionManager.getActiveSessionCount(), 0);
+
+    // 3. Out-of-order chunk via HTTP returns 400 and cleans up temp file
+    const oooId = `http_ooo_${Date.now()}`;
+    const o0 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${oooId}&chunkIndex=0&totalChunks=3&filename=ooo.png&mimeType=image/png`,
+      { method: 'POST', headers: headersA, body: new Uint8Array(imgA.subarray(0, 100)) }
+    );
+    assert.equal(o0.status, 200);
+    const o2 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${oooId}&chunkIndex=2&totalChunks=3&filename=ooo.png&mimeType=image/png`,
+      { method: 'POST', headers: headersA, body: new Uint8Array(imgA.subarray(100, 200)) }
+    );
+    assert.equal(o2.status, 400);
+    assert.equal(chunkUploadSessionManager.getActiveSessionCount(), 0);
+
+    // 4. Mismatched totalChunks via HTTP returns 400 and cleans up temp file
+    const misId = `http_mis_${Date.now()}`;
+    const m0 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${misId}&chunkIndex=0&totalChunks=2&filename=mis.png&mimeType=image/png`,
+      { method: 'POST', headers: headersA, body: new Uint8Array(imgA.subarray(0, midA)) }
+    );
+    assert.equal(m0.status, 200);
+    const m1 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${misId}&chunkIndex=1&totalChunks=3&filename=mis.png&mimeType=image/png`,
+      { method: 'POST', headers: headersA, body: new Uint8Array(imgA.subarray(midA)) }
+    );
+    assert.equal(m1.status, 400);
+    assert.equal(chunkUploadSessionManager.getActiveSessionCount(), 0);
+
+    // 5. Cleanup after finalization failure (corrupted/spoofed image payload -> 400 & zero temp files left)
+    const beforeFailureFiles = listStagingFiles().length;
+    const corruptId = `http_corrupt_${Date.now()}`;
+    const bad0 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${corruptId}&chunkIndex=0&totalChunks=2&filename=fake.png&mimeType=image/png`,
+      { method: 'POST', headers: headersA, body: new Uint8Array(Buffer.from('not-a-valid-')) }
+    );
+    assert.equal(bad0.status, 200);
+    const bad1 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${corruptId}&chunkIndex=1&totalChunks=2&filename=fake.png&mimeType=image/png`,
+      { method: 'POST', headers: headersA, body: new Uint8Array(Buffer.from('png-binary')) }
+    );
+    assert.equal(bad1.status, 400);
+    assert.equal(chunkUploadSessionManager.getActiveSessionCount(), 0);
+    assert.equal(listStagingFiles().length, beforeFailureFiles, 'Temp staging file must be removed after image optimization failure');
+  } finally {
+    chunkUploadSessionManager.clearAllSessions();
+    if (prevProvider === undefined) delete process.env.STORAGE_PROVIDER;
+    else process.env.STORAGE_PROVIDER = prevProvider;
     resetStorageAdapterForTests();
 
     for (const fileName of createdFiles) {

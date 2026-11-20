@@ -1,6 +1,5 @@
 import express, { Router, Request, Response, NextFunction } from 'express';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { cmsRepository } from '../repositories/cmsRepository';
@@ -18,6 +17,10 @@ import {
   IMMUTABLE_IMAGE_CACHE_CONTROL,
   getStorageAdapter,
 } from '../services/storage/storageAdapter';
+import {
+  ChunkUploadError,
+  chunkUploadSessionManager,
+} from '../services/storage/chunkUploadSessionManager';
 
 export const cmsRouter = Router();
 
@@ -430,14 +433,6 @@ function buildUniqueAssetFilename(rawFilename: string | undefined, extension: st
   return `cms-${safePrefix}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${extension}`;
 }
 
-function getChunkStagingDir(): string {
-  const dir = path.join(os.tmpdir(), 'toriwear-upload-chunks');
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  return dir;
-}
-
 cmsRouter.post(['/upload-asset', '/cms/upload-asset', '/admin/upload-asset', '/admin/cms/upload-asset'], requireAdminAuth(), async (req: Request, res: Response) => {
   try {
     const { dataUrl, filename } = req.body || {};
@@ -499,55 +494,54 @@ cmsRouter.post(['/upload-asset', '/cms/upload-asset', '/admin/upload-asset', '/a
   }
 });
 
-// Raw binary chunked upload endpoint — streams chunks to private temp staging, then optimizes
-// with Sharp and uploads to the configured StorageAdapter (local or Google Cloud Storage).
+// Raw binary chunked upload endpoint — binds sessions to the authenticated admin identity,
+// enforces sequential chunks and consistent metadata, isolates per-session staging files,
+// optimizes with Sharp, and uploads to the configured StorageAdapter (local or GCS).
 cmsRouter.post(
   ['/upload-asset-chunk', '/cms/upload-asset-chunk', '/admin/upload-asset-chunk', '/admin/cms/upload-asset-chunk'],
   requireAdminAuth(),
   express.raw({ type: 'application/octet-stream', limit: '8mb' }),
   async (req: Request, res: Response) => {
-    let tmpChunkPath = '';
-    let shouldCleanupTmp = false;
-
     try {
-      const uploadId = String(req.query.uploadId || '').trim();
-      const chunkIndex = Number(req.query.chunkIndex);
-      const totalChunks = Number(req.query.totalChunks);
-      const rawFilename = String(req.query.filename || 'image.png');
-      const mimeType = String(req.query.mimeType || '').toLowerCase();
-      const maxUploadBytes = getConfiguredMaxUploadBytes();
-
-      if (!/^[a-zA-Z0-9_-]{8,64}$/.test(uploadId)) {
-        return res.status(400).json({ success: false, error: 'Invalid upload session ID.' });
-      }
-      if (!Number.isInteger(chunkIndex) || !Number.isInteger(totalChunks) || chunkIndex < 0 || totalChunks < 1 || totalChunks > 64 || chunkIndex >= totalChunks) {
-        return res.status(400).json({ success: false, error: 'Invalid chunk index parameters.' });
-      }
-
-      const chunkBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
-      if (chunkBuffer.length === 0) {
-        return res.status(400).json({ success: false, error: 'Received empty upload chunk.' });
-      }
-
-      const extFromName = path.extname(rawFilename).toLowerCase().replace('.', '');
-      const allowedExts = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'avif']);
-      let ext = allowedExts.has(extFromName) ? (extFromName === 'jpeg' ? 'jpg' : extFromName) : '';
-      if (!ext) {
-        if (mimeType.includes('png')) ext = 'png';
-        else if (mimeType.includes('webp')) ext = 'webp';
-        else if (mimeType.includes('gif')) ext = 'gif';
-        else if (mimeType.includes('svg')) ext = 'svg';
-        else if (mimeType.includes('avif')) ext = 'avif';
-        else if (mimeType.includes('jpeg') || mimeType.includes('jpg')) ext = 'jpg';
-      }
-      if (!ext) {
-        return res.status(400).json({
+      const ownerId = String(req.user?.id || req.user?.email || '').trim();
+      if (!ownerId) {
+        return res.status(401).json({
           success: false,
-          error: 'Unsupported image format. Allowed types: PNG, JPEG, WEBP, GIF, SVG, AVIF.',
+          code: 'UNAUTHENTICATED',
+          error: 'Authenticated admin identity is required for chunked uploads.',
         });
       }
 
-      // Fail fast on first chunk if cloud storage is explicitly enabled but misconfigured
+      const uploadId = String(req.query.uploadId || '').trim();
+      const chunkIndex = Number(req.query.chunkIndex);
+      const totalChunks = Number(req.query.totalChunks);
+      const rawFilename = String(req.query.filename || 'image.png').trim();
+      const mimeType = String(req.query.mimeType || '').trim().toLowerCase();
+      const maxUploadBytes = getConfiguredMaxUploadBytes();
+
+      const chunkBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+
+      if (chunkIndex === 0) {
+        const extFromName = path.extname(rawFilename).toLowerCase().replace('.', '');
+        const allowedExts = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'avif']);
+        let ext = allowedExts.has(extFromName) ? (extFromName === 'jpeg' ? 'jpg' : extFromName) : '';
+        if (!ext) {
+          if (mimeType.includes('png')) ext = 'png';
+          else if (mimeType.includes('webp')) ext = 'webp';
+          else if (mimeType.includes('gif')) ext = 'gif';
+          else if (mimeType.includes('svg')) ext = 'svg';
+          else if (mimeType.includes('avif')) ext = 'avif';
+          else if (mimeType.includes('jpeg') || mimeType.includes('jpg')) ext = 'jpg';
+        }
+        if (!ext) {
+          return res.status(400).json({
+            success: false,
+            error: 'Unsupported image format. Allowed types: PNG, JPEG, WEBP, GIF, SVG, AVIF.',
+          });
+        }
+      }
+
+      // Fail fast if cloud storage is explicitly enabled but misconfigured
       const storage = getStorageAdapter();
       const storageStatus = storage.getConfigStatus();
       if (!storageStatus.configured) {
@@ -557,41 +551,28 @@ cmsRouter.post(
         });
       }
 
-      const stagingDir = getChunkStagingDir();
-      tmpChunkPath = path.join(stagingDir, `chunk-${uploadId}.bin`);
+      const outcome = chunkUploadSessionManager.appendChunk({
+        ownerId,
+        uploadId,
+        chunkIndex,
+        totalChunks,
+        filename: rawFilename,
+        mimeType,
+        chunkBuffer,
+        maxUploadBytes,
+      });
 
-      if (chunkIndex === 0) {
-        if (chunkBuffer.length > maxUploadBytes) {
-          const maxMb = (maxUploadBytes / (1024 * 1024)).toFixed(0);
-          return res.status(413).json({ success: false, error: `Image size exceeds the maximum allowed limit of ${maxMb} MB.` });
-        }
-        fs.writeFileSync(tmpChunkPath, chunkBuffer);
-      } else {
-        if (!fs.existsSync(tmpChunkPath)) {
-          return res.status(400).json({ success: false, error: 'Upload session expired or missing initial chunk.' });
-        }
-        const currentSize = fs.statSync(tmpChunkPath).size;
-        if (currentSize + chunkBuffer.length > maxUploadBytes) {
-          shouldCleanupTmp = true;
-          const maxMb = (maxUploadBytes / (1024 * 1024)).toFixed(0);
-          return res.status(413).json({ success: false, error: `Image size exceeds the maximum allowed limit of ${maxMb} MB.` });
-        }
-        fs.appendFileSync(tmpChunkPath, chunkBuffer);
-      }
-
-      if (chunkIndex < totalChunks - 1) {
+      if (!outcome.completed || !outcome.assembledBuffer) {
         return res.json({
           success: true,
           completed: false,
-          chunkIndex,
-          totalChunks,
+          chunkIndex: outcome.chunkIndex,
+          totalChunks: outcome.totalChunks,
         });
       }
 
-      shouldCleanupTmp = true;
-      const assembledBuffer = fs.readFileSync(tmpChunkPath);
-
-      const optimized = await optimizeImageForStorage(assembledBuffer, {
+      // Note: chunkUploadSessionManager has already cleaned up the temporary staging file on finalization.
+      const optimized = await optimizeImageForStorage(outcome.assembledBuffer, {
         filename: rawFilename,
         mimeType,
         maxBytes: maxUploadBytes,
@@ -622,7 +603,13 @@ cmsRouter.post(
         storageProvider: storage.providerName,
       });
     } catch (err: any) {
-      shouldCleanupTmp = true;
+      if (err instanceof ChunkUploadError) {
+        return res.status(err.statusCode).json({
+          success: false,
+          code: err.code,
+          error: err.message,
+        });
+      }
       if (err instanceof ImageValidationError) {
         return res.status(err.statusCode).json({
           success: false,
@@ -632,14 +619,6 @@ cmsRouter.post(
       }
       console.error('[CMS] Chunked asset upload error:', err?.message || err);
       return res.status(500).json({ success: false, error: 'Failed to process uploaded image chunk.' });
-    } finally {
-      if (shouldCleanupTmp && tmpChunkPath && fs.existsSync(tmpChunkPath)) {
-        try {
-          fs.unlinkSync(tmpChunkPath);
-        } catch {
-          // Best-effort cleanup of temp chunk staging file
-        }
-      }
     }
   }
 );
