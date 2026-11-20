@@ -167,7 +167,7 @@ export const WishlistModal: React.FC<WishlistModalProps> = ({
                   id="wishlist-continue-shopping-btn"
                   type="button"
                   onClick={onContinueShopping}
-                  className="py-3 px-6 bg-[#FF2028] hover:bg-[#e02642] text-white font-mono text-xs font-bold uppercase tracking-wider rounded-xl transition cursor-pointer flex items-center gap-2 shadow-lg active:scale-95"
+                  className="py-3 px-6 bg-[#FF2028] hover:bg-[#e02642] text-white font-sans text-xs font-semibold uppercase tracking-[0.06em] rounded-xl transition cursor-pointer flex items-center gap-2 shadow-lg active:scale-95"
                 >
                   <span>Continue Shopping</span>
                   <ArrowRight className="w-4 h-4" />
@@ -210,7 +210,7 @@ export const WishlistModal: React.FC<WishlistModalProps> = ({
                 <button
                   type="button"
                   onClick={onContinueShopping}
-                  className="py-3 px-6 bg-neutral-800 hover:bg-neutral-700 text-white font-mono text-xs font-bold uppercase tracking-wider rounded-xl transition cursor-pointer flex items-center gap-2 shadow-lg active:scale-95"
+                  className="py-3 px-6 bg-neutral-800 hover:bg-neutral-700 text-white font-sans text-xs font-semibold uppercase tracking-[0.06em] rounded-xl transition cursor-pointer flex items-center gap-2 shadow-lg active:scale-95"
                 >
                   <span>Browse Latest Drops</span>
                   <ArrowRight className="w-4 h-4" />

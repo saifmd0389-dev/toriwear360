@@ -254,7 +254,7 @@ export const Header: React.FC<HeaderProps> = ({
             backgroundColor: (!isFront || scrolled) ? (announcementAd.bgColor || undefined) : undefined,
             color: announcementAd.textColor || undefined,
           } : undefined}
-          className={`text-neutral-300 text-[10px] sm:text-[11px] font-mono tracking-wider py-1 px-4 text-center flex items-center justify-center gap-3 overflow-hidden transition-colors duration-300 ${
+          className={`text-neutral-300 text-[10.5px] sm:text-[11px] font-sans font-medium tracking-[0.05em] py-1.5 px-4 text-center flex items-center justify-center gap-3 overflow-hidden transition-colors duration-300 ${
             announcementAd?.linkUrl ? 'cursor-pointer' : ''
           } ${
             isFront 
@@ -322,7 +322,7 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
 
               {/* Desktop Navigation Links (Synced with CMS HEADER_NAV tabs) */}
-              <div className="hidden lg:flex items-center gap-5 text-xs font-bold uppercase tracking-wider font-mono">
+              <div className="hidden lg:flex items-center gap-5 xl:gap-6 font-heading text-[12.5px] xl:text-[13px] font-medium uppercase tracking-[0.07em] leading-none">
                 {(() => {
                   const primaryNavTabs = cmsNavTabs.length > 0
                     ? cmsNavTabs.slice(0, 3)
@@ -350,19 +350,27 @@ export const Header: React.FC<HeaderProps> = ({
                         key={tab.id}
                         id={isHome ? 'nav-home-btn' : isMen ? 'nav-men-btn' : isKids ? 'nav-kids-btn' : undefined}
                         onClick={() => handleCmsLink(tab.targetLink)}
-                        className={`transition py-1 cursor-pointer border-b-2 flex items-center gap-1 whitespace-nowrap ${
+                        className={`group transition-colors duration-200 py-2 cursor-pointer border-b-2 inline-flex items-center gap-2 whitespace-nowrap ${
                           isActive
                             ? isKids
-                              ? 'text-white border-sky-400 font-black'
-                              : 'text-white border-red-500 font-black'
-                            : 'text-neutral-400 hover:text-white border-transparent'
+                              ? 'text-white border-sky-400 font-semibold'
+                              : 'text-white border-[#FF2028] font-semibold'
+                            : 'text-neutral-300 hover:text-white border-transparent font-medium'
                         }`}
                       >
-                        <span>{tab.label}</span>
+                        <span className="leading-none">{tab.label}</span>
                         {displayBadge && (
-                          <span className={`text-[9px] px-1 py-0.2 rounded font-mono ${
-                            isKids ? 'bg-sky-950 text-sky-400' : 'bg-neutral-900 text-neutral-400'
-                          }`}>
+                          <span
+                            className={`inline-flex items-center font-sans text-[10px] font-semibold tracking-[0.04em] leading-none px-2 py-[3px] rounded-full border tabular-nums shrink-0 transition-colors ${
+                              isKids
+                                ? isActive
+                                  ? 'bg-sky-400/20 border-sky-400/50 text-sky-200'
+                                  : 'bg-sky-500/10 border-sky-400/25 text-sky-300 group-hover:border-sky-400/45'
+                                : isActive
+                                  ? 'bg-[#FF2028]/15 border-[#FF2028]/45 text-red-200'
+                                  : 'bg-white/[0.06] border-white/10 text-neutral-300 group-hover:border-white/25 group-hover:text-white'
+                            }`}
+                          >
                             {displayBadge}
                           </span>
                         )}
@@ -373,29 +381,29 @@ export const Header: React.FC<HeaderProps> = ({
 
                 {/* COLLECTIONS Dropdown */}
                 <div 
-                  className="relative"
+                  className="relative flex items-center"
                   onMouseEnter={() => setCollectionsDropdownOpen(true)}
                   onMouseLeave={() => setCollectionsDropdownOpen(false)}
                 >
                   <button 
                     id="nav-collections-btn"
-                    className="flex items-center gap-1 text-neutral-400 hover:text-white transition py-1 cursor-pointer"
+                    className="inline-flex items-center gap-1.5 text-neutral-300 hover:text-white transition-colors duration-200 py-2 border-b-2 border-transparent font-medium whitespace-nowrap cursor-pointer"
                   >
-                    <span>WORLDS</span>
-                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${collectionsDropdownOpen ? 'rotate-180 text-white' : ''}`} />
+                    <span className="leading-none">WORLDS</span>
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${collectionsDropdownOpen ? 'rotate-180 text-white' : 'text-neutral-400'}`} />
                   </button>
 
                   {collectionsDropdownOpen && (
                     <div 
                       id="collections-dropdown-menu"
-                      className="absolute top-full left-0 w-[500px] bg-[#0c0d12] border border-neutral-800 rounded-2xl shadow-2xl p-5 z-50 animate-in fade-in slide-in-from-top-1"
+                      className="absolute top-full left-0 w-[500px] bg-[#0c0d12] border border-neutral-800 rounded-2xl shadow-2xl p-5 z-50 animate-in fade-in slide-in-from-top-1 font-sans normal-case tracking-normal"
                     >
                       <div className="grid grid-cols-2 gap-6">
                         {/* MEN'S 5 WORLDS */}
                         <div>
-                          <div className="text-[11px] font-mono font-bold tracking-wider text-neutral-400 pb-2 border-b border-neutral-800 flex items-center justify-between uppercase">
+                          <div className="text-[11px] font-heading font-semibold tracking-[0.08em] text-neutral-300 pb-2 border-b border-neutral-800 flex items-center justify-between uppercase">
                             <span>Men’s Streetwear</span>
-                            <span className="text-[10px] text-red-500">240 GSM</span>
+                            <span className="text-[10px] font-sans font-semibold text-red-500">240 GSM</span>
                           </div>
                           <div className="space-y-1 mt-2">
                             {MEN_WORLDS.map((w) => (
@@ -409,10 +417,10 @@ export const Header: React.FC<HeaderProps> = ({
                                 className="w-full text-left p-2 rounded-lg hover:bg-neutral-800/60 group transition flex items-center justify-between cursor-pointer"
                               >
                                 <div>
-                                  <div className="text-xs font-semibold text-neutral-200 group-hover:text-white">
+                                  <div className="font-heading text-xs font-semibold text-neutral-100 group-hover:text-white tracking-tight">
                                     {w.name}
                                   </div>
-                                  <div className="text-[10px] text-neutral-400 line-clamp-1">{w.subtitle}</div>
+                                  <div className="text-[11px] font-sans text-neutral-400 line-clamp-1 mt-0.5">{w.subtitle}</div>
                                 </div>
                                 <span className="text-xs text-neutral-500 group-hover:text-white">→</span>
                               </button>
@@ -422,9 +430,9 @@ export const Header: React.FC<HeaderProps> = ({
 
                         {/* KIDS' 5 WORLDS */}
                         <div>
-                          <div className="text-[11px] font-mono font-bold tracking-wider text-neutral-400 pb-2 border-b border-neutral-800 flex items-center justify-between uppercase">
+                          <div className="text-[11px] font-heading font-semibold tracking-[0.08em] text-neutral-300 pb-2 border-b border-neutral-800 flex items-center justify-between uppercase">
                             <span>Kids’ Storywear</span>
-                            <span className="text-[10px] text-sky-400">Ages 2–13</span>
+                            <span className="text-[10px] font-sans font-semibold text-sky-400">Ages 2–13</span>
                           </div>
                           <div className="space-y-1 mt-2">
                             {KIDS_WORLDS.map((w) => (
@@ -438,10 +446,10 @@ export const Header: React.FC<HeaderProps> = ({
                                 className="w-full text-left p-2 rounded-lg hover:bg-neutral-800/60 group transition flex items-center justify-between cursor-pointer"
                               >
                                 <div>
-                                  <div className="text-xs font-semibold text-neutral-200 group-hover:text-white">
+                                  <div className="font-heading text-xs font-semibold text-neutral-100 group-hover:text-white tracking-tight">
                                     {w.name}
                                   </div>
-                                  <div className="text-[10px] text-neutral-400 line-clamp-1">{w.subtitle}</div>
+                                  <div className="text-[11px] font-sans text-neutral-400 line-clamp-1 mt-0.5">{w.subtitle}</div>
                                 </div>
                                 <span className="text-xs text-neutral-500 group-hover:text-white">→</span>
                               </button>
@@ -451,7 +459,7 @@ export const Header: React.FC<HeaderProps> = ({
                       </div>
                       {navCategories.length > 0 && onSelectCategorySlug && (
                         <div className="mt-4 pt-3 border-t border-neutral-800">
-                          <div className="text-[10px] font-mono font-bold tracking-wider text-neutral-400 uppercase mb-2">
+                          <div className="text-[10px] font-heading font-semibold tracking-[0.1em] text-neutral-400 uppercase mb-2">
                             Categories
                           </div>
                           <div className="flex flex-wrap gap-1.5">
@@ -463,7 +471,7 @@ export const Header: React.FC<HeaderProps> = ({
                                   onSelectCategorySlug(cat.slug);
                                   setCollectionsDropdownOpen(false);
                                 }}
-                                className="px-2.5 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-[#FF2028] text-[11px] font-mono text-neutral-200 hover:text-white transition cursor-pointer"
+                                className="px-2.5 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-[#FF2028] text-[11px] font-sans font-medium text-neutral-200 hover:text-white transition cursor-pointer"
                               >
                                 {cat.name}
                               </button>
@@ -483,21 +491,21 @@ export const Header: React.FC<HeaderProps> = ({
                   if (extraNavTabs.length === 0) return null;
                   return (
                     <div
-                      className="relative"
+                      className="relative flex items-center"
                       onMouseEnter={() => setMoreNavDropdownOpen(true)}
                       onMouseLeave={() => setMoreNavDropdownOpen(false)}
                     >
                       <button
                         type="button"
                         onClick={() => setMoreNavDropdownOpen((p) => !p)}
-                        className="flex items-center gap-1 text-neutral-400 hover:text-white transition py-1 cursor-pointer"
+                        className="inline-flex items-center gap-1.5 text-neutral-300 hover:text-white transition-colors duration-200 py-2 border-b-2 border-transparent font-medium whitespace-nowrap cursor-pointer"
                       >
-                        <span>MORE</span>
-                        <ChevronDown className={`w-3.5 h-3.5 transition-transform ${moreNavDropdownOpen ? 'rotate-180 text-white' : ''}`} />
+                        <span className="leading-none">MORE</span>
+                        <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${moreNavDropdownOpen ? 'rotate-180 text-white' : 'text-neutral-400'}`} />
                       </button>
 
                       {moreNavDropdownOpen && (
-                        <div className="absolute top-full left-0 w-56 bg-[#0c0d12] border border-neutral-800 rounded-xl shadow-2xl p-2 z-50 animate-in fade-in slide-in-from-top-1 space-y-1">
+                        <div className="absolute top-full left-0 w-56 bg-[#0c0d12] border border-neutral-800 rounded-xl shadow-2xl p-2 z-50 animate-in fade-in slide-in-from-top-1 space-y-1 font-sans normal-case tracking-normal">
                           {extraNavTabs.map((tab) => (
                             <button
                               key={tab.id}
@@ -506,11 +514,11 @@ export const Header: React.FC<HeaderProps> = ({
                                 handleCmsLink(tab.targetLink);
                                 setMoreNavDropdownOpen(false);
                               }}
-                              className="w-full text-left px-3 py-2 rounded-lg text-xs text-neutral-300 hover:text-white hover:bg-neutral-800/70 transition flex items-center justify-between cursor-pointer"
+                              className="w-full text-left px-3 py-2 rounded-lg font-heading text-xs font-medium text-neutral-200 hover:text-white hover:bg-neutral-800/70 transition flex items-center justify-between cursor-pointer"
                             >
                               <span>{tab.label}</span>
                               {tab.badge && (
-                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-neutral-900 text-neutral-400 font-mono">
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white/[0.06] border border-white/10 text-neutral-300 font-sans font-medium">
                                   {tab.badge}
                                 </span>
                               )}
@@ -594,14 +602,14 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <div className="relative flex items-center justify-center">
                   {isLoggedIn ? (
-                    <div className="w-5 h-5 rounded-full bg-gradient-to-tr from-red-600 to-rose-600 text-white flex items-center justify-center text-[10px] font-bold font-mono shadow-sm">
+                    <div className="w-5 h-5 rounded-full bg-gradient-to-tr from-red-600 to-rose-600 text-white flex items-center justify-center text-[10px] font-semibold font-sans shadow-sm">
                       {customer?.name?.charAt(0)?.toUpperCase() || 'U'}
                     </div>
                   ) : (
                     <User className="w-4 h-4 sm:w-5 sm:h-5 text-neutral-300 group-hover:text-white transition" />
                   )}
                 </div>
-                <span className="hidden sm:block text-[10px] font-bold tracking-tight font-sans text-neutral-300 group-hover:text-white mt-0.5">
+                <span className="hidden sm:block text-[10px] font-medium tracking-[0.02em] font-sans text-neutral-300 group-hover:text-white mt-0.5">
                   Profile
                 </span>
               </button>
@@ -839,12 +847,12 @@ export const Header: React.FC<HeaderProps> = ({
                   className="w-4 h-4 sm:w-5 sm:h-5 text-neutral-300 group-hover:text-white transition"
                 />
                 {wishlistCount > 0 && (
-                  <span className="absolute -top-1 -right-2 w-4 h-4 bg-red-600 text-white text-[9px] font-bold rounded-full flex items-center justify-center shadow-md font-mono">
+                  <span className="absolute -top-1 -right-2 w-4 h-4 bg-red-600 text-white text-[9px] font-semibold rounded-full flex items-center justify-center shadow-md font-sans tabular-nums">
                     {wishlistCount}
                   </span>
                 )}
               </div>
-              <span className="hidden sm:block text-[10px] font-bold tracking-tight font-sans text-neutral-300 group-hover:text-white mt-0.5">
+              <span className="hidden sm:block text-[10px] font-medium tracking-[0.02em] font-sans text-neutral-300 group-hover:text-white mt-0.5">
                 Wishlist
               </span>
             </button>
@@ -853,12 +861,12 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               id="header-cart-btn"
               onClick={onOpenCart}
-              className="flex items-center gap-1 sm:gap-2 bg-white hover:bg-neutral-200 text-neutral-950 px-2 sm:px-3.5 py-1.5 sm:py-2 rounded-lg font-bold text-xs transition active:scale-95 cursor-pointer whitespace-nowrap shadow-sm shrink-0"
+              className="flex items-center gap-1.5 sm:gap-2 bg-white hover:bg-neutral-200 text-neutral-950 px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-lg font-sans font-semibold text-xs tracking-[0.04em] transition active:scale-95 cursor-pointer whitespace-nowrap shadow-sm shrink-0"
               aria-label="Shopping Cart"
             >
               <ShoppingBag className="w-4 h-4 text-neutral-950" />
-              <span className="hidden sm:inline font-mono">BAG</span>
-              <span className="font-mono text-neutral-700 font-bold tabular-nums text-[11px] sm:text-xs">({cartCount})</span>
+              <span className="hidden sm:inline">BAG</span>
+              <span className="text-neutral-700 font-semibold tabular-nums text-[11px] sm:text-xs">({cartCount})</span>
             </button>
           </div>
         )}
@@ -877,7 +885,7 @@ export const Header: React.FC<HeaderProps> = ({
                   <div className="text-xs font-bold text-white">
                     {isLoggedIn ? `Hello, ${customer?.name}` : 'Welcome to TORIWEAR'}
                   </div>
-                  <div className="text-[10px] text-neutral-400 font-mono">
+                  <div className="text-[11px] text-neutral-400 font-sans">
                     {isLoggedIn ? (customer?.phone || customer?.email) : 'Login for orders & Tori Insider'}
                   </div>
                 </div>
@@ -892,7 +900,7 @@ export const Header: React.FC<HeaderProps> = ({
                     openAuthModal();
                   }
                 }}
-                className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-mono text-xs font-bold cursor-pointer"
+                className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-sans text-xs font-semibold cursor-pointer"
               >
                 {isLoggedIn ? 'Account' : 'Login'}
               </button>
@@ -906,8 +914,8 @@ export const Header: React.FC<HeaderProps> = ({
                 }}
                 className="p-3 bg-neutral-900 border border-neutral-800 rounded-xl text-left cursor-pointer"
               >
-                <div className="text-xs font-bold text-[#FF2028] font-mono">SHOP MEN</div>
-                <div className="text-[11px] text-neutral-400 mt-0.5">{menCount ?? 30} Oversized Street Drops</div>
+                <div className="text-xs font-semibold text-[#FF2028] font-heading tracking-[0.06em]">SHOP MEN</div>
+                <div className="text-[11px] text-neutral-400 font-sans mt-0.5">{menCount ?? 30} Oversized Street Drops</div>
               </button>
               <button
                 onClick={() => {
@@ -916,12 +924,12 @@ export const Header: React.FC<HeaderProps> = ({
                 }}
                 className="p-3 bg-neutral-900 border border-neutral-800 rounded-xl text-left cursor-pointer"
               >
-                <div className="text-xs font-bold text-sky-400 font-mono">SHOP KIDS</div>
-                <div className="text-[11px] text-neutral-400 mt-0.5">{kidsCount ?? 24} Bio-Wash Story Drops</div>
+                <div className="text-xs font-semibold text-sky-400 font-heading tracking-[0.06em]">SHOP KIDS</div>
+                <div className="text-[11px] text-neutral-400 font-sans mt-0.5">{kidsCount ?? 24} Bio-Wash Story Drops</div>
               </button>
             </div>
 
-            <div className="space-y-1 border-t border-neutral-800/80 pt-3 text-sm font-semibold">
+            <div className="space-y-1 border-t border-neutral-800/80 pt-3 text-sm font-heading font-medium">
               {cmsNavTabs.length > 0 ? (
                 cmsNavTabs.map((tab) => (
                   <button
@@ -934,7 +942,7 @@ export const Header: React.FC<HeaderProps> = ({
                   >
                     <span>{tab.label}</span>
                     {tab.badge && (
-                      <span className="text-[10px] text-neutral-400 font-mono">{tab.badge}</span>
+                      <span className="text-[10px] text-neutral-300 bg-white/[0.06] border border-white/10 px-2 py-0.5 rounded-full font-sans font-semibold tabular-nums">{tab.badge}</span>
                     )}
                   </button>
                 ))
@@ -945,21 +953,21 @@ export const Header: React.FC<HeaderProps> = ({
                     className="w-full text-left py-2 px-3 text-neutral-200 hover:bg-neutral-800/50 rounded-lg flex items-center justify-between"
                   >
                     <span>Home Page</span>
-                    <span className="text-xs text-neutral-500 font-mono">Main</span>
+                    <span className="text-xs text-neutral-500 font-sans">Main</span>
                   </button>
                   <button
                     onClick={() => { onSelectDepartment('MEN'); setMobileMenuOpen(false); }}
                     className="w-full text-left py-2 px-3 text-neutral-200 hover:bg-neutral-800/50 rounded-lg flex items-center justify-between"
                   >
                     <span>Men's Streetwear (240 GSM)</span>
-                    <span className="text-[10px] text-[#FF2028] font-mono">{menCount ?? 30} PIECES</span>
+                    <span className="text-[10px] text-[#FF2028] font-sans font-semibold tabular-nums">{menCount ?? 30} PIECES</span>
                   </button>
                   <button
                     onClick={() => { onSelectDepartment('KIDS'); setMobileMenuOpen(false); }}
                     className="w-full text-left py-2 px-3 text-neutral-200 hover:bg-neutral-800/50 rounded-lg flex items-center justify-between"
                   >
                     <span>Kids' Storywear (Ages 2–13)</span>
-                    <span className="text-[10px] text-sky-400 font-mono">{kidsCount ?? 24} PIECES</span>
+                    <span className="text-[10px] text-sky-400 font-sans font-semibold tabular-nums">{kidsCount ?? 24} PIECES</span>
                   </button>
                 </>
               )}

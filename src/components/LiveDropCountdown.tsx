@@ -50,7 +50,7 @@ export const LiveDropCountdown: React.FC<LiveDropCountdownProps> = ({
               <span>LIVE CAMPAIGN // LIMITED PRODUCTION RUN</span>
             </div>
 
-            <h3 className="font-heading text-3xl sm:text-5xl font-black uppercase text-white tracking-tight">
+            <h3 className="font-display text-4xl sm:text-6xl font-normal uppercase text-white tracking-[0.04em] leading-[0.95]">
               DROP 001 — <span className="text-[#FF2028]">SHADOW ERA</span>
             </h3>
 
@@ -72,37 +72,37 @@ export const LiveDropCountdown: React.FC<LiveDropCountdownProps> = ({
             <div className="flex items-center gap-3">
               {/* Hours */}
               <div className="flex flex-col items-center bg-[#171722] border border-neutral-800 rounded-2xl p-3 sm:p-4 min-w-[72px] shadow-lg">
-                <span className="font-heading text-2xl sm:text-4xl font-black text-white font-mono">
+                <span className="font-display text-3xl sm:text-5xl font-normal tracking-[0.04em] text-white tabular-nums leading-none">
                   {String(timeLeft.hours).padStart(2, '0')}
                 </span>
-                <span className="text-[10px] font-mono text-neutral-400 uppercase mt-1">HOURS</span>
+                <span className="text-[10px] font-sans font-semibold tracking-[0.08em] text-neutral-400 uppercase mt-1.5">HOURS</span>
               </div>
 
-              <span className="font-heading text-2xl text-[#FF2028] font-bold">:</span>
+              <span className="font-display text-3xl text-[#FF2028] font-normal">:</span>
 
               {/* Minutes */}
               <div className="flex flex-col items-center bg-[#171722] border border-neutral-800 rounded-2xl p-3 sm:p-4 min-w-[72px] shadow-lg">
-                <span className="font-heading text-2xl sm:text-4xl font-black text-white font-mono">
+                <span className="font-display text-3xl sm:text-5xl font-normal tracking-[0.04em] text-white tabular-nums leading-none">
                   {String(timeLeft.minutes).padStart(2, '0')}
                 </span>
-                <span className="text-[10px] font-mono text-neutral-400 uppercase mt-1">MINS</span>
+                <span className="text-[10px] font-sans font-semibold tracking-[0.08em] text-neutral-400 uppercase mt-1.5">MINS</span>
               </div>
 
-              <span className="font-heading text-2xl text-[#FF2028] font-bold">:</span>
+              <span className="font-display text-3xl text-[#FF2028] font-normal">:</span>
 
               {/* Seconds */}
               <div className="flex flex-col items-center bg-[#171722] border border-neutral-800 rounded-2xl p-3 sm:p-4 min-w-[72px] shadow-lg">
-                <span className="font-heading text-2xl sm:text-4xl font-black text-[#FF2028] font-mono">
+                <span className="font-display text-3xl sm:text-5xl font-normal tracking-[0.04em] text-[#FF2028] tabular-nums leading-none">
                   {String(timeLeft.seconds).padStart(2, '0')}
                 </span>
-                <span className="text-[10px] font-mono text-neutral-400 uppercase mt-1">SECS</span>
+                <span className="text-[10px] font-sans font-semibold tracking-[0.08em] text-neutral-400 uppercase mt-1.5">SECS</span>
               </div>
             </div>
 
             <button
               id="shop-the-drop-btn"
               onClick={onShopDrop}
-              className="w-full sm:w-auto px-8 py-4 bg-[#FF2028] hover:bg-[#e02441] text-white font-heading text-base font-bold uppercase tracking-wider rounded-xl transition shadow-xl shadow-[#FF2028]/30 active:scale-95 flex items-center justify-center gap-2 cursor-pointer border border-rose-500/50 shrink-0"
+              className="w-full sm:w-auto px-8 py-4 bg-[#FF2028] hover:bg-[#e02441] text-white font-sans text-sm font-bold uppercase tracking-[0.06em] rounded-xl transition shadow-xl shadow-[#FF2028]/30 active:scale-95 flex items-center justify-center gap-2 cursor-pointer border border-rose-500/50 shrink-0"
             >
               <span>SHOP THE DROP</span>
               <ArrowRight className="w-5 h-5" />

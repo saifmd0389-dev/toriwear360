@@ -147,24 +147,11 @@ export default function App() {
     return false;
   });
 
-  // Check if current browser session has staff admin credentials
-  const [isStaffLoggedIn, setIsStaffLoggedIn] = useState<boolean>(() => {
-    try {
-      const user = localStorage.getItem('tori_admin_currentUser');
-      return Boolean(user && user !== 'null');
-    } catch {
-      return false;
-    }
-  });
-
-  // Allows staff to temporarily preview the storefront while maintenance is active
-  const [staffBypassedMaintenance, setStaffBypassedMaintenance] = useState<boolean>(false);
-
-  // Sync maintenance mode and staff status on storage / custom events
+  // Sync maintenance mode status on storage / custom events
   useEffect(() => {
     const handleSettingsSync = (e?: any) => {
       try {
-        if (e && 'key' in e && e.key && e.key !== 'tori_admin_settings' && e.key !== 'tori_admin_currentUser') {
+        if (e && 'key' in e && e.key && e.key !== 'tori_admin_settings') {
           return;
         }
         const stored = localStorage.getItem('tori_admin_settings');
@@ -172,8 +159,6 @@ export default function App() {
           const parsed = JSON.parse(stored);
           setIsMaintenanceMode(Boolean(parsed.maintenanceMode));
         }
-        const user = localStorage.getItem('tori_admin_currentUser');
-        setIsStaffLoggedIn(Boolean(user && user !== 'null'));
       } catch {}
     };
 
@@ -1431,7 +1416,7 @@ export default function App() {
       return;
     }
 
-    if (isMaintenanceMode && !staffBypassedMaintenance) {
+    if (isMaintenanceMode) {
       updateSeoTags({
         title: 'Dropping Soon | TORI-WEAR Anime Streetwear',
         description: 'TORI-WEAR storefront is preparing the next limited anime streetwear drop.',
@@ -1521,7 +1506,6 @@ export default function App() {
   }, [
     isAdminView,
     isMaintenanceMode,
-    staffBypassedMaintenance,
     selectedProductDetail,
     selectedCategorySlug,
     activeDepartment,
@@ -1545,22 +1529,9 @@ export default function App() {
     );
   }
 
-  // If Storefront Maintenance Mode is active (and not bypassed by authenticated staff)
-  if (isMaintenanceMode && !staffBypassedMaintenance) {
-    return (
-      <StorefrontMaintenanceScreen
-        isStaffUser={isStaffLoggedIn}
-        onEnterAdmin={() => {
-          setIsAdminView(true);
-          if (typeof window !== 'undefined' && window.history.pushState) {
-            window.history.pushState(null, '', ADMIN_CONFIG.ADMIN_PATH);
-          }
-        }}
-        onBypassForStaff={() => {
-          setStaffBypassedMaintenance(true);
-        }}
-      />
-    );
+  // If Storefront Maintenance Mode is active, render only the customer Dropping Soon page
+  if (isMaintenanceMode) {
+    return <StorefrontMaintenanceScreen />;
   }
 
   const totalCartCount = (cartItems || []).reduce(
@@ -1570,35 +1541,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen w-full max-w-full overflow-x-clip bg-[#050505] text-[#FFFFFF] flex flex-col font-sans selection:bg-[#FF2028] selection:text-white pb-14 lg:pb-0">
-      {/* Staff Maintenance Mode Preview Banner */}
-      {isMaintenanceMode && staffBypassedMaintenance && (
-        <div className="sticky top-0 z-[1000] bg-amber-500 text-neutral-950 px-4 py-2 text-xs font-mono font-bold flex items-center justify-between shadow-lg">
-          <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-neutral-950 animate-ping" />
-            <span>STAFF PREVIEW: Storefront is currently in Maintenance Mode ("Dropping Soon").</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setStaffBypassedMaintenance(false)}
-              className="px-2.5 py-1 rounded bg-neutral-950 text-amber-300 hover:bg-neutral-800 text-[11px] font-bold cursor-pointer transition"
-            >
-              Show Maintenance Screen
-            </button>
-            <button
-              onClick={() => {
-                setIsAdminView(true);
-                if (typeof window !== 'undefined' && window.history.pushState) {
-                  window.history.pushState(null, '', ADMIN_CONFIG.ADMIN_PATH);
-                }
-              }}
-              className="px-2.5 py-1 rounded bg-red-600 hover:bg-red-500 text-white text-[11px] font-bold cursor-pointer transition"
-            >
-              Open Admin Settings
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* 1. Header (Navigation: MEN, KIDS, COLLECTIONS, WORLDS, Cart) */}
       <Header
         cartCount={totalCartCount}
@@ -1866,31 +1808,31 @@ export default function App() {
                 {/* Men's Breadcrumb & Switcher Header */}
                 <div className="bg-[#111218] border-b border-neutral-800 py-3.5 px-4 sm:px-6 lg:px-8">
                   <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 text-xs font-mono">
+                    <div className="flex items-center gap-2.5 text-xs font-heading">
                       <button
                         onClick={handleNavigateHome}
-                        className="text-neutral-400 hover:text-white transition flex items-center gap-1 cursor-pointer font-bold"
+                        className="text-neutral-400 hover:text-white transition flex items-center gap-1 cursor-pointer font-medium tracking-[0.05em]"
                       >
                         <span>← HOME</span>
                       </button>
                       <span className="text-neutral-600">/</span>
-                      <span className="text-white font-bold uppercase tracking-wider">
+                      <span className="text-white font-semibold uppercase tracking-[0.06em]">
                         MEN'S APPAREL CATALOGUE
                       </span>
-                      <span className="text-[10px] bg-[#FF2028]/20 text-[#FF2028] border border-[#FF2028]/30 px-2 py-0.5 rounded font-mono font-bold">
+                      <span className="text-[10px] bg-[#FF2028]/15 text-[#FF2028] border border-[#FF2028]/30 px-2 py-0.5 rounded-full font-sans font-semibold tracking-[0.04em] tabular-nums">
                         {isCatalogLoading ? '···' : `${storefrontCatalog.filter((p) => p.department === 'MEN').length} DROPS EXCLUSIVE`}
                       </span>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-neutral-400 font-mono hidden sm:inline">Shopping for kids?</span>
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-xs text-neutral-400 font-sans hidden sm:inline">Shopping for kids?</span>
                       <button
                         onClick={() => {
                           setActiveDepartment('KIDS');
                           setSelectedWorldCategory('ALL');
                           window.scrollTo({ top: 0, behavior: 'smooth' });
                         }}
-                        className="px-3 py-1.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/30 text-xs font-mono font-bold uppercase transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+                        className="px-3 py-1.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/30 text-xs font-sans font-semibold uppercase tracking-[0.04em] transition flex items-center gap-1.5 cursor-pointer shadow-sm"
                       >
                         <span>SWITCH TO KIDS' WEAR 👶</span>
                       </button>
@@ -1926,24 +1868,24 @@ export default function App() {
                 {/* Kids' Breadcrumb & Switcher Header */}
                 <div className="bg-[#0b1320] border-b border-sky-900/50 py-3.5 px-4 sm:px-6 lg:px-8">
                   <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 text-xs font-mono">
+                    <div className="flex items-center gap-2.5 text-xs font-heading">
                       <button
                         onClick={handleNavigateHome}
-                        className="text-neutral-400 hover:text-white transition flex items-center gap-1 cursor-pointer font-bold"
+                        className="text-neutral-400 hover:text-white transition flex items-center gap-1 cursor-pointer font-medium tracking-[0.05em]"
                       >
                         <span>← HOME</span>
                       </button>
                       <span className="text-neutral-600">/</span>
-                      <span className="text-sky-300 font-bold uppercase tracking-wider">
+                      <span className="text-sky-300 font-semibold uppercase tracking-[0.06em]">
                         KIDS' STORYWEAR CATALOGUE
                       </span>
-                      <span className="text-[10px] bg-sky-500/20 text-sky-300 border border-sky-500/30 px-2 py-0.5 rounded font-mono font-bold">
+                      <span className="text-[10px] bg-sky-500/15 text-sky-300 border border-sky-500/30 px-2 py-0.5 rounded-full font-sans font-semibold tracking-[0.04em] tabular-nums">
                         {isCatalogLoading ? '···' : `${storefrontCatalog.filter((p) => p.department === 'KIDS').length} DROPS · BIO-WASH`}
                       </span>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-neutral-400 font-mono hidden sm:inline">Shopping for adults?</span>
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-xs text-neutral-400 font-sans hidden sm:inline">Shopping for adults?</span>
                       <button
                         onClick={() => {
                           setActiveDepartment('MEN');
@@ -1951,7 +1893,7 @@ export default function App() {
                           setSelectedWorldCategory('ALL');
                           window.scrollTo({ top: 0, behavior: 'smooth' });
                         }}
-                        className="px-3 py-1.5 rounded-lg bg-[#FF2028]/10 hover:bg-[#FF2028]/20 text-[#FF2028] border border-[#FF2028]/30 text-xs font-mono font-bold uppercase transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+                        className="px-3 py-1.5 rounded-lg bg-[#FF2028]/10 hover:bg-[#FF2028]/20 text-[#FF2028] border border-[#FF2028]/30 text-xs font-sans font-semibold uppercase tracking-[0.04em] transition flex items-center gap-1.5 cursor-pointer shadow-sm"
                       >
                         <span>SWITCH TO MEN'S WEAR 🥋</span>
                       </button>

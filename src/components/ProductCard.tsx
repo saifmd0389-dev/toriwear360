@@ -94,7 +94,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
           </div>
 
           {/* Product Name */}
-          <h3 className="font-heading text-base sm:text-lg font-bold text-white group-hover:text-[#FF2028] transition-colors line-clamp-1">
+          <h3 className="font-sans text-[15px] sm:text-base font-semibold text-white group-hover:text-[#FF2028] transition-colors tracking-tight leading-snug line-clamp-1">
             {product.name}
           </h3>
 
@@ -113,27 +113,27 @@ export const ProductCard: React.FC<ProductCardProps> = ({
           )}
 
           {/* Rating */}
-          <div className="flex items-center gap-1.5 mt-1.5 text-xs text-neutral-400 font-mono">
+          <div className="flex items-center gap-1.5 mt-1.5 text-xs text-neutral-400 font-sans">
             <div className="flex items-center text-amber-400">
               <Star className="w-3 h-3 fill-current" />
-              <span className="font-semibold text-neutral-200 text-xs ml-1">{product.rating}</span>
+              <span className="font-semibold text-neutral-200 text-xs ml-1 tabular-nums">{product.rating}</span>
             </div>
             <span className="text-neutral-600">·</span>
-            <span className="text-[11px] text-neutral-500">({product.reviewsCount})</span>
+            <span className="text-[11px] text-neutral-500 tabular-nums">({product.reviewsCount})</span>
           </div>
 
           {/* Pricing */}
           <div className="mt-2.5 pt-2.5 border-t border-neutral-800/80 flex items-baseline justify-between">
             <div className="flex items-baseline gap-2">
-              <span className="font-heading text-lg sm:text-xl font-black text-white tabular-nums">
+              <span className="font-sans text-base sm:text-lg font-bold text-white tabular-nums">
                 ₹{product.price.toLocaleString('en-IN')}
               </span>
-              <span className="text-xs text-neutral-500 line-through tabular-nums font-mono">
+              <span className="text-xs text-neutral-500 line-through tabular-nums font-sans">
                 ₹{product.originalPrice.toLocaleString('en-IN')}
               </span>
             </div>
 
-            <span className="text-[10px] font-mono font-bold text-red-400">
+            <span className="text-[11px] font-sans font-semibold text-red-400 tabular-nums">
               {discountPercent}% OFF
             </span>
           </div>
@@ -141,9 +141,9 @@ export const ProductCard: React.FC<ProductCardProps> = ({
 
         {/* Size Selection & Clean Move to Bag Action */}
         <div className="mt-3 pt-3 border-t border-neutral-800/80" onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-center justify-between text-[10px] font-mono text-neutral-400 mb-1.5">
+          <div className="flex items-center justify-between text-[10px] font-sans font-medium tracking-[0.05em] text-neutral-400 mb-1.5">
             <span>SIZE:</span>
-            <span className="text-white font-bold">{selectedSize}</span>
+            <span className="text-white font-semibold">{selectedSize}</span>
           </div>
 
           <div className="flex items-center gap-1 py-0.5 mb-2.5">
@@ -155,7 +155,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
                 key={sz}
                 type="button"
                 onClick={() => setSelectedSize(sz as any)}
-                className={`flex-1 py-1 rounded text-[10px] font-mono font-bold transition cursor-pointer text-center ${
+                className={`flex-1 py-1 rounded text-[11px] font-sans font-semibold transition cursor-pointer text-center ${
                   selectedSize === sz
                     ? 'bg-[#FF2028] text-white shadow-sm'
                     : 'bg-neutral-900 text-neutral-400 hover:text-white hover:bg-neutral-800 border border-neutral-800'
@@ -170,7 +170,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
             id={`quick-add-btn-${product.id}`}
             type="button"
             onClick={handleQuickAdd}
-            className={`w-full py-2 px-3 rounded-xl text-xs font-bold font-mono uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 shadow-md cursor-pointer active:scale-95 ${
+            className={`w-full py-2 px-3 rounded-xl text-xs font-bold font-sans uppercase tracking-[0.06em] transition-all flex items-center justify-center gap-1.5 shadow-md cursor-pointer active:scale-95 ${
               addedNotice
                 ? 'bg-emerald-600 text-white'
                 : 'bg-white text-black hover:bg-neutral-200'

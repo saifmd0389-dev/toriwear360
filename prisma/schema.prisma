@@ -535,7 +535,7 @@ model ProductImage {
   id            String          @id @default(cuid())
   productId     String
   variantId     String?
-  url           String          @db.Text
+  url           String          @db.LongText
   altText       String?         @db.Text
   displayOrder  Int             @default(0)
   isPrimary     Boolean         @default(false)

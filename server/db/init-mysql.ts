@@ -146,6 +146,16 @@ export async function ensureMySqlSchemaInitialized(): Promise<boolean> {
       }
     }
 
+    // Ensure product_images.url supports large image payloads (LONGTEXT)
+    const [imgUrlColRows]: any = await connection.query(
+      "SELECT DATA_TYPE AS dataType FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'product_images' AND column_name = 'url'"
+    );
+    const imgUrlDataType = String(imgUrlColRows?.[0]?.dataType || '').toLowerCase();
+    if (imgUrlDataType && imgUrlDataType !== 'longtext') {
+      await connection.query('ALTER TABLE `product_images` MODIFY COLUMN `url` LONGTEXT NOT NULL');
+      console.log('[MYSQL-INIT] Upgraded product_images.url column to LONGTEXT.');
+    }
+
     return true;
   } catch (err: any) {
     console.warn('[MYSQL-INIT] Database schema check note:', err?.message || err);

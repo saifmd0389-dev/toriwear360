@@ -167,7 +167,7 @@ export const AnimatedRunwayDrop: React.FC<AnimatedRunwayDropProps> = ({
               <span>THE DROP // 4-6S RUNWAY SHOWCASE</span>
             </div>
 
-            <h2 className="font-heading text-4xl sm:text-6xl font-black uppercase text-white tracking-tight leading-none">
+            <h2 className="font-display text-5xl sm:text-7xl font-normal uppercase text-white tracking-[0.04em] leading-[0.92]">
               ANIMATED PRODUCT <br />
               <span 
                 className="transition-colors duration-700"
@@ -272,8 +272,8 @@ export const AnimatedRunwayDrop: React.FC<AnimatedRunwayDropProps> = ({
               </div>
 
               <div className="text-right">
-                <span className="text-xs text-neutral-500 line-through mr-2">₹{current.originalPrice}</span>
-                <span className="font-heading text-lg sm:text-xl font-bold text-white">₹{current.price}</span>
+                <span className="text-xs text-neutral-500 line-through mr-2 tabular-nums">₹{current.originalPrice}</span>
+                <span className="font-sans text-lg sm:text-xl font-bold text-white tabular-nums">₹{current.price}</span>
               </div>
             </div>
           </div>
@@ -317,10 +317,10 @@ export const AnimatedRunwayDrop: React.FC<AnimatedRunwayDropProps> = ({
             <div className="pt-6 border-t border-neutral-800 flex flex-col gap-3">
               <div className="flex items-baseline justify-between">
                 <div className="flex items-baseline gap-2">
-                  <span className="font-heading text-3xl font-black text-white">₹{current.price}</span>
-                  <span className="text-sm text-neutral-500 line-through">₹{current.originalPrice}</span>
+                  <span className="font-sans text-3xl font-bold text-white tabular-nums">₹{current.price}</span>
+                  <span className="text-sm text-neutral-500 line-through tabular-nums">₹{current.originalPrice}</span>
                 </div>
-                <span className="text-xs font-mono text-emerald-400 font-bold bg-emerald-950/40 border border-emerald-900/60 px-2 py-0.5 rounded">
+                <span className="text-xs font-sans text-emerald-400 font-semibold bg-emerald-950/40 border border-emerald-900/60 px-2 py-0.5 rounded tabular-nums">
                   {Math.round(((current.originalPrice - current.price) / current.originalPrice) * 100)}% OFF
                 </span>
               </div>
@@ -329,7 +329,7 @@ export const AnimatedRunwayDrop: React.FC<AnimatedRunwayDropProps> = ({
                 <button
                   id={`runway-quick-add-${current.id}`}
                   onClick={handleQuickAdd}
-                  className="flex-1 py-3.5 px-6 rounded-xl font-heading text-base font-bold uppercase tracking-wider text-white transition flex items-center justify-center gap-2 cursor-pointer shadow-xl active:scale-95"
+                  className="flex-1 py-3.5 px-6 rounded-xl font-sans text-sm font-bold uppercase tracking-[0.06em] text-white transition flex items-center justify-center gap-2 cursor-pointer shadow-xl active:scale-95"
                   style={{
                     backgroundColor: current.accentHex,
                     boxShadow: `0 10px 25px -8px ${current.auraColor}`,
@@ -350,7 +350,7 @@ export const AnimatedRunwayDrop: React.FC<AnimatedRunwayDropProps> = ({
 
                 <button
                   onClick={handleOpenDetails}
-                  className="py-3.5 px-5 rounded-xl bg-[#181824] hover:bg-[#202030] text-neutral-200 hover:text-white border border-neutral-700/80 font-heading text-sm font-bold uppercase tracking-wider transition flex items-center gap-1.5 cursor-pointer"
+                  className="py-3.5 px-5 rounded-xl bg-[#181824] hover:bg-[#202030] text-neutral-200 hover:text-white border border-neutral-700/80 font-sans text-sm font-semibold uppercase tracking-[0.06em] transition flex items-center gap-1.5 cursor-pointer"
                 >
                   <span>VIEW</span>
                   <ArrowRight className="w-4 h-4" />

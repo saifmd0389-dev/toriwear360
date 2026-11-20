@@ -38,8 +38,8 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
         aria-label="Home"
       >
         <Home className={`w-5 h-5 ${activeDepartment === 'ALL' ? 'text-white' : 'text-neutral-400'}`} />
-        <span className={`text-[10px] font-mono tracking-wider mt-0.5 ${
-          activeDepartment === 'ALL' ? 'text-white font-bold' : 'text-neutral-400'
+        <span className={`text-[10px] font-heading tracking-[0.06em] mt-0.5 ${
+          activeDepartment === 'ALL' ? 'text-white font-semibold' : 'text-neutral-400 font-medium'
         }`}>
           HOME
         </span>
@@ -54,8 +54,8 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
         aria-label="Shop Men"
       >
         <Flame className={`w-5 h-5 ${activeDepartment === 'MEN' ? 'text-[#FF2028]' : 'text-neutral-400'}`} />
-        <span className={`text-[10px] font-mono tracking-wider mt-0.5 ${
-          activeDepartment === 'MEN' ? 'text-[#FF2028] font-bold' : 'text-neutral-400'
+        <span className={`text-[10px] font-heading tracking-[0.06em] mt-0.5 ${
+          activeDepartment === 'MEN' ? 'text-[#FF2028] font-semibold' : 'text-neutral-400 font-medium'
         }`}>
           MEN
         </span>
@@ -70,8 +70,8 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
         aria-label="Shop Kids"
       >
         <Sparkles className={`w-5 h-5 ${activeDepartment === 'KIDS' ? 'text-sky-400' : 'text-neutral-400'}`} />
-        <span className={`text-[10px] font-mono tracking-wider mt-0.5 ${
-          activeDepartment === 'KIDS' ? 'text-sky-400 font-bold' : 'text-neutral-400'
+        <span className={`text-[10px] font-heading tracking-[0.06em] mt-0.5 ${
+          activeDepartment === 'KIDS' ? 'text-sky-400 font-semibold' : 'text-neutral-400 font-medium'
         }`}>
           KIDS
         </span>
@@ -89,12 +89,12 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
             className="w-5 h-5 text-neutral-400 hover:text-white"
           />
           {wishlistCount > 0 && (
-            <span className="absolute -top-1.5 -right-2 bg-[#FF2028] text-white text-[9px] font-bold font-mono w-4 h-4 rounded-full flex items-center justify-center border border-[#050505]">
+            <span className="absolute -top-1.5 -right-2 bg-[#FF2028] text-white text-[9px] font-semibold font-sans tabular-nums w-4 h-4 rounded-full flex items-center justify-center border border-[#050505]">
               {wishlistCount > 9 ? '9+' : wishlistCount}
             </span>
           )}
         </div>
-        <span className="text-[10px] font-mono tracking-wider mt-0.5 text-neutral-400">
+        <span className="text-[10px] font-heading font-medium tracking-[0.06em] mt-0.5 text-neutral-400">
           WISHLIST
         </span>
       </button>
@@ -108,12 +108,12 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
         <div className="relative">
           <ShoppingBag className="w-5 h-5 text-white" />
           {cartCount > 0 && (
-            <span className="absolute -top-1.5 -right-2 bg-[#FF2028] text-white text-[9px] font-bold font-mono w-4 h-4 rounded-full flex items-center justify-center border border-[#050505]">
+            <span className="absolute -top-1.5 -right-2 bg-[#FF2028] text-white text-[9px] font-semibold font-sans tabular-nums w-4 h-4 rounded-full flex items-center justify-center border border-[#050505]">
               {cartCount > 9 ? '9+' : cartCount}
             </span>
           )}
         </div>
-        <span className="text-[10px] font-mono tracking-wider mt-0.5 text-white font-bold">
+        <span className="text-[10px] font-heading tracking-[0.06em] mt-0.5 text-white font-semibold">
           BAG
         </span>
       </button>

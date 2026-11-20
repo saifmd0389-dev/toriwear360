@@ -92,3 +92,7 @@ CREATE TABLE IF NOT EXISTS `return_status_history` (
     PRIMARY KEY (`id`),
     CONSTRAINT `return_status_history_returnRequestId_fkey` FOREIGN KEY (`returnRequestId`) REFERENCES `return_requests`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- 4. Expand product_images.url to LONGTEXT so large asset/fallback payloads never hit MySQL 64KB TEXT truncation
+ALTER TABLE `product_images`
+    MODIFY COLUMN `url` LONGTEXT NOT NULL;

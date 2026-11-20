@@ -819,7 +819,7 @@ export class ProductRepository {
           }
         }
       } catch (err) {
-        console.error('[REPO] Error persisting product to PostgreSQL Prisma:', err);
+        console.error('[REPO] Error persisting product to MySQL Prisma:', err);
       }
     }
 

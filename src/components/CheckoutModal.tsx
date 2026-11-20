@@ -66,8 +66,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
   const [formErrors, setFormErrors] = useState<Partial<Record<keyof ShippingAddress, string>>>({});
 
-  // Payment Method State
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodType>('upi');
+  // Payment Method State (defaults to COD until gateway availability is confirmed)
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodType>('cod');
+  const [onlinePaymentsEnabled, setOnlinePaymentsEnabled] = useState<boolean | null>(null);
   const [upiOption, setUpiOption] = useState<'qr' | 'id'>('qr');
   const [upiId, setUpiId] = useState('');
   
@@ -84,6 +85,29 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const [confirmedOrder, setConfirmedOrder] = useState<OrderDetails | null>(null);
   const [copiedOrderId, setCopiedOrderId] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    fetch('/api/v1/payments/razorpay/public-key')
+      .then((r) => r.json())
+      .then((data) => {
+        if (!active) return;
+        const enabled = Boolean(data?.success && data?.enabled && data?.keyId);
+        setOnlinePaymentsEnabled(enabled);
+        if (!enabled) {
+          setPaymentMethod('cod');
+        }
+      })
+      .catch(() => {
+        if (!active) return;
+        setOnlinePaymentsEnabled(false);
+        setPaymentMethod('cod');
+      });
+    return () => {
+      active = false;
+    };
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -489,13 +513,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
           {step === 'address' && (
             <form onSubmit={handleProceedToPayment} className="space-y-4">
               <div className="flex items-center justify-between">
-                <h4 className="text-xs font-mono uppercase tracking-wider text-neutral-400 font-bold">
+                <h4 className="text-xs font-heading uppercase tracking-[0.08em] text-neutral-300 font-semibold">
                   DELIVERY ADDRESS (PAN-INDIA)
                 </h4>
                 <button
                   type="button"
                   onClick={handleFillDemoAddress}
-                  className="text-[11px] font-mono text-[#FF2028] hover:underline"
+                  className="text-[11px] font-sans font-medium text-[#FF2028] hover:underline"
                 >
                   ⚡ Auto-fill Test Address
                 </button>
@@ -503,7 +527,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-mono text-neutral-300 mb-1">Full Name *</label>
+                  <label className="block text-xs font-sans font-medium text-neutral-300 mb-1">Full Name *</label>
                   <input
                     type="text"
                     value={address.fullName}
@@ -515,7 +539,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-mono text-neutral-300 mb-1">Email Address *</label>
+                  <label className="block text-xs font-sans font-medium text-neutral-300 mb-1">Email Address *</label>
                   <input
                     type="email"
                     value={address.email}
@@ -529,9 +553,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-mono text-neutral-300 mb-1">Phone Number (10 Digits) *</label>
+                  <label className="block text-xs font-sans font-medium text-neutral-300 mb-1">Phone Number (10 Digits) *</label>
                   <div className="flex">
-                    <span className="bg-neutral-900 border border-r-0 border-neutral-800 rounded-l-xl px-3 py-2.5 text-xs text-neutral-400 font-mono">
+                    <span className="bg-neutral-900 border border-r-0 border-neutral-800 rounded-l-xl px-3 py-2.5 text-xs text-neutral-400 font-sans tabular-nums">
                       +91
                     </span>
                     <input
@@ -540,28 +564,28 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                       value={address.phone}
                       onChange={(e) => setAddress({ ...address, phone: e.target.value })}
                       placeholder="9876543210"
-                      className="w-full bg-neutral-950 border border-neutral-800 rounded-r-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-[#FF2028] font-mono"
+                      className="w-full bg-neutral-950 border border-neutral-800 rounded-r-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-[#FF2028] font-sans tabular-nums"
                     />
                   </div>
                   {formErrors.phone && <p className="text-[11px] text-[#FF2028] mt-1">{formErrors.phone}</p>}
                 </div>
 
                 <div>
-                  <label className="block text-xs font-mono text-neutral-300 mb-1">PIN Code (6 Digits) *</label>
+                  <label className="block text-xs font-sans font-medium text-neutral-300 mb-1">PIN Code (6 Digits) *</label>
                   <input
                     type="text"
                     maxLength={6}
                     value={address.pincode}
                     onChange={(e) => setAddress({ ...address, pincode: e.target.value })}
                     placeholder="e.g. 400001"
-                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-[#FF2028] font-mono"
+                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-[#FF2028] font-sans tabular-nums"
                   />
                   {formErrors.pincode && <p className="text-[11px] text-[#FF2028] mt-1">{formErrors.pincode}</p>}
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-mono text-neutral-300 mb-1">Flat, House no., Building, Street *</label>
+                <label className="block text-xs font-sans font-medium text-neutral-300 mb-1">Flat, House no., Building, Street *</label>
                 <input
                   type="text"
                   value={address.addressLine1}
@@ -574,7 +598,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-mono text-neutral-300 mb-1">City *</label>
+                  <label className="block text-xs font-sans font-medium text-neutral-300 mb-1">City *</label>
                   <input
                     type="text"
                     value={address.city}
@@ -586,7 +610,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-mono text-neutral-300 mb-1">State *</label>
+                  <label className="block text-xs font-sans font-medium text-neutral-300 mb-1">State *</label>
                   <select
                     value={address.state}
                     onChange={(e) => setAddress({ ...address, state: e.target.value })}
@@ -600,15 +624,15 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
               </div>
 
               {/* Order Amount Preview */}
-              <div className="p-3.5 rounded-xl bg-neutral-900/60 border border-neutral-800 flex items-center justify-between text-xs font-mono">
+              <div className="p-3.5 rounded-xl bg-neutral-900/60 border border-neutral-800 flex items-center justify-between text-xs font-sans">
                 <div>
                   <span className="text-neutral-400">Total Payable Amount:</span>
-                  <span className="text-white font-bold block text-sm">
+                  <span className="text-white font-semibold block text-sm mt-0.5">
                     {items.length} item(s) • Free Pan-India Delivery
                   </span>
                 </div>
                 <div className="text-right">
-                  <span className="font-heading text-2xl text-[#FF2028] font-bold">
+                  <span className="font-sans text-2xl text-[#FF2028] font-bold tabular-nums">
                     ₹{total.toLocaleString('en-IN')}
                   </span>
                 </div>
@@ -616,7 +640,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
               <button
                 type="submit"
-                className="w-full py-4 bg-[#FF2028] hover:bg-[#e02441] text-white font-heading text-lg font-bold tracking-wider uppercase rounded-xl transition shadow-xl shadow-[#FF2028]/20 flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full py-4 bg-[#FF2028] hover:bg-[#e02441] text-white font-sans text-sm font-bold tracking-[0.06em] uppercase rounded-xl transition shadow-xl shadow-[#FF2028]/20 flex items-center justify-center gap-2 cursor-pointer"
               >
                 <span>CONTINUE TO PAYMENT</span>
                 <ArrowRight className="w-5 h-5" />
@@ -636,8 +660,15 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
               {/* Payment Method Selector Tabs */}
               <div>
-                <div className="text-xs font-mono uppercase tracking-wider text-neutral-400 font-bold mb-3">
-                  SELECT PAYMENT GATEWAY
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                  <div className="text-xs font-mono uppercase tracking-wider text-neutral-400 font-bold">
+                    SELECT PAYMENT METHOD
+                  </div>
+                  {onlinePaymentsEnabled === false && (
+                    <span className="text-[10px] font-mono text-amber-300 bg-amber-950/40 border border-amber-800/60 px-2.5 py-0.5 rounded-full">
+                      COD Active • Online Payments Coming Soon
+                    </span>
+                  )}
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   <button
@@ -652,7 +683,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                     <Smartphone className="w-5 h-5 text-[#FF2028]" />
                     <div>
                       <div className="text-xs font-bold font-mono">UPI</div>
-                      <div className="text-[10px] text-neutral-500">GPay, PhonePe</div>
+                      <div className="text-[10px] text-neutral-500">
+                        {onlinePaymentsEnabled === false ? 'Coming Soon' : 'GPay, PhonePe'}
+                      </div>
                     </div>
                   </button>
 
@@ -668,7 +701,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                     <CreditCard className="w-5 h-5 text-[#FF2028]" />
                     <div>
                       <div className="text-xs font-bold font-mono">Cards</div>
-                      <div className="text-[10px] text-neutral-500">Visa, RuPay</div>
+                      <div className="text-[10px] text-neutral-500">
+                        {onlinePaymentsEnabled === false ? 'Coming Soon' : 'Visa, RuPay'}
+                      </div>
                     </div>
                   </button>
 
@@ -684,7 +719,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                     <Building2 className="w-5 h-5 text-[#FF2028]" />
                     <div>
                       <div className="text-xs font-bold font-mono">NetBanking</div>
-                      <div className="text-[10px] text-neutral-500">All Banks</div>
+                      <div className="text-[10px] text-neutral-500">
+                        {onlinePaymentsEnabled === false ? 'Coming Soon' : 'All Banks'}
+                      </div>
                     </div>
                   </button>
 
@@ -700,7 +737,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                     <Banknote className="w-5 h-5 text-[#FF2028]" />
                     <div>
                       <div className="text-xs font-bold font-mono">COD</div>
-                      <div className="text-[10px] text-neutral-500">Pay on Delivery</div>
+                      <div className="text-[10px] text-emerald-400 font-semibold">Pay on Delivery</div>
                     </div>
                   </button>
                 </div>
@@ -708,8 +745,33 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
               {/* PAYMENT DETAILS CONTENT */}
               <div className="p-5 rounded-2xl bg-neutral-900/40 border border-neutral-800">
+                {onlinePaymentsEnabled === false && paymentMethod !== 'cod' ? (
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-xl bg-amber-950/30 border border-amber-800/60 text-amber-200 text-xs font-mono space-y-2">
+                      <div className="flex items-center gap-2 font-bold text-amber-300">
+                        <AlertCircle className="w-4 h-4 shrink-0" />
+                        <span>ONLINE PAYMENTS (UPI / CARDS / NETBANKING) TEMPORARILY UNAVAILABLE</span>
+                      </div>
+                      <p className="text-[11px] text-neutral-300 leading-relaxed">
+                        Online gateway activation is staged for our post-launch update. Please complete your order cleanly using{' '}
+                        <strong className="text-white">Cash on Delivery (COD)</strong> — pay ₹{total.toLocaleString('en-IN')} at your doorstep when delivered.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPaymentMethod('cod');
+                        setServerError(null);
+                      }}
+                      className="w-full py-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-white font-mono text-xs font-bold uppercase transition cursor-pointer"
+                    >
+                      Switch to Cash on Delivery (COD)
+                    </button>
+                  </div>
+                ) : null}
+
                 {/* 1. UPI Payment Details */}
-                {paymentMethod === 'upi' && (
+                {onlinePaymentsEnabled !== false && paymentMethod === 'upi' && (
                   <div className="space-y-4">
                     <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
                       <div className="flex items-center gap-2">
@@ -734,7 +796,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                       </div>
 
                       <span className="text-[11px] font-mono text-emerald-400 font-bold">
-                        Instant Approval
+                        Razorpay Secured
                       </span>
                     </div>
 
@@ -795,7 +857,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 )}
 
                 {/* 2. Card Payment Details with Visual Card */}
-                {paymentMethod === 'card' && (
+                {onlinePaymentsEnabled !== false && paymentMethod === 'card' && (
                   <div className="space-y-5">
                     {/* Visual 3D Metal Streetwear Card */}
                     <div className="relative w-full max-w-sm mx-auto h-48 rounded-2xl p-5 bg-gradient-to-tr from-[#15151c] via-[#22222f] to-[#121217] border border-neutral-700/80 shadow-2xl flex flex-col justify-between overflow-hidden">
@@ -883,7 +945,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 )}
 
                 {/* 3. Net Banking */}
-                {paymentMethod === 'netbanking' && (
+                {onlinePaymentsEnabled !== false && paymentMethod === 'netbanking' && (
                   <div className="space-y-4">
                     <div className="text-xs font-mono text-neutral-300 font-semibold">
                       Select Your Preferred Bank:
@@ -931,18 +993,25 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setStep('address')}
-                  className="py-3.5 px-5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 font-mono text-xs font-bold rounded-xl transition uppercase"
+                  className="py-3.5 px-5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 font-sans text-xs font-semibold tracking-[0.05em] rounded-xl transition uppercase cursor-pointer"
                 >
                   ← Back to Address
                 </button>
 
                 <button
                   type="button"
+                  disabled={onlinePaymentsEnabled === false && paymentMethod !== 'cod'}
                   onClick={handleExecutePayment}
-                  className="flex-1 py-4 bg-[#FF2028] hover:bg-[#e02441] text-white font-heading text-lg font-bold tracking-wider uppercase rounded-xl transition shadow-xl shadow-[#FF2028]/25 flex items-center justify-center gap-2 cursor-pointer active:scale-98"
+                  className="flex-1 py-4 bg-[#FF2028] hover:bg-[#e02441] disabled:bg-neutral-800 disabled:text-neutral-400 disabled:cursor-not-allowed text-white font-sans text-sm font-bold tracking-[0.06em] uppercase rounded-xl transition shadow-xl shadow-[#FF2028]/25 disabled:shadow-none flex items-center justify-center gap-2 cursor-pointer active:scale-98 tabular-nums"
                 >
                   <Lock className="w-4 h-4" />
-                  <span>PAY ₹{total.toLocaleString('en-IN')} SECURELY</span>
+                  <span>
+                    {paymentMethod === 'cod'
+                      ? `CONFIRM COD ORDER — ₹${total.toLocaleString('en-IN')}`
+                      : onlinePaymentsEnabled === false
+                        ? 'SELECT COD TO PLACE ORDER'
+                        : `PAY ₹${total.toLocaleString('en-IN')} SECURELY`}
+                  </span>
                 </button>
               </div>
             </div>
@@ -1053,13 +1122,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                       <div className="flex items-center gap-2.5">
                         <img src={it.product.images[0]} alt={it.product.name} className="w-10 h-12 object-cover rounded border border-neutral-800" />
                         <div>
-                          <div className="font-heading text-sm text-white font-bold">{it.product.name}</div>
-                          <div className="text-[10px] text-neutral-400 font-mono">
+                          <div className="font-sans text-sm text-white font-semibold">{it.product.name}</div>
+                          <div className="text-[11px] text-neutral-400 font-sans">
                             Size: {it.size} • Qty: {it.quantity} • {it.product.fit}
                           </div>
                         </div>
                       </div>
-                      <div className="font-mono text-white font-bold">
+                      <div className="font-sans text-white font-bold tabular-nums">
                         ₹{(it.product.price * it.quantity).toLocaleString('en-IN')}
                       </div>
                     </div>
@@ -1070,7 +1139,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
               {/* Done Button */}
               <button
                 onClick={onClose}
-                className="w-full py-3.5 bg-neutral-800 hover:bg-neutral-700 text-white font-mono text-xs font-bold uppercase rounded-xl transition"
+                className="w-full py-3.5 bg-neutral-800 hover:bg-neutral-700 text-white font-sans text-xs font-semibold uppercase tracking-[0.06em] rounded-xl transition cursor-pointer"
               >
                 CONTINUE SHOPPING
               </button>

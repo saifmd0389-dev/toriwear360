@@ -1,5 +1,6 @@
 import express, { Router, Request, Response, NextFunction } from 'express';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { cmsRepository } from '../repositories/cmsRepository';
@@ -7,6 +8,16 @@ import { extractSessionToken } from '../middleware/authMiddleware';
 import { userService } from '../services/userService';
 import { authStore } from '../authStore';
 import { userStore } from '../userStore';
+import {
+  DEFAULT_REGULAR_MAX_UPLOAD_BYTES,
+  ImageValidationError,
+  getConfiguredMaxUploadBytes,
+  optimizeImageForStorage,
+} from '../services/storage/imageOptimizer';
+import {
+  IMMUTABLE_IMAGE_CACHE_CONTROL,
+  getStorageAdapter,
+} from '../services/storage/storageAdapter';
 
 export const cmsRouter = Router();
 
@@ -413,6 +424,20 @@ cmsRouter.put(['/admin/settings', '/settings', '/cms/settings', '/admin/cms/sett
   }
 });
 
+function buildUniqueAssetFilename(rawFilename: string | undefined, extension: string): string {
+  const baseName = rawFilename ? path.basename(rawFilename, path.extname(rawFilename)) : 'cms';
+  const safePrefix = baseName.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20) || 'cms';
+  return `cms-${safePrefix}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${extension}`;
+}
+
+function getChunkStagingDir(): string {
+  const dir = path.join(os.tmpdir(), 'toriwear-upload-chunks');
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
 cmsRouter.post(['/upload-asset', '/cms/upload-asset', '/admin/upload-asset', '/admin/cms/upload-asset'], requireAdminAuth(), async (req: Request, res: Response) => {
   try {
     const { dataUrl, filename } = req.body || {};
@@ -420,69 +445,82 @@ cmsRouter.post(['/upload-asset', '/cms/upload-asset', '/admin/upload-asset', '/a
       return res.status(400).json({ success: false, error: 'Missing image dataUrl payload.' });
     }
 
-    const match = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,(.+)$/i);
+    const match = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml|avif);base64,(.+)$/i);
     if (!match || !match[1] || !match[2]) {
       return res.status(400).json({
         success: false,
-        error: 'Unsupported image format. Allowed types: PNG, JPEG, WEBP, GIF, SVG.',
+        error: 'Unsupported image format. Allowed types: PNG, JPEG, WEBP, AVIF, GIF, SVG.',
       });
     }
 
-    const rawMimeSub = match[1].toLowerCase();
-    const ext = rawMimeSub === 'jpeg' ? 'jpg' : rawMimeSub === 'svg+xml' ? 'svg' : rawMimeSub;
-    const buffer = Buffer.from(match[2], 'base64');
+    const declaredMimeType = `image/${match[1].toLowerCase()}`;
+    const rawBuffer = Buffer.from(match[2], 'base64');
 
-    if (buffer.length === 0) {
-      return res.status(400).json({ success: false, error: 'Uploaded image file is empty.' });
+    const optimized = await optimizeImageForStorage(rawBuffer, {
+      filename: typeof filename === 'string' ? filename : undefined,
+      mimeType: declaredMimeType,
+      maxBytes: DEFAULT_REGULAR_MAX_UPLOAD_BYTES,
+    });
+
+    const storage = getStorageAdapter();
+    const outName = buildUniqueAssetFilename(typeof filename === 'string' ? filename : undefined, optimized.extension);
+    const uploadRes = await storage.uploadFile(optimized.buffer, outName, optimized.contentType, {
+      cacheControl: IMMUTABLE_IMAGE_CACHE_CONTROL,
+    });
+
+    if (!uploadRes.success || !uploadRes.url) {
+      return res.status(uploadRes.statusCode || 502).json({
+        success: false,
+        error: uploadRes.error || 'Failed to persist uploaded image asset.',
+      });
     }
-    if (buffer.length > 10 * 1024 * 1024) {
-      return res.status(413).json({ success: false, error: 'Image size exceeds 10 MB limit.' });
-    }
-
-    const assetsDir = path.resolve(process.cwd(), 'public/generated-assets');
-    if (!fs.existsSync(assetsDir)) {
-      fs.mkdirSync(assetsDir, { recursive: true });
-    }
-
-    const safePrefix = typeof filename === 'string'
-      ? filename.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20) || 'cms'
-      : 'cms';
-    const outName = `cms-${safePrefix}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}.${ext}`;
-    const outPath = path.join(assetsDir, outName);
-    const tmpPath = `${outPath}.tmp`;
-
-    fs.writeFileSync(tmpPath, buffer);
-    fs.renameSync(tmpPath, outPath);
 
     return res.json({
       success: true,
-      url: `/generated-assets/${outName}`,
-      sizeBytes: buffer.length,
+      url: uploadRes.url,
+      contentType: uploadRes.contentType || optimized.contentType,
+      sizeBytes: uploadRes.sizeBytes ?? optimized.optimizedSizeBytes,
+      originalSizeBytes: optimized.originalSizeBytes,
+      width: optimized.width,
+      height: optimized.height,
+      optimized: optimized.optimized,
+      storageProvider: storage.providerName,
     });
   } catch (err: any) {
-    console.error('[CMS] Asset upload error:', err);
-    return res.status(500).json({ success: false, error: err.message || 'Failed to upload CMS image asset.' });
+    if (err instanceof ImageValidationError) {
+      return res.status(err.statusCode).json({
+        success: false,
+        code: err.code,
+        error: err.message,
+      });
+    }
+    console.error('[CMS] Asset upload error:', err?.message || err);
+    return res.status(500).json({ success: false, error: 'Failed to upload CMS image asset.' });
   }
 });
 
-// Raw binary chunked upload endpoint — bypasses JSON Base64 inflation and 32MB request body limits,
-// allowing unlimited image file sizes to stream cleanly to disk in small binary chunks.
+// Raw binary chunked upload endpoint — streams chunks to private temp staging, then optimizes
+// with Sharp and uploads to the configured StorageAdapter (local or Google Cloud Storage).
 cmsRouter.post(
   ['/upload-asset-chunk', '/cms/upload-asset-chunk', '/admin/upload-asset-chunk', '/admin/cms/upload-asset-chunk'],
   requireAdminAuth(),
   express.raw({ type: 'application/octet-stream', limit: '8mb' }),
   async (req: Request, res: Response) => {
+    let tmpChunkPath = '';
+    let shouldCleanupTmp = false;
+
     try {
       const uploadId = String(req.query.uploadId || '').trim();
       const chunkIndex = Number(req.query.chunkIndex);
       const totalChunks = Number(req.query.totalChunks);
       const rawFilename = String(req.query.filename || 'image.png');
       const mimeType = String(req.query.mimeType || '').toLowerCase();
+      const maxUploadBytes = getConfiguredMaxUploadBytes();
 
       if (!/^[a-zA-Z0-9_-]{8,64}$/.test(uploadId)) {
         return res.status(400).json({ success: false, error: 'Invalid upload session ID.' });
       }
-      if (!Number.isInteger(chunkIndex) || !Number.isInteger(totalChunks) || chunkIndex < 0 || totalChunks < 1 || chunkIndex >= totalChunks) {
+      if (!Number.isInteger(chunkIndex) || !Number.isInteger(totalChunks) || chunkIndex < 0 || totalChunks < 1 || totalChunks > 64 || chunkIndex >= totalChunks) {
         return res.status(400).json({ success: false, error: 'Invalid chunk index parameters.' });
       }
 
@@ -509,17 +547,34 @@ cmsRouter.post(
         });
       }
 
-      const assetsDir = path.resolve(process.cwd(), 'public/generated-assets');
-      if (!fs.existsSync(assetsDir)) {
-        fs.mkdirSync(assetsDir, { recursive: true });
+      // Fail fast on first chunk if cloud storage is explicitly enabled but misconfigured
+      const storage = getStorageAdapter();
+      const storageStatus = storage.getConfigStatus();
+      if (!storageStatus.configured) {
+        return res.status(503).json({
+          success: false,
+          error: storageStatus.error || 'Configured storage provider is unavailable.',
+        });
       }
 
-      const tmpChunkPath = path.join(assetsDir, `.tmp-chunk-${uploadId}.bin`);
+      const stagingDir = getChunkStagingDir();
+      tmpChunkPath = path.join(stagingDir, `chunk-${uploadId}.bin`);
+
       if (chunkIndex === 0) {
+        if (chunkBuffer.length > maxUploadBytes) {
+          const maxMb = (maxUploadBytes / (1024 * 1024)).toFixed(0);
+          return res.status(413).json({ success: false, error: `Image size exceeds the maximum allowed limit of ${maxMb} MB.` });
+        }
         fs.writeFileSync(tmpChunkPath, chunkBuffer);
       } else {
         if (!fs.existsSync(tmpChunkPath)) {
           return res.status(400).json({ success: false, error: 'Upload session expired or missing initial chunk.' });
+        }
+        const currentSize = fs.statSync(tmpChunkPath).size;
+        if (currentSize + chunkBuffer.length > maxUploadBytes) {
+          shouldCleanupTmp = true;
+          const maxMb = (maxUploadBytes / (1024 * 1024)).toFixed(0);
+          return res.status(413).json({ success: false, error: `Image size exceeds the maximum allowed limit of ${maxMb} MB.` });
         }
         fs.appendFileSync(tmpChunkPath, chunkBuffer);
       }
@@ -533,23 +588,58 @@ cmsRouter.post(
         });
       }
 
-      const stats = fs.statSync(tmpChunkPath);
-      const baseName = path.basename(rawFilename, path.extname(rawFilename));
-      const safePrefix = baseName.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20) || 'cms';
-      const outName = `cms-${safePrefix}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}.${ext}`;
-      const outPath = path.join(assetsDir, outName);
+      shouldCleanupTmp = true;
+      const assembledBuffer = fs.readFileSync(tmpChunkPath);
 
-      fs.renameSync(tmpChunkPath, outPath);
+      const optimized = await optimizeImageForStorage(assembledBuffer, {
+        filename: rawFilename,
+        mimeType,
+        maxBytes: maxUploadBytes,
+      });
+
+      const outName = buildUniqueAssetFilename(rawFilename, optimized.extension);
+      const uploadRes = await storage.uploadFile(optimized.buffer, outName, optimized.contentType, {
+        cacheControl: IMMUTABLE_IMAGE_CACHE_CONTROL,
+      });
+
+      if (!uploadRes.success || !uploadRes.url) {
+        return res.status(uploadRes.statusCode || 502).json({
+          success: false,
+          error: uploadRes.error || 'Failed to persist uploaded image asset.',
+        });
+      }
 
       return res.json({
         success: true,
         completed: true,
-        url: `/generated-assets/${outName}`,
-        sizeBytes: stats.size,
+        url: uploadRes.url,
+        contentType: uploadRes.contentType || optimized.contentType,
+        sizeBytes: uploadRes.sizeBytes ?? optimized.optimizedSizeBytes,
+        originalSizeBytes: optimized.originalSizeBytes,
+        width: optimized.width,
+        height: optimized.height,
+        optimized: optimized.optimized,
+        storageProvider: storage.providerName,
       });
     } catch (err: any) {
-      console.error('[CMS] Chunked asset upload error:', err);
-      return res.status(500).json({ success: false, error: err.message || 'Failed to stream image chunk.' });
+      shouldCleanupTmp = true;
+      if (err instanceof ImageValidationError) {
+        return res.status(err.statusCode).json({
+          success: false,
+          code: err.code,
+          error: err.message,
+        });
+      }
+      console.error('[CMS] Chunked asset upload error:', err?.message || err);
+      return res.status(500).json({ success: false, error: 'Failed to process uploaded image chunk.' });
+    } finally {
+      if (shouldCleanupTmp && tmpChunkPath && fs.existsSync(tmpChunkPath)) {
+        try {
+          fs.unlinkSync(tmpChunkPath);
+        } catch {
+          // Best-effort cleanup of temp chunk staging file
+        }
+      }
     }
   }
 );

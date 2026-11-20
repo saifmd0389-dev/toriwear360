@@ -119,7 +119,7 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
                 handleCategoryChange(null);
                 setSelectedFit('ALL');
               }}
-              className="px-4 py-2 bg-neutral-950 text-white rounded-full text-xs font-mono font-bold uppercase tracking-wider hover:bg-neutral-800 transition cursor-pointer"
+              className="px-4 py-2 bg-neutral-950 text-white rounded-full text-xs font-sans font-semibold uppercase tracking-[0.06em] hover:bg-neutral-800 transition cursor-pointer"
             >
               SHOP ALL MEN
             </button>
@@ -129,9 +129,9 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
                 <button
                   key={fit}
                   onClick={() => setSelectedFit(fit)}
-                  className={`px-3 py-1.5 rounded-full text-xs font-mono font-medium transition cursor-pointer ${
+                  className={`px-3 py-1.5 rounded-full text-xs font-sans font-medium transition cursor-pointer ${
                     selectedFit === fit
-                      ? 'bg-neutral-900 text-white font-bold shadow-sm'
+                      ? 'bg-neutral-900 text-white font-semibold shadow-sm'
                       : 'bg-white border border-neutral-300 text-neutral-700 hover:border-neutral-900'
                   }`}
                 >
@@ -146,7 +146,7 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
         <div className="flex items-center gap-2 overflow-x-auto pb-3 mb-4 no-scrollbar">
           <button
             onClick={() => handleWorldChange('ALL')}
-            className={`px-4 py-2 rounded-full text-xs font-mono font-semibold uppercase whitespace-nowrap transition cursor-pointer border ${
+            className={`px-4 py-2 rounded-full text-xs font-heading font-semibold uppercase tracking-[0.05em] whitespace-nowrap transition cursor-pointer border ${
               selectedWorld === 'ALL'
                 ? 'bg-neutral-950 text-white border-neutral-950 shadow-md'
                 : 'bg-white text-neutral-700 border-neutral-300 hover:border-neutral-600'
@@ -163,15 +163,15 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
               <button
                 key={world.id}
                 onClick={() => handleWorldChange(world.id as MenWorldCategory)}
-                className={`px-4 py-2 rounded-full text-xs font-mono font-medium uppercase whitespace-nowrap transition cursor-pointer border flex items-center gap-2 ${
+                className={`px-4 py-2 rounded-full text-xs font-heading font-medium uppercase tracking-[0.05em] whitespace-nowrap transition cursor-pointer border flex items-center gap-2 ${
                   isSelected
-                    ? 'bg-neutral-950 text-white border-neutral-950 shadow-md font-bold'
+                    ? 'bg-neutral-950 text-white border-neutral-950 shadow-md font-semibold'
                     : 'bg-white text-neutral-700 border-neutral-300 hover:border-neutral-700 hover:text-neutral-950'
                 }`}
               >
                 <span className="w-2 h-2 rounded-full" style={{ backgroundColor: world.accentColor }} />
                 <span>{world.name}</span>
-                <span className="text-[10px] text-neutral-400 font-normal">({count})</span>
+                <span className="text-[11px] font-sans text-neutral-400 font-normal tabular-nums">({count})</span>
               </button>
             );
           })}
@@ -180,15 +180,15 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
         {/* Dynamic Store Categories Filter Pills */}
         {enabledMenCategories.length > 0 && (
           <div className="flex items-center gap-2 overflow-x-auto pb-3 mb-8 no-scrollbar">
-            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-500 font-bold shrink-0 mr-1">
+            <span className="text-[10px] font-heading uppercase tracking-[0.08em] text-neutral-500 font-semibold shrink-0 mr-1">
               CATEGORIES:
             </span>
             <button
               type="button"
               onClick={() => handleCategoryChange(null)}
-              className={`px-3 py-1 rounded-full text-[11px] font-mono uppercase whitespace-nowrap transition cursor-pointer border ${
+              className={`px-3 py-1 rounded-full text-[11px] font-sans font-medium uppercase tracking-[0.04em] whitespace-nowrap transition cursor-pointer border ${
                 !activeCategorySlug
-                  ? 'bg-[#FF2028] text-white border-[#FF2028] font-bold'
+                  ? 'bg-[#FF2028] text-white border-[#FF2028] font-semibold'
                   : 'bg-white text-neutral-700 border-neutral-300 hover:border-neutral-700'
               }`}
             >
@@ -199,9 +199,9 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
                 key={cat.id}
                 type="button"
                 onClick={() => handleCategoryChange(activeCategorySlug === cat.slug ? null : cat.slug)}
-                className={`px-3 py-1 rounded-full text-[11px] font-mono uppercase whitespace-nowrap transition cursor-pointer border ${
+                className={`px-3 py-1 rounded-full text-[11px] font-sans font-medium uppercase tracking-[0.04em] whitespace-nowrap transition cursor-pointer border ${
                   activeCategorySlug === cat.slug
-                    ? 'bg-[#FF2028] text-white border-[#FF2028] font-bold shadow-sm'
+                    ? 'bg-[#FF2028] text-white border-[#FF2028] font-semibold shadow-sm'
                     : 'bg-white text-neutral-700 border-neutral-300 hover:border-neutral-700'
                 }`}
               >
@@ -363,7 +363,7 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
 
                       <h3 
                         onClick={() => onOpenProductDetail(product)}
-                        className="font-heading text-sm sm:text-lg font-bold text-neutral-950 uppercase group-hover:text-[#FF2028] transition-colors cursor-pointer line-clamp-1"
+                        className="font-sans text-sm sm:text-base font-semibold text-neutral-950 tracking-tight group-hover:text-[#FF2028] transition-colors cursor-pointer line-clamp-1"
                       >
                         {product.name}
                       </h3>
@@ -396,9 +396,9 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
                             <button
                               key={sz}
                               onClick={() => handleSizeSelect(product.id, sz)}
-                              className={`px-1.5 sm:px-2 py-0.5 rounded text-[9px] sm:text-[10px] font-mono font-medium border transition cursor-pointer ${
+                              className={`px-1.5 sm:px-2 py-0.5 rounded text-[10px] sm:text-[11px] font-sans font-medium border transition cursor-pointer ${
                                 currentSize === sz 
-                                  ? 'bg-neutral-950 text-white border-neutral-950 font-bold' 
+                                  ? 'bg-neutral-950 text-white border-neutral-950 font-semibold' 
                                   : 'bg-neutral-100 text-neutral-700 border-neutral-200 hover:border-neutral-400'
                               }`}
                             >
@@ -410,10 +410,10 @@ export const ShopMenWorlds: React.FC<ShopMenWorldsProps> = ({
 
                       <div className="flex items-center justify-between gap-1">
                         <div className="flex items-baseline gap-1 sm:gap-2">
-                          <span className="font-heading text-base sm:text-xl font-black text-neutral-950 tabular-nums">
+                          <span className="font-sans text-base sm:text-lg font-bold text-neutral-950 tabular-nums">
                             ₹{product.price.toLocaleString('en-IN')}
                           </span>
-                          <span className="text-[10px] sm:text-xs text-neutral-400 line-through tabular-nums font-mono">
+                          <span className="text-[10px] sm:text-xs text-neutral-400 line-through tabular-nums font-sans">
                             ₹{product.originalPrice.toLocaleString('en-IN')}
                           </span>
                         </div>

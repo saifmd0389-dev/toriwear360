@@ -60,7 +60,7 @@ export const RecentlyViewedSection: React.FC<RecentlyViewedSectionProps> = ({
               <Eye className="w-3.5 h-3.5 text-red-500" />
               <span>BROWSING HISTORY ({recentProducts.length})</span>
             </div>
-            <h2 className="text-xl sm:text-2xl font-black text-white tracking-wider uppercase font-sans">
+            <h2 className="font-heading text-xl sm:text-2xl font-bold text-white tracking-tight uppercase">
               {title}
             </h2>
             <p className="text-xs sm:text-sm text-neutral-400 mt-1 max-w-lg">
@@ -169,11 +169,11 @@ export const RecentlyViewedSection: React.FC<RecentlyViewedSectionProps> = ({
 
                   <div className="mt-2.5 pt-2 border-t border-neutral-800/80 flex items-center justify-between">
                     <div>
-                      <span className="text-xs font-bold font-mono text-white">
+                      <span className="text-xs font-bold font-sans text-white tabular-nums">
                         ₹ {product.price.toLocaleString('en-IN')}
                       </span>
                       {product.originalPrice && product.originalPrice > product.price && (
-                        <span className="text-[10px] text-neutral-500 line-through ml-1.5 font-mono">
+                        <span className="text-[10px] text-neutral-500 line-through ml-1.5 font-sans tabular-nums">
                           ₹{product.originalPrice}
                         </span>
                       )}

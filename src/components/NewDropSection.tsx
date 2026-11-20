@@ -99,14 +99,14 @@ export const NewDropSection: React.FC<NewDropSectionProps> = ({
               </span>
             </div>
             
-            <h2 className="font-heading text-3xl sm:text-5xl font-black text-white uppercase tracking-tight flex items-baseline gap-3">
+            <h2 className="font-display text-4xl sm:text-6xl font-normal text-white uppercase tracking-[0.04em] leading-none flex items-baseline gap-3">
               <span>NEW LAUNCH</span>
-              <span className="text-sm sm:text-lg font-mono text-[#FF2028] font-bold tracking-normal">
+              <span className="text-sm sm:text-lg font-heading text-[#FF2028] font-semibold tracking-[0.06em]">
                 // DROP 01
               </span>
             </h2>
             
-            <div className="mt-1 text-xs sm:text-sm font-semibold text-neutral-300 tracking-wider uppercase font-mono">
+            <div className="mt-1.5 text-xs sm:text-sm font-medium text-neutral-300 tracking-[0.08em] uppercase font-sans">
               THE LATEST CHAPTER.
             </div>
           </div>
@@ -151,7 +151,7 @@ export const NewDropSection: React.FC<NewDropSectionProps> = ({
                 const el = document.getElementById('shop-men-section');
                 el?.scrollIntoView({ behavior: 'smooth' });
               }}
-              className="px-4 py-2.5 bg-white hover:bg-neutral-200 text-neutral-950 text-xs font-bold font-heading uppercase tracking-wider rounded-xl transition whitespace-nowrap cursor-pointer shadow-md flex items-center gap-1.5"
+              className="px-4 py-2.5 bg-white hover:bg-neutral-200 text-neutral-950 text-xs font-bold font-sans uppercase tracking-[0.06em] rounded-xl transition whitespace-nowrap cursor-pointer shadow-md flex items-center gap-1.5"
             >
               <span>ALL MEN’S</span>
               <ArrowRight className="w-3.5 h-3.5" />

@@ -109,33 +109,33 @@ export const PromoBannerPopup: React.FC<PromoBannerPopupProps> = ({
           <div className="w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
             <Check className="w-5 h-5" />
           </div>
-          <div className="font-heading text-xl text-white font-bold uppercase">
+          <div className="font-display text-2xl text-white font-normal tracking-[0.04em] uppercase">
             ACCESS GRANTED
           </div>
           {grantedCoupon ? (
-            <p className="text-xs font-mono text-neutral-300">
+            <p className="text-xs font-sans text-neutral-300">
               Coupon code <strong className="text-[#FF2028]">{grantedCoupon}</strong> is eligible on your account when you reach checkout rules!
             </p>
           ) : (
-            <p className="text-xs font-mono text-neutral-300">
+            <p className="text-xs font-sans text-neutral-300">
               You are now registered for TORIWEAR early access drop notifications!
             </p>
           )}
           <button
             onClick={onClose}
-            className="w-full py-2 bg-[#FF2028] hover:bg-[#e02641] text-white text-xs font-mono font-bold uppercase rounded-lg transition cursor-pointer"
+            className="w-full py-2.5 bg-[#FF2028] hover:bg-[#e02641] text-white text-xs font-sans font-bold uppercase tracking-[0.06em] rounded-lg transition cursor-pointer"
           >
             START SHOPPING
           </button>
         </div>
       ) : (
         <form onSubmit={handleSubmit} className="space-y-3">
-          <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-[#FF2028] font-bold">
+          <div className="flex items-center gap-2 text-xs font-heading uppercase tracking-[0.1em] text-[#FF2028] font-semibold">
             <Sparkles className="w-4 h-4" />
             <span>{badgeText}</span>
           </div>
 
-          <div className="font-heading text-2xl font-black text-white uppercase leading-tight">
+          <div className="font-display text-3xl font-normal tracking-[0.04em] text-white uppercase leading-[0.95]">
             {headline}
           </div>
 
@@ -151,9 +151,9 @@ export const PromoBannerPopup: React.FC<PromoBannerPopupProps> = ({
               onChange={(e) => setEmail(e.target.value)}
               disabled={isSubmitting}
               placeholder="Enter your email address"
-              className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-[#FF2028] font-mono disabled:opacity-60"
+              className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-[#FF2028] font-sans disabled:opacity-60"
             />
-            <label className="flex items-start gap-2 text-[11px] text-neutral-400 font-mono cursor-pointer">
+            <label className="flex items-start gap-2 text-[11px] text-neutral-400 font-sans cursor-pointer">
               <input
                 type="checkbox"
                 checked={emailConsent}
@@ -164,12 +164,12 @@ export const PromoBannerPopup: React.FC<PromoBannerPopupProps> = ({
               <span>I agree to receive drop notifications & marketing emails from TORIWEAR.</span>
             </label>
             {errorMsg && (
-              <div className="text-[11px] font-mono text-red-400">{errorMsg}</div>
+              <div className="text-[11px] font-sans text-red-400">{errorMsg}</div>
             )}
             <button
               type="submit"
               disabled={isSubmitting}
-              className="w-full py-2.5 bg-[#FF2028] hover:bg-[#e02641] text-white text-xs font-mono font-bold uppercase tracking-wider rounded-xl transition shadow-lg shadow-[#FF2028]/30 cursor-pointer flex items-center justify-center gap-2 disabled:opacity-60"
+              className="w-full py-2.5 bg-[#FF2028] hover:bg-[#e02641] text-white text-xs font-sans font-bold uppercase tracking-[0.06em] rounded-xl transition shadow-lg shadow-[#FF2028]/30 cursor-pointer flex items-center justify-center gap-2 disabled:opacity-60"
             >
               <span>{isSubmitting ? 'REGISTERING...' : ctaText}</span>
               <Send className="w-3.5 h-3.5" />

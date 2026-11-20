@@ -207,7 +207,7 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
             <button
               type="button"
               onClick={handleResetFilters}
-              className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-full text-xs font-mono font-bold uppercase tracking-wider transition cursor-pointer shadow-md shadow-sky-600/20"
+              className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-full font-sans text-xs font-semibold uppercase tracking-[0.06em] transition cursor-pointer shadow-md shadow-sky-600/20"
             >
               SHOW ALL KIDS
             </button>
@@ -217,7 +217,7 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
                 type="button"
                 onClick={() => setSelectedAge('ALL')}
                 aria-pressed={selectedAge === 'ALL'}
-                className={`px-3 py-1.5 rounded-full text-xs font-mono font-semibold transition cursor-pointer ${
+                className={`px-3 py-1.5 rounded-full font-sans text-xs font-semibold transition cursor-pointer ${
                   selectedAge === 'ALL'
                     ? 'bg-neutral-900 text-white font-bold shadow-sm'
                     : 'bg-white/90 border border-neutral-300 text-neutral-700 hover:border-sky-500'
@@ -231,7 +231,7 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
                   type="button"
                   onClick={() => setSelectedAge(age)}
                   aria-pressed={selectedAge === age}
-                  className={`px-3 py-1.5 rounded-full text-xs font-mono font-semibold transition cursor-pointer whitespace-nowrap ${
+                  className={`px-3 py-1.5 rounded-full font-sans text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
                     selectedAge === age
                       ? 'bg-sky-600 text-white font-bold shadow-sm'
                       : 'bg-white/90 border border-neutral-300 text-neutral-700 hover:border-sky-500'
@@ -257,11 +257,11 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
               <div>
                 <h3 className="font-heading text-lg sm:text-2xl font-black text-neutral-950 uppercase tracking-tight flex items-center gap-2">
                   <span>KIDS’ FEATURED DROPS</span>
-                  <span className="text-xs font-mono text-sky-600 font-bold px-2 py-0.5 rounded-full bg-sky-100 hidden sm:inline">
+                  <span className="font-sans text-[11px] text-sky-700 font-semibold px-2.5 py-0.5 rounded-full bg-sky-100 hidden sm:inline tracking-[0.04em]">
                     ROUND CAPSULE · 5 IN FRONT
                   </span>
                 </h3>
-                <p className="text-xs text-neutral-500 font-mono">
+                <p className="font-sans text-xs text-neutral-500">
                   Swipe horizontally to browse round character fits with interactive hover zoom.
                 </p>
               </div>
@@ -367,7 +367,7 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
             type="button"
             onClick={() => handleWorldChange('ALL')}
             aria-pressed={activeWorld === 'ALL'}
-            className={`px-4 py-2 rounded-full text-xs font-mono font-semibold uppercase whitespace-nowrap transition cursor-pointer border ${
+            className={`px-4 py-2 rounded-full font-heading text-xs font-semibold uppercase tracking-[0.04em] whitespace-nowrap transition cursor-pointer border ${
               activeWorld === 'ALL'
                 ? 'bg-sky-600 text-white border-sky-600 shadow-md'
                 : 'bg-white text-neutral-700 border-neutral-300 hover:border-sky-400'
@@ -386,15 +386,15 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
                 type="button"
                 onClick={() => handleWorldChange(world.id as KidsWorldCategory)}
                 aria-pressed={isSelected}
-                className={`px-4 py-2 rounded-full text-xs font-mono font-medium uppercase whitespace-nowrap transition cursor-pointer border flex items-center gap-2 ${
+                className={`px-4 py-2 rounded-full font-heading text-xs font-medium uppercase tracking-[0.04em] whitespace-nowrap transition cursor-pointer border flex items-center gap-2 ${
                   isSelected
-                    ? 'bg-neutral-950 text-white border-neutral-950 shadow-md font-bold'
+                    ? 'bg-neutral-950 text-white border-neutral-950 shadow-md font-semibold'
                     : 'bg-white text-neutral-700 border-neutral-300 hover:border-sky-400 hover:text-neutral-950'
                 }`}
               >
                 <span className="w-2 h-2 rounded-full" style={{ backgroundColor: world.accentColor }} />
                 <span>{world.name}</span>
-                <span className="text-[10px] text-neutral-400 font-normal">({count})</span>
+                <span className="font-sans text-[10px] text-neutral-400 font-medium tabular-nums">({count})</span>
               </button>
             );
           })}
@@ -403,16 +403,16 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
         {/* Dynamic Store Categories Filter Pills */}
         {enabledKidsCategories.length > 0 && (
           <div className="flex items-center gap-2 overflow-x-auto pb-3 mb-6 no-scrollbar">
-            <span className="text-[10px] font-mono uppercase tracking-wider text-sky-700 font-bold shrink-0 mr-1">
+            <span className="font-sans text-[10px] uppercase tracking-[0.08em] text-sky-700 font-semibold shrink-0 mr-1">
               CATEGORIES:
             </span>
             <button
               type="button"
               onClick={() => handleCategoryChange(null)}
-              className={`px-3 py-1 rounded-full text-[11px] font-mono uppercase whitespace-nowrap transition cursor-pointer border ${
+              className={`px-3 py-1 rounded-full font-sans text-[11px] uppercase whitespace-nowrap transition cursor-pointer border ${
                 !activeCategorySlug
-                  ? 'bg-sky-600 text-white border-sky-600 font-bold'
-                  : 'bg-white text-neutral-700 border-neutral-300 hover:border-sky-400'
+                  ? 'bg-sky-600 text-white border-sky-600 font-semibold'
+                  : 'bg-white text-neutral-700 border-neutral-300 hover:border-sky-400 font-medium'
               }`}
             >
               ALL CATEGORIES
@@ -422,10 +422,10 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
                 key={cat.id}
                 type="button"
                 onClick={() => handleCategoryChange(activeCategorySlug === cat.slug ? null : cat.slug)}
-                className={`px-3 py-1 rounded-full text-[11px] font-mono uppercase whitespace-nowrap transition cursor-pointer border ${
+                className={`px-3 py-1 rounded-full font-sans text-[11px] uppercase whitespace-nowrap transition cursor-pointer border ${
                   activeCategorySlug === cat.slug
-                    ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm'
-                    : 'bg-white text-neutral-700 border-neutral-300 hover:border-sky-400'
+                    ? 'bg-sky-600 text-white border-sky-600 font-semibold shadow-sm'
+                    : 'bg-white text-neutral-700 border-neutral-300 hover:border-sky-400 font-medium'
                 }`}
               >
                 {cat.name}
@@ -555,7 +555,7 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
                     <div>
                       <h4
                         onClick={() => onOpenProductDetail(product)}
-                        className="font-heading text-sm font-black text-neutral-950 uppercase tracking-tight group-hover:text-sky-600 transition cursor-pointer line-clamp-1"
+                        className="font-sans text-sm font-semibold text-neutral-950 tracking-tight group-hover:text-sky-600 transition cursor-pointer line-clamp-1"
                       >
                         {product.name}
                       </h4>
@@ -581,11 +581,11 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
 
                     <div className="mt-4 pt-3 border-t border-sky-50 flex items-center justify-between">
                       <div className="flex items-baseline gap-1.5">
-                        <span className="text-sm font-bold font-mono text-neutral-950">
+                        <span className="text-sm font-bold font-sans text-neutral-950 tabular-nums">
                           ₹{product.price}
                         </span>
                         {product.originalPrice > product.price && (
-                          <span className="text-xs font-mono text-neutral-400 line-through">
+                          <span className="text-xs font-sans text-neutral-400 line-through tabular-nums">
                             ₹{product.originalPrice}
                           </span>
                         )}
@@ -609,7 +609,7 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
 
                         <button
                           onClick={() => onOpenProductDetail(product)}
-                          className="px-3 py-1.5 bg-neutral-950 hover:bg-sky-600 text-white rounded-lg text-xs font-mono font-bold uppercase tracking-wider transition cursor-pointer flex items-center gap-1 shadow-sm"
+                          className="px-3 py-1.5 bg-neutral-950 hover:bg-sky-600 text-white rounded-lg text-xs font-sans font-semibold uppercase tracking-[0.05em] transition cursor-pointer flex items-center gap-1 shadow-sm"
                         >
                           <span>VIEW</span>
                           <ArrowRight className="w-3 h-3" />

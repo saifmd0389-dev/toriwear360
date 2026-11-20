@@ -69,7 +69,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     return next();
   }
 
-  // 2. Try persistent authStore session validation (PostgreSQL + secure store backed)
+  // 2. Try persistent authStore session validation (MySQL + secure store backed)
   const storeUser = await authStore.getUserByTokenAsync(token);
   if (storeUser) {
     req.user = {

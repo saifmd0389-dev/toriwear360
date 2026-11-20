@@ -78,7 +78,7 @@ export const Footer: React.FC<FooterProps> = ({
             </p>
 
             <div className="pt-2">
-              <div className="text-[10px] font-mono uppercase tracking-widest text-neutral-400 mb-2">
+              <div className="text-[11px] font-heading font-semibold uppercase tracking-[0.1em] text-neutral-300 mb-2">
                 CONNECT WITH THE SQUAD
               </div>
               <div className="flex flex-wrap items-center gap-2.5">
@@ -211,7 +211,7 @@ export const Footer: React.FC<FooterProps> = ({
 
           {/* MEN’S WORLDS Column */}
           <div className="space-y-3">
-            <h4 className="font-mono text-xs uppercase font-bold text-white tracking-wider flex items-center gap-1.5">
+            <h4 className="font-heading text-xs uppercase font-semibold text-white tracking-[0.08em] flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-[#FF2028]" />
               <span>MEN’S WORLDS</span>
             </h4>
@@ -235,7 +235,7 @@ export const Footer: React.FC<FooterProps> = ({
 
           {/* KIDS’ WORLDS Column */}
           <div className="space-y-3">
-            <h4 className="font-mono text-xs uppercase font-bold text-white tracking-wider flex items-center gap-1.5">
+            <h4 className="font-heading text-xs uppercase font-semibold text-white tracking-[0.08em] flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
               <span>KIDS’ WORLDS</span>
             </h4>
@@ -259,7 +259,7 @@ export const Footer: React.FC<FooterProps> = ({
 
           {/* TORI UNIVERSE Column */}
           <div className="space-y-3">
-            <h4 className="font-mono text-xs uppercase font-bold text-white tracking-wider">
+            <h4 className="font-heading text-xs uppercase font-semibold text-white tracking-[0.08em]">
               TORI UNIVERSE
             </h4>
             <ul className="space-y-2 text-xs font-medium">
@@ -300,7 +300,7 @@ export const Footer: React.FC<FooterProps> = ({
 
           {/* SUPPORT & TRUST Column */}
           <div className="space-y-3">
-            <h4 className="font-mono text-xs uppercase font-bold text-white tracking-wider">
+            <h4 className="font-heading text-xs uppercase font-semibold text-white tracking-[0.08em]">
               SUPPORT & TRUST
             </h4>
             <ul className="space-y-2 text-xs font-medium">
@@ -399,10 +399,10 @@ export const Footer: React.FC<FooterProps> = ({
         </div>
 
         {/* Bottom Bar */}
-        <div className="pt-8 border-t border-neutral-800/60 flex flex-col md:flex-row items-center justify-between gap-4 text-xs font-mono text-neutral-400">
+        <div className="pt-8 border-t border-neutral-800/60 flex flex-col md:flex-row items-center justify-between gap-4 text-xs font-sans text-neutral-400">
           <div>
             {footerCms?.copyrightText || `© ${new Date().getFullYear()} TORIWEAR APPAREL PVT. LTD. ALL RIGHTS RESERVED.`}
-            <div className="text-[10px] text-neutral-400 mt-1">
+            <div className="text-[11px] text-neutral-500 mt-1">
               {footerCms?.brandTagline || 'TORIWEAR IS AN INDEPENDENT ORIGINAL ANIME-INSPIRED STREETWEAR BRAND. NOT AFFILIATED WITH MARVEL, DC, DISNEY, OR THIRD-PARTY ANIME FRANCHISES.'}
             </div>
           </div>

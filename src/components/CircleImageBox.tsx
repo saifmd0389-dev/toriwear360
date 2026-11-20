@@ -189,7 +189,7 @@ export const CircleImageBox: React.FC<CircleImageBoxProps> = ({
 
         {/* Product Title */}
         <h3
-          className={`mt-1 font-heading text-xs sm:text-sm font-bold uppercase tracking-tight line-clamp-1 transition ${
+          className={`mt-1 font-sans text-xs sm:text-sm font-semibold tracking-tight line-clamp-1 transition ${
             isLight
               ? 'text-neutral-900 group-hover:text-sky-600'
               : 'text-white group-hover:text-neutral-200'
@@ -200,10 +200,10 @@ export const CircleImageBox: React.FC<CircleImageBoxProps> = ({
 
         {/* Pricing */}
         <div className="mt-1 flex items-center justify-center gap-2">
-          <span className={`text-xs sm:text-sm font-bold font-mono ${isLight ? 'text-neutral-950' : 'text-white'}`}>
+          <span className={`text-xs sm:text-sm font-bold font-sans tabular-nums ${isLight ? 'text-neutral-950' : 'text-white'}`}>
             ₹{product.price}
           </span>
-          <span className="text-[10px] sm:text-xs text-neutral-500 line-through font-mono">
+          <span className="text-[10px] sm:text-xs text-neutral-500 line-through font-sans tabular-nums">
             ₹{product.originalPrice}
           </span>
         </div>

@@ -133,11 +133,29 @@ export const ShippingReturnsView: React.FC = () => {
   const [pickupNote, setPickupNote] = useState('');
 
   // Issue Refund Modal
+  const [onlinePaymentsEnabled, setOnlinePaymentsEnabled] = useState(false);
   const [refundTarget, setRefundTarget] = useState<ReturnRequestRecord | null>(null);
   const [refundAmountInput, setRefundAmountInput] = useState('');
-  const [refundMethodInput, setRefundMethodInput] = useState<'RAZORPAY' | 'BANK_UPI_MANUAL' | 'TORI_CREDIT'>('RAZORPAY');
+  const [refundMethodInput, setRefundMethodInput] = useState<'RAZORPAY' | 'BANK_UPI_MANUAL' | 'TORI_CREDIT'>('BANK_UPI_MANUAL');
   const [manualReferenceInput, setManualReferenceInput] = useState('');
   const [refundNotesInput, setRefundNotesInput] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/v1/payments/razorpay/public-key')
+      .then((r) => r.json())
+      .then((data) => {
+        if (active) {
+          setOnlinePaymentsEnabled(Boolean(data?.success && data?.enabled && data?.keyId));
+        }
+      })
+      .catch(() => {
+        if (active) setOnlinePaymentsEnabled(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const loadReturns = useCallback(async () => {
     setIsLoadingReturns(true);
@@ -234,7 +252,9 @@ export const ShippingReturnsView: React.FC = () => {
     const defaultMethod =
       ret.refundMethod === 'BANK_UPI_MANUAL' || ret.refundMethod === 'TORI_CREDIT'
         ? ret.refundMethod
-        : 'RAZORPAY';
+        : onlinePaymentsEnabled
+          ? 'RAZORPAY'
+          : 'BANK_UPI_MANUAL';
     setRefundMethodInput(defaultMethod);
     setManualReferenceInput('');
     setRefundNotesInput('');
@@ -1035,7 +1055,9 @@ export const ShippingReturnsView: React.FC = () => {
                 onChange={(e) => setRefundMethodInput(e.target.value as any)}
                 className="w-full px-3 py-2 rounded-lg bg-neutral-900 border border-neutral-700 text-white focus:outline-none focus:border-red-500"
               >
-                <option value="RAZORPAY">Razorpay Original Payment Method (Automated API)</option>
+                <option value="RAZORPAY" disabled={!onlinePaymentsEnabled}>
+                  Razorpay Original Payment Method {onlinePaymentsEnabled ? '(Automated API)' : '(Postponed / Not Configured)'}
+                </option>
                 <option value="BANK_UPI_MANUAL">Bank / UPI Manual Payout (COD / Direct Transfer)</option>
                 <option value="TORI_CREDIT">TORI-WEAR Store Credit</option>
               </select>

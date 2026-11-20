@@ -82,7 +82,7 @@ export const TwinningSpotlightSection: React.FC<TwinningSpotlightSectionProps> =
             <span className="bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded text-[10px]">{discountBadgeText}</span>
           </div>
 
-          <h2 className="font-heading text-3xl sm:text-5xl font-black text-white uppercase tracking-tight">
+          <h2 className="font-display text-4xl sm:text-6xl font-normal text-white uppercase tracking-[0.04em] leading-[0.95]">
             {ad?.headline ? (
               <span className="text-amber-400">{headlineText}</span>
             ) : (
@@ -90,7 +90,7 @@ export const TwinningSpotlightSection: React.FC<TwinningSpotlightSectionProps> =
                 TRY COMBO: <span className="text-amber-400">MEN & KID PAIR</span>
               </>
             )}
-            <span className="block text-xl sm:text-2xl font-mono text-neutral-400 font-normal mt-2 tracking-normal normal-case">
+            <span className="block text-base sm:text-xl font-sans text-neutral-400 font-normal mt-2 tracking-normal normal-case">
               {taglineText}
             </span>
           </h2>
@@ -185,18 +185,18 @@ export const TwinningSpotlightSection: React.FC<TwinningSpotlightSectionProps> =
               {/* Combo Pricing Box */}
               <div className="p-4 rounded-xl bg-black/50 border border-neutral-800 flex items-center justify-between">
                 <div>
-                  <div className="text-[11px] font-mono text-neutral-400">COMBO BUNDLE PRICE</div>
+                  <div className="text-[11px] font-sans font-medium tracking-[0.06em] text-neutral-400 uppercase">COMBO BUNDLE PRICE</div>
                   <div className="flex items-baseline gap-2 mt-0.5">
-                    <span className="font-mono text-2xl font-black text-amber-400">
+                    <span className="font-sans text-2xl font-bold text-amber-400 tabular-nums">
                       ₹{pricing.comboPrice}
                     </span>
-                    <span className="font-mono text-xs text-neutral-500 line-through">
+                    <span className="font-sans text-xs text-neutral-500 line-through tabular-nums">
                       ₹{pricing.originalTotal}
                     </span>
                   </div>
                 </div>
                 <div className="text-right">
-                  <span className="bg-emerald-500/20 text-emerald-400 text-xs font-mono font-bold px-2.5 py-1 rounded-full border border-emerald-500/30">
+                  <span className="bg-emerald-500/20 text-emerald-400 text-xs font-sans font-semibold px-2.5 py-1 rounded-full border border-emerald-500/30 tabular-nums">
                     YOU SAVE ₹{pricing.savings}
                   </span>
                 </div>
@@ -206,7 +206,7 @@ export const TwinningSpotlightSection: React.FC<TwinningSpotlightSectionProps> =
               <div className="flex flex-col sm:flex-row items-center gap-3 pt-2">
                 <button
                   onClick={() => sampleMenProduct && onOpenCombo(sampleMenProduct)}
-                  className="w-full sm:w-auto px-6 py-3.5 bg-gradient-to-r from-amber-400 via-amber-300 to-amber-500 text-neutral-950 font-heading font-black text-xs uppercase tracking-wider rounded-xl transition hover:brightness-110 active:scale-95 flex items-center justify-center gap-2 shadow-xl shadow-amber-500/20 cursor-pointer"
+                  className="w-full sm:w-auto px-6 py-3.5 bg-gradient-to-r from-amber-400 via-amber-300 to-amber-500 text-neutral-950 font-sans font-bold text-xs uppercase tracking-[0.06em] rounded-xl transition hover:brightness-110 active:scale-95 flex items-center justify-center gap-2 shadow-xl shadow-amber-500/20 cursor-pointer"
                 >
                   <ShoppingBag className="w-4 h-4 text-neutral-950" />
                   <span>{ctaLabel}</span>
@@ -214,7 +214,7 @@ export const TwinningSpotlightSection: React.FC<TwinningSpotlightSectionProps> =
 
                 <button
                   onClick={onShopMen}
-                  className="w-full sm:w-auto px-4 py-3 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 border border-neutral-700 rounded-xl text-xs font-mono font-bold uppercase transition flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="w-full sm:w-auto px-4 py-3 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 border border-neutral-700 rounded-xl text-xs font-sans font-semibold uppercase tracking-[0.05em] transition flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <span>SEE MEN'S WEAR</span>
                   <ArrowRight className="w-3.5 h-3.5" />

@@ -63,7 +63,7 @@ export const CmsPromoBanner: React.FC<CmsPromoBannerProps> = ({
           </div>
 
           {ad.headline && (
-            <h3 className="font-heading text-xl sm:text-2xl md:text-3xl font-black uppercase tracking-tight" style={{ color: textColor }}>
+            <h3 className="font-display text-2xl sm:text-3xl md:text-4xl font-normal uppercase tracking-[0.04em] leading-none" style={{ color: textColor }}>
               {ad.headline}
             </h3>
           )}
@@ -99,7 +99,7 @@ export const CmsPromoBanner: React.FC<CmsPromoBannerProps> = ({
                   onApplyPromoCode?.(ad.promoCode);
                 }
               }}
-              className="px-5 py-3 rounded-xl bg-[#FF2028] hover:bg-red-500 text-white font-heading font-black text-xs uppercase tracking-wider transition flex items-center gap-2 shadow-lg cursor-pointer"
+              className="px-5 py-3 rounded-xl bg-[#FF2028] hover:bg-red-500 text-white font-sans font-bold text-xs uppercase tracking-[0.06em] transition flex items-center gap-2 shadow-lg cursor-pointer"
             >
               <span>{ad.ctaText || 'EXPLORE DROP'}</span>
               <ArrowRight className="w-4 h-4" />

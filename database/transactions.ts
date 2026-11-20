@@ -55,7 +55,7 @@ const fallbackMutex = new TransactionMutex();
  * 3. Deadlock Resilience: Retries automatically on transient serialization conflicts (P2034, 40P01, 40001).
  * 4. Transaction Context Binding: Uses AsyncLocalStorage so every repository method calling
  *    getPrismaClient() automatically resolves to the transaction client.
- * 5. Resilient Fallback: If running without a live PostgreSQL instance, serializes execution
+ * 5. Resilient Fallback: If running without a live MySQL instance, serializes execution
  *    via an in-memory lock with automatic compensation hook execution on failure.
  * 
  * @param action - Async function executing atomic operations with the transaction client

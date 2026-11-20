@@ -89,7 +89,7 @@ export const DepartmentPortals: React.FC<DepartmentPortalsProps> = ({
                     e.stopPropagation();
                     onShopMen();
                   }}
-                  className="px-6 py-3 bg-[#FFFFFF] group-hover:bg-[#FF2028] text-[#0A0A0A] group-hover:text-white font-heading font-black text-xs uppercase tracking-wider rounded-xl transition-all duration-300 flex items-center gap-2 shadow-xl"
+                  className="px-6 py-3 bg-[#FFFFFF] group-hover:bg-[#FF2028] text-[#0A0A0A] group-hover:text-white font-sans font-bold text-xs uppercase tracking-[0.06em] rounded-xl transition-all duration-300 flex items-center gap-2 shadow-xl"
                 >
                   <span>OPEN MEN'S CATALOGUE</span>
                   <ArrowRight className="w-4 h-4" />
@@ -151,7 +151,7 @@ export const DepartmentPortals: React.FC<DepartmentPortalsProps> = ({
                     e.stopPropagation();
                     onShopKids();
                   }}
-                  className="px-6 py-3 bg-sky-400 hover:bg-sky-300 text-neutral-950 font-heading font-black text-xs uppercase tracking-wider rounded-xl transition-all duration-300 flex items-center gap-2 shadow-xl"
+                  className="px-6 py-3 bg-sky-400 hover:bg-sky-300 text-neutral-950 font-sans font-bold text-xs uppercase tracking-[0.06em] rounded-xl transition-all duration-300 flex items-center gap-2 shadow-xl"
                 >
                   <span>OPEN KIDS' CATALOGUE</span>
                   <ArrowRight className="w-4 h-4" />

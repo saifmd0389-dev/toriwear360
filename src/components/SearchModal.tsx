@@ -152,7 +152,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
               <button
                 key={dept}
                 onClick={() => setSelectedDept(dept)}
-                className={`px-3 py-1 rounded-lg text-xs font-mono font-bold uppercase transition ${
+                className={`px-3 py-1 rounded-lg text-xs font-sans font-semibold uppercase tracking-[0.05em] transition cursor-pointer ${
                   selectedDept === dept
                     ? 'bg-[#FF2028] text-white'
                     : 'bg-neutral-900 text-neutral-400 hover:text-white'
@@ -163,13 +163,13 @@ export const SearchModal: React.FC<SearchModalProps> = ({
             ))}
           </div>
 
-          <div className="hidden sm:flex items-center gap-1.5 text-[11px] font-mono text-neutral-500 overflow-x-auto no-scrollbar">
-            <span>POPULAR:</span>
+          <div className="hidden sm:flex items-center gap-1.5 text-[11px] font-sans text-neutral-500 overflow-x-auto no-scrollbar">
+            <span className="font-medium tracking-[0.04em]">POPULAR:</span>
             {popularSearches.map((term) => (
               <button
                 key={term}
                 onClick={() => setQuery(term)}
-                className="px-2 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 transition"
+                className="px-2 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 font-medium transition cursor-pointer"
               >
                 {term}
               </button>
@@ -180,7 +180,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
         {/* Results List */}
         <div className="overflow-y-auto p-4 divide-y divide-neutral-800/60 max-h-[60vh]">
           {filteredProducts.length === 0 ? (
-            <div className="py-12 text-center text-neutral-500 text-xs font-mono">
+            <div className="py-12 text-center text-neutral-500 text-xs font-sans">
               NO PIECES FOUND MATCHING "{query.toUpperCase()}".<br />
               TRY SEARCHING BY WORLD (E.G. "DARK SHONEN", "CYBERPUNK", "KAMI & ZERO").
             </div>
@@ -201,24 +201,24 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                     className="w-12 h-14 rounded-lg object-cover bg-neutral-900 border border-neutral-800"
                   />
                   <div>
-                    <div className="text-xs font-mono text-[#FF2028] uppercase font-bold">
+                    <div className="text-[11px] font-sans text-[#FF2028] uppercase font-semibold tracking-[0.04em]">
                       {p.department} // {p.world}
                     </div>
-                    <div className="font-heading text-sm font-bold text-white group-hover:text-[#FF2028] transition">
+                    <div className="font-sans text-sm font-semibold text-white group-hover:text-[#FF2028] transition">
                       {p.name}
                     </div>
-                    <div className="text-[11px] font-mono text-neutral-400">
+                    <div className="text-[11px] font-sans text-neutral-400">
                       {p.gsm} • {p.fit}
                     </div>
                   </div>
                 </div>
 
                 <div className="flex items-center gap-3">
-                  <div className="text-right">
-                    <div className="font-heading text-sm font-bold text-white">
+                  <div className="text-right font-sans tabular-nums">
+                    <div className="text-sm font-bold text-white">
                       ₹{p.price}
                     </div>
-                    <div className="text-[10px] text-neutral-500 line-through">
+                    <div className="text-[11px] text-neutral-500 line-through">
                       ₹{p.originalPrice}
                     </div>
                   </div>

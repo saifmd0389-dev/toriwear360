@@ -944,7 +944,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
               })()}
 
               <div className="mt-3">
-                <span className="text-xl sm:text-2xl font-bold text-neutral-900">
+                <span className="font-sans text-xl sm:text-2xl font-bold text-neutral-900 tabular-nums">
                   ₹ {product.price.toLocaleString('en-IN')}
                 </span>
                 <p className="text-[11px] sm:text-xs text-neutral-400 mt-0.5">
@@ -1395,7 +1395,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
         {/* ========================================================== */}
         <div className="mt-16 pt-10 border-t border-neutral-200">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm sm:text-base font-bold text-neutral-900">
+            <h2 className="font-heading text-sm sm:text-base font-bold text-neutral-900 tracking-tight">
               Others Also Bought
             </h2>
             <div className="flex items-center gap-1">
@@ -1462,7 +1462,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                   <p className="text-[11px] text-neutral-500 truncate">
                     {item.department === 'KIDS' ? "Kids T-Shirts_Others" : "Men T-Shirts_Others"}
                   </p>
-                  <div className="text-xs font-bold text-neutral-900 mt-0.5">
+                  <div className="font-sans text-xs font-bold text-neutral-900 mt-0.5 tabular-nums">
                     ₹ {item.price.toLocaleString('en-IN')}
                   </div>
                 </div>

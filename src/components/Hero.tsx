@@ -246,8 +246,8 @@ export const Hero: React.FC<HeroProps> = ({
       />
 
       {/* Subtle brand typography watermark in background */}
-      <div className="absolute inset-0 flex items-center justify-center pointer-events-none select-none opacity-[0.035] overflow-hidden max-w-full px-4">
-        <span className="font-heading text-[13.5vw] sm:text-[14vw] lg:text-[14.5vw] font-black tracking-tight text-[#FFFFFF] uppercase whitespace-nowrap">
+      <div className="absolute inset-0 flex items-center justify-center pointer-events-none select-none opacity-[0.04] overflow-hidden max-w-full px-4">
+        <span className="font-display text-[17vw] sm:text-[18vw] lg:text-[19vw] font-normal tracking-[0.06em] text-[#FFFFFF] uppercase whitespace-nowrap leading-none">
           TORIWEAR
         </span>
       </div>
@@ -359,7 +359,7 @@ export const Hero: React.FC<HeroProps> = ({
           </div>
 
           {/* Main Headline */}
-          <h1 className="text-4xl sm:text-6xl md:text-7xl lg:text-8xl font-heading font-black tracking-tighter text-white uppercase leading-[0.9] max-w-3xl mx-auto my-3 sm:my-5">
+          <h1 className="text-5xl sm:text-7xl md:text-8xl lg:text-[6.25rem] font-display font-normal tracking-[0.04em] text-white uppercase leading-[0.92] max-w-3xl mx-auto my-3 sm:my-5">
             {(() => {
               const rawHeadline = (heroSettings?.headline || 'WEAR YOUR WORLD.').trim();
               const words = rawHeadline.split(/\s+/);
@@ -406,7 +406,7 @@ export const Hero: React.FC<HeroProps> = ({
                   onShopMen();
                 }
               }}
-              className="w-full sm:w-auto px-8 py-4 bg-white hover:bg-neutral-200 text-black font-black text-sm uppercase tracking-wider rounded-xl transition active:scale-95 flex items-center justify-center gap-2 cursor-pointer shadow-xl"
+              className="w-full sm:w-auto px-8 py-4 bg-white hover:bg-neutral-200 text-black font-sans font-bold text-sm uppercase tracking-[0.06em] rounded-xl transition active:scale-95 flex items-center justify-center gap-2 cursor-pointer shadow-xl"
             >
               <span>{heroSettings?.ctaText || 'SHOP MEN'}</span>
               <ArrowRight className="w-4 h-4 text-black" />
@@ -416,7 +416,7 @@ export const Hero: React.FC<HeroProps> = ({
             <button
               id="hero-shop-kids-btn"
               onClick={onShopKids}
-              className="w-full sm:w-auto px-8 py-4 bg-[#151515] hover:bg-[#222222] text-white border border-neutral-700 hover:border-neutral-500 font-bold text-sm uppercase tracking-wider rounded-xl transition active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
+              className="w-full sm:w-auto px-8 py-4 bg-[#151515] hover:bg-[#222222] text-white border border-neutral-700 hover:border-neutral-500 font-sans font-semibold text-sm uppercase tracking-[0.06em] rounded-xl transition active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
             >
               <span>{heroSettings?.secondaryCtaText || 'SHOP KIDS'}</span>
               <Sparkles className="w-4 h-4 text-sky-400" />
@@ -427,10 +427,10 @@ export const Hero: React.FC<HeroProps> = ({
               <button
                 id="hero-try-combo-btn"
                 onClick={onOpenCombo}
-                className="w-full sm:w-auto px-6 py-3.5 bg-gradient-to-r from-amber-500/20 via-amber-500/10 to-transparent hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-xl text-xs font-mono font-bold uppercase tracking-wider transition flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full sm:w-auto px-6 py-3.5 bg-gradient-to-r from-amber-500/20 via-amber-500/10 to-transparent hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-xl text-xs font-sans font-semibold uppercase tracking-[0.06em] transition flex items-center justify-center gap-2 cursor-pointer"
               >
                 <span>{heroSettings?.tertiaryCtaText || 'TRY TWIN COMBO 👯'}</span>
-                <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded">{heroSettings?.tertiaryCtaBadge || 'SAVE 10%'}</span>
+                <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded font-semibold">{heroSettings?.tertiaryCtaBadge || 'SAVE 10%'}</span>
               </button>
             )}
           </div>

@@ -210,7 +210,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
               </div>
               <button
                 onClick={() => { onClose(); onContinueShopping(); }}
-                className="px-6 py-2.5 bg-[#FF2028] hover:bg-[#e02441] text-white text-xs font-mono font-bold uppercase rounded-xl transition cursor-pointer"
+                className="px-6 py-2.5 bg-[#FF2028] hover:bg-[#e02441] text-white text-xs font-sans font-semibold uppercase tracking-[0.06em] rounded-xl transition cursor-pointer"
               >
                 EXPLORE CATALOGUE
               </button>
@@ -249,7 +249,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                   <div className="flex-1 flex flex-col justify-between">
                     <div>
                       <div className="flex items-start justify-between">
-                        <h4 className="font-heading text-base font-bold text-white leading-tight">
+                        <h4 className="font-sans text-sm sm:text-base font-semibold text-white leading-tight">
                           {productName}
                         </h4>
                         <button
@@ -261,13 +261,13 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                         </button>
                       </div>
 
-                      <div className="text-xs text-neutral-400 font-mono mt-0.5">
-                        <span>Size: <strong className="text-white">{size}</strong></span>
+                      <div className="text-xs text-neutral-400 font-sans mt-0.5">
+                        <span>Size: <strong className="text-white font-semibold">{size}</strong></span>
                         <span className="mx-1.5">•</span>
                         <span>{color}</span>
                       </div>
 
-                      <div className="text-[11px] text-neutral-500 font-mono">
+                      <div className="text-[11px] text-neutral-500 font-sans">
                         {gsm} GSM • {fit}
                       </div>
                     </div>
@@ -281,7 +281,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                         >
                           <Minus className="w-3 h-3" />
                         </button>
-                        <span className="px-3 py-1 text-xs font-mono font-bold text-white">
+                        <span className="px-3 py-1 text-xs font-sans font-semibold text-white tabular-nums">
                           {quantity}
                         </span>
                         <button
@@ -292,12 +292,12 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                         </button>
                       </div>
 
-                      <div className="text-right font-mono">
+                      <div className="text-right font-sans tabular-nums">
                         <div className="font-bold text-white text-sm">
                           ₹{(price * quantity).toLocaleString('en-IN')}
                         </div>
                         {originalPrice > price && (
-                          <div className="text-[10px] text-neutral-500 line-through">
+                          <div className="text-[11px] text-neutral-500 line-through">
                             ₹{(originalPrice * quantity).toLocaleString('en-IN')}
                           </div>
                         )}
@@ -336,27 +336,27 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                     onChange={(e) => setCouponInput(e.target.value)}
                     disabled={isApplyingCoupon}
                     placeholder="Enter promo code"
-                    className="flex-1 bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#FF2028] font-mono uppercase disabled:opacity-60"
+                    className="flex-1 bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#FF2028] font-sans uppercase disabled:opacity-60"
                   />
                   <button
                     type="submit"
                     disabled={isApplyingCoupon}
-                    className="px-3.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-xs font-mono font-bold rounded-lg transition uppercase cursor-pointer disabled:opacity-60"
+                    className="px-3.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-xs font-sans font-semibold rounded-lg transition uppercase tracking-[0.04em] cursor-pointer disabled:opacity-60"
                   >
                     {isApplyingCoupon ? 'Checking...' : 'Apply'}
                   </button>
                 </form>
               )}
               {couponError && (
-                <div className="text-[11px] text-[#FF2028] font-mono mt-1">{couponError}</div>
+                <div className="text-[11px] text-[#FF2028] font-sans mt-1">{couponError}</div>
               )}
             </div>
 
             {/* Calculations Breakdown */}
-            <div className="space-y-1.5 text-xs font-mono text-neutral-400">
+            <div className="space-y-1.5 text-xs font-sans text-neutral-400 tabular-nums">
               <div className="flex justify-between">
                 <span>Subtotal</span>
-                <span className="text-white">₹{subtotal.toLocaleString('en-IN')}</span>
+                <span className="text-white font-medium">₹{subtotal.toLocaleString('en-IN')}</span>
               </div>
               {discount > 0 && (
                 <div className="flex justify-between text-emerald-400 font-semibold">
@@ -376,7 +376,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
               </div>
               <div className="flex justify-between text-base font-bold text-white pt-2 border-t border-neutral-800">
                 <span>TOTAL</span>
-                <span className="text-[#FF2028] text-lg font-heading tracking-wide">
+                <span className="text-[#FF2028] text-lg font-sans font-bold tabular-nums">
                   ₹{total.toLocaleString('en-IN')}
                 </span>
               </div>
@@ -386,7 +386,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
             <button
               id="cart-checkout-btn"
               onClick={onProceedToCheckout}
-              className="w-full py-4 bg-[#FF2028] hover:bg-[#e02441] text-white font-heading text-lg font-bold tracking-wider uppercase rounded-xl transition shadow-xl shadow-[#FF2028]/25 flex items-center justify-center gap-2 cursor-pointer active:scale-98"
+              className="w-full py-4 bg-[#FF2028] hover:bg-[#e02441] text-white font-sans text-sm font-bold tracking-[0.06em] uppercase rounded-xl transition shadow-xl shadow-[#FF2028]/25 flex items-center justify-center gap-2 cursor-pointer active:scale-98"
             >
               <span>CHECKOUT</span>
               <ArrowRight className="w-5 h-5" />

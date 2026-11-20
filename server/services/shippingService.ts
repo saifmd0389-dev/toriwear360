@@ -157,7 +157,7 @@ export class ShippingService {
 
   /**
    * Process authenticated Shiprocket tracking webhook events.
-   * Enforces fail-closed webhook token verification, PostgreSQL-backed deduplication, cancellation sync, and automated RTO restock.
+   * Enforces fail-closed webhook token verification, MySQL-backed deduplication, cancellation sync, and automated RTO restock.
    */
   async processShiprocketWebhook(
     tokenHeader: string | undefined,
@@ -190,7 +190,7 @@ export class ShippingService {
       return { success: false, error: 'Unauthorized: Invalid or missing Shiprocket webhook token.' };
     }
 
-    // 2. Identify & deduplicate persistently in PostgreSQL via paymentRepository webhook table
+    // 2. Identify & deduplicate persistently in MySQL via paymentRepository webhook table
     const awb = String(payload.awb || payload.awb_code || payload.tracking_number || '').trim();
     const rawStatus = String(payload.current_status || payload.status || '').trim().toUpperCase();
     const eventTimestamp = payload.current_timestamp || payload.timestamp || new Date().toISOString();

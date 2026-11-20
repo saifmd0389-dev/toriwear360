@@ -143,7 +143,7 @@ class AuthStore {
         }
         this.sessionsHydratedFromDb = true;
         if (rows.length > 0) {
-          console.log(`[AUTH] Hydrated ${rows.length} persistent admin session(s) from PostgreSQL.`);
+          console.log(`[AUTH] Hydrated ${rows.length} persistent admin session(s) from MySQL.`);
         }
       } catch (err) {
         console.warn('[AUTH] Note hydrating sessions from DB:', err);
@@ -178,11 +178,11 @@ class AuthStore {
       ).trim();
 
       if (userCount === 0 && envPassword.length >= 8) {
-        console.log('[AUTH] Empty PostgreSQL users table detected. Running initial database seed...');
+        console.log('[AUTH] Empty MySQL users table detected. Running initial database seed...');
         const { runDatabaseSeed } = await import('./db/seed');
         const seedRes = await runDatabaseSeed();
         if (seedRes.success) {
-          console.log('[AUTH] Initial PostgreSQL seed completed.');
+          console.log('[AUTH] Initial MySQL seed completed.');
           return;
         }
       }
@@ -211,9 +211,9 @@ class AuthStore {
             accountStatus: 'ACTIVE',
           },
         });
-        console.log('[AUTH] Bootstrapped Super Admin credential record in PostgreSQL from environment configuration.');
+        console.log('[AUTH] Bootstrapped Super Admin credential record in MySQL from environment configuration.');
       } else if (userCount === 0 && !envPassword) {
-        console.warn('[AUTH] PostgreSQL users table is empty and TORI_INITIAL_ADMIN_PASSWORD is not set. Run "npm run seed" with TORI_INITIAL_ADMIN_PASSWORD or set it in environment variables.');
+        console.warn('[AUTH] MySQL users table is empty and TORI_INITIAL_ADMIN_PASSWORD is not set. Run "npm run seed" with TORI_INITIAL_ADMIN_PASSWORD or set it in environment variables.');
       }
     } catch (err: any) {
       console.warn('[AUTH] Production bootstrap check note:', err?.message || err);
@@ -260,7 +260,7 @@ class AuthStore {
         }
       }
     } catch (err) {
-      console.warn('[AUTH] Note loading credential from PostgreSQL:', err);
+      console.warn('[AUTH] Note loading credential from MySQL:', err);
     }
 
     // If still missing for Super Admin and an environment bootstrap password is set, provision cleanly
@@ -522,7 +522,7 @@ class AuthStore {
         }
       }
     } catch (err) {
-      console.warn('[AUTH] Note looking up user in PostgreSQL:', err);
+      console.warn('[AUTH] Note looking up user in MySQL:', err);
     }
 
     return undefined;
@@ -692,7 +692,7 @@ class AuthStore {
       }).catch(() => {});
     }
 
-    // Check if 2FA is enrolled and enabled in PostgreSQL or in-memory
+    // Check if 2FA is enrolled and enabled in MySQL or in-memory
     await this.loadUser2FASetting(user.id);
     if (cred.twoFactorEnabled && cred.twoFactorSecret) {
       const tempToken = crypto.randomBytes(24).toString('hex');
@@ -933,7 +933,7 @@ class AuthStore {
       return { success: false, error: 'Invalid 2FA code. Please enter the valid 6-digit code from your authenticator app.' };
     }
 
-    // Update last accepted step in PostgreSQL to prevent replay attacks across processes
+    // Update last accepted step in MySQL to prevent replay attacks across processes
     cred.lastAcceptedStep = totpResult.acceptedStep;
     if (prisma) {
       try {
@@ -989,7 +989,7 @@ class AuthStore {
     cred.pendingTwoFactorSecret = encryptedSecret;
     cred.pendingExpiresAt = pendingExpiresAt.getTime();
 
-    // Persist pending secret encrypted in PostgreSQL
+    // Persist pending secret encrypted in MySQL
     const prisma = getPrismaClient();
     if (prisma) {
       try {
@@ -1272,7 +1272,7 @@ class AuthStore {
           createdAt: new Date(now),
         },
       }).catch((err: any) => {
-        console.warn('[AUTH] Error persisting admin session to PostgreSQL:', err?.message || err);
+        console.warn('[AUTH] Error persisting admin session to MySQL:', err?.message || err);
       });
     }
 
@@ -1619,7 +1619,7 @@ class AuthStore {
           }),
         ]);
       } catch (err) {
-        console.warn('[AUTH] Error updating password in PostgreSQL:', err);
+        console.warn('[AUTH] Error updating password in MySQL:', err);
       }
     }
 
@@ -1768,7 +1768,7 @@ class AuthStore {
     }
     this.saveCredentialsToDisk();
 
-    // Persist to PostgreSQL if connected
+    // Persist to MySQL if connected
     const prisma = getPrismaClient();
     if (prisma) {
       try {
@@ -1784,7 +1784,7 @@ class AuthStore {
           },
         });
       } catch (err) {
-        console.warn('[AUTH] Error updating password in PostgreSQL:', err);
+        console.warn('[AUTH] Error updating password in MySQL:', err);
       }
     }
 

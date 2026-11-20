@@ -19,7 +19,7 @@ const require = createRequire(import.meta.url);
 
 export interface DatabaseStatus {
   connected: boolean;
-  provider: 'mysql' | 'postgresql' | 'memory-fallback';
+  provider: 'mysql' | 'memory-fallback';
   databaseUrlConfigured: boolean;
   poolActive: boolean;
   lastCheckedAt: string;
