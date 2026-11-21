@@ -12,11 +12,14 @@ import {
   optimizeImageForStorage,
 } from '../server/services/storage/imageOptimizer';
 import {
+  CloudflareR2StorageAdapter,
   GoogleCloudStorageAdapter,
   IMMUTABLE_IMAGE_CACHE_CONTROL,
   LocalStorageAdapter,
+  getConfiguredStorageProvider,
   getStorageAdapter,
   resetStorageAdapterForTests,
+  setStorageAdapterForTests,
 } from '../server/services/storage/storageAdapter';
 import {
   ChunkUploadError,
@@ -24,6 +27,13 @@ import {
   chunkUploadSessionManager,
 } from '../server/services/storage/chunkUploadSessionManager';
 import type { Storage } from '@google-cloud/storage';
+import {
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+  HeadObjectCommand,
+  HeadBucketCommand,
+} from '@aws-sdk/client-s3';
 
 async function createSampleRaster(
   format: 'jpeg' | 'png' | 'webp',
@@ -1039,3 +1049,381 @@ test('CMS Router HTTP chunked upload hardening: sequential, duplicate, out-of-or
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test('CloudflareR2StorageAdapter: provider selection, missing/invalid config fails closed with no local fallback & no secret leaks', async () => {
+  const prevEnv = {
+    STORAGE_PROVIDER: process.env.STORAGE_PROVIDER,
+    R2_ACCOUNT_ID: process.env.R2_ACCOUNT_ID,
+    R2_BUCKET_NAME: process.env.R2_BUCKET_NAME,
+    R2_ACCESS_KEY_ID: process.env.R2_ACCESS_KEY_ID,
+    R2_SECRET_ACCESS_KEY: process.env.R2_SECRET_ACCESS_KEY,
+    R2_ENDPOINT: process.env.R2_ENDPOINT,
+    R2_PUBLIC_URL: process.env.R2_PUBLIC_URL,
+  };
+
+  try {
+    // Default provider must remain local when STORAGE_PROVIDER is unset
+    delete process.env.STORAGE_PROVIDER;
+    assert.equal(getConfiguredStorageProvider(), 'local');
+
+    // Explicit provider selection supports local, gcs, and r2
+    process.env.STORAGE_PROVIDER = 'gcs';
+    assert.equal(getConfiguredStorageProvider(), 'gcs');
+    process.env.STORAGE_PROVIDER = 'r2';
+    assert.equal(getConfiguredStorageProvider(), 'r2');
+
+    // Missing all R2 vars -> fails closed with 503 and never writes to local disk
+    delete process.env.R2_ACCOUNT_ID;
+    delete process.env.R2_BUCKET_NAME;
+    delete process.env.R2_ACCESS_KEY_ID;
+    delete process.env.R2_SECRET_ACCESS_KEY;
+    delete process.env.R2_ENDPOINT;
+    delete process.env.R2_PUBLIC_URL;
+    resetStorageAdapterForTests();
+
+    const adapter = getStorageAdapter();
+    assert.equal(adapter.providerName, 'r2');
+    const status = adapter.getConfigStatus();
+    assert.equal(status.provider, 'r2');
+    assert.equal(status.configured, false);
+    assert.match(String(status.error), /R2_BUCKET_NAME/i);
+
+    const payload = await createSampleRaster('png', 64, 64);
+    const upRes = await adapter.uploadFile(payload, 'r2-should-not-write-local.webp', 'image/webp');
+    assert.equal(upRes.success, false);
+    assert.equal(upRes.provider, 'r2');
+    assert.equal(upRes.statusCode, 503);
+    assert.equal(
+      fs.existsSync(path.resolve(process.cwd(), 'public/generated-assets/r2-should-not-write-local.webp')),
+      false,
+      'Failed R2 upload must NEVER silently fall back to local storage'
+    );
+
+    // Missing endpoint & account ID -> fails closed
+    process.env.R2_BUCKET_NAME = 'toriwear-test';
+    const noEndpointAdapter = new CloudflareR2StorageAdapter();
+    assert.equal(noEndpointAdapter.getConfigStatus().configured, false);
+    assert.match(String(noEndpointAdapter.getConfigStatus().error), /R2_ENDPOINT|R2_ACCOUNT_ID/i);
+
+    // Non-HTTPS endpoint rejected
+    process.env.R2_ENDPOINT = 'http://insecure.r2.cloudflarestorage.com';
+    const insecureEndpointAdapter = new CloudflareR2StorageAdapter();
+    assert.equal(insecureEndpointAdapter.getConfigStatus().configured, false);
+    assert.match(String(insecureEndpointAdapter.getConfigStatus().error), /HTTPS/i);
+
+    // Missing R2_PUBLIC_URL rejected
+    process.env.R2_ENDPOINT = 'https://testaccount123.r2.cloudflarestorage.com';
+    const noPublicUrlAdapter = new CloudflareR2StorageAdapter();
+    assert.equal(noPublicUrlAdapter.getConfigStatus().configured, false);
+    assert.match(String(noPublicUrlAdapter.getConfigStatus().error), /R2_PUBLIC_URL/i);
+
+    // Non-HTTPS R2_PUBLIC_URL rejected
+    process.env.R2_PUBLIC_URL = 'http://pub-test.r2.dev';
+    const insecurePublicUrlAdapter = new CloudflareR2StorageAdapter();
+    assert.equal(insecurePublicUrlAdapter.getConfigStatus().configured, false);
+    assert.match(String(insecurePublicUrlAdapter.getConfigStatus().error), /R2_PUBLIC_URL.*HTTPS/i);
+
+    // Missing credentials rejected without leaking secret values in config status
+    process.env.R2_PUBLIC_URL = 'https://pub-test.r2.dev/';
+    process.env.R2_ACCESS_KEY_ID = 'super_secret_key_id_do_not_leak';
+    delete process.env.R2_SECRET_ACCESS_KEY;
+    const missingSecretAdapter = new CloudflareR2StorageAdapter();
+    const missingSecretStatus = missingSecretAdapter.getConfigStatus();
+    assert.equal(missingSecretStatus.configured, false);
+    assert.equal(JSON.stringify(missingSecretStatus).includes('super_secret_key_id_do_not_leak'), false);
+
+    // Valid env configuration (including deriving endpoint from R2_ACCOUNT_ID when R2_ENDPOINT is omitted)
+    delete process.env.R2_ENDPOINT;
+    process.env.R2_ACCOUNT_ID = 'testaccount123';
+    process.env.R2_SECRET_ACCESS_KEY = 'super_secret_access_key_do_not_leak';
+    const validEnvAdapter = new CloudflareR2StorageAdapter();
+    const validStatus = validEnvAdapter.getConfigStatus();
+    assert.equal(validStatus.configured, true);
+    assert.equal(validStatus.bucketName, 'toriwear-test');
+    assert.equal(validStatus.publicBaseUrl, 'https://pub-test.r2.dev');
+    assert.equal(JSON.stringify(validStatus).includes('super_secret_access_key_do_not_leak'), false);
+    assert.equal(
+      validEnvAdapter.getFileUrl('products/hero banner.webp'),
+      'https://pub-test.r2.dev/products/hero%20banner.webp'
+    );
+  } finally {
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetStorageAdapterForTests();
+  }
+});
+
+test('CloudflareR2StorageAdapter (mocked S3 SDK): upload, public URL, retrieval, existence, deletion, missing object (404), permission errors (403), metadata & no local fallback', async () => {
+  const objects = new Map<string, { body: Buffer; contentType: string; cacheControl: string }>();
+  const putInputs: Array<any> = [];
+  let simulatePermissionDenied = false;
+
+  const makeAwsError = (status: number, name: string, message: string) => {
+    const err: any = new Error(message);
+    err.name = name;
+    err.$metadata = { httpStatusCode: status };
+    return err;
+  };
+
+  const mockS3Client = {
+    send: async (command: any): Promise<any> => {
+      if (command instanceof HeadBucketCommand) {
+        if (simulatePermissionDenied) throw makeAwsError(403, 'AccessDenied', 'Access Denied on bucket');
+        return {};
+      }
+      if (command instanceof PutObjectCommand) {
+        if (simulatePermissionDenied) throw makeAwsError(403, 'AccessDenied', 'Access Denied on PutObject');
+        const { Key, Body, ContentType, CacheControl } = command.input;
+        putInputs.push(command.input);
+        objects.set(String(Key), {
+          body: Buffer.isBuffer(Body) ? Buffer.from(Body) : Buffer.from(Body as Uint8Array),
+          contentType: String(ContentType || ''),
+          cacheControl: String(CacheControl || ''),
+        });
+        return { ETag: '"mock-etag"' };
+      }
+      if (command instanceof HeadObjectCommand) {
+        if (simulatePermissionDenied) throw makeAwsError(403, 'AccessDenied', 'Access Denied on HeadObject');
+        const key = String(command.input.Key);
+        const obj = objects.get(key);
+        if (!obj) throw makeAwsError(404, 'NotFound', 'Not Found');
+        return { ContentType: obj.contentType, CacheControl: obj.cacheControl, ContentLength: obj.body.length };
+      }
+      if (command instanceof GetObjectCommand) {
+        if (simulatePermissionDenied) throw makeAwsError(403, 'AccessDenied', 'Access Denied on GetObject');
+        const key = String(command.input.Key);
+        const obj = objects.get(key);
+        if (!obj) throw makeAwsError(404, 'NoSuchKey', 'No Such Key');
+        return {
+          ContentType: obj.contentType,
+          CacheControl: obj.cacheControl,
+          Body: {
+            transformToByteArray: async () => new Uint8Array(obj.body),
+          },
+        };
+      }
+      if (command instanceof DeleteObjectCommand) {
+        if (simulatePermissionDenied) throw makeAwsError(403, 'AccessDenied', 'Access Denied on DeleteObject');
+        const key = String(command.input.Key);
+        objects.delete(key);
+        return {};
+      }
+      throw new Error(`Unexpected S3 command: ${command?.constructor?.name}`);
+    },
+  };
+
+  const adapter = new CloudflareR2StorageAdapter({
+    bucketName: 'toriwear',
+    endpoint: 'https://mockaccount.r2.cloudflarestorage.com',
+    publicBaseUrl: 'https://pub-mockbucket.r2.dev/',
+    s3Client: mockS3Client,
+  });
+
+  assert.equal(adapter.providerName, 'r2');
+  assert.equal(adapter.getConfigStatus().configured, true);
+  assert.deepEqual(await adapter.verifyBucketAccess(), { ok: true });
+
+  // 1. Upload with Content-Type and immutable Cache-Control metadata + public URL generation
+  const sampleWebp = await createSampleRaster('webp', 120, 120);
+  const up = await adapter.uploadFile(sampleWebp, 'cms-r2-drop-01.webp', 'image/webp');
+  assert.equal(up.success, true);
+  assert.equal(up.provider, 'r2');
+  assert.equal(up.url, 'https://pub-mockbucket.r2.dev/cms-r2-drop-01.webp');
+  assert.equal(up.contentType, 'image/webp');
+  assert.equal(up.sizeBytes, sampleWebp.length);
+
+  assert.equal(putInputs.length, 1);
+  assert.equal(putInputs[0].Bucket, 'toriwear');
+  assert.equal(putInputs[0].Key, 'cms-r2-drop-01.webp');
+  assert.equal(putInputs[0].ContentType, 'image/webp');
+  assert.equal(putInputs[0].CacheControl, IMMUTABLE_IMAGE_CACHE_CONTROL);
+
+  // 2. Existence & Retrieval
+  assert.equal(await adapter.fileExists('cms-r2-drop-01.webp'), true);
+  const retrieved = await adapter.getFile('cms-r2-drop-01.webp');
+  assert.equal(retrieved.success, true);
+  assert.equal(retrieved.statusCode, 200);
+  assert.equal(retrieved.contentType, 'image/webp');
+  assert.equal(retrieved.sizeBytes, sampleWebp.length);
+  assert.equal(Buffer.compare(retrieved.buffer!, sampleWebp), 0);
+
+  // 3. Deletion & Missing Object (404)
+  assert.equal(await adapter.deleteFile('cms-r2-drop-01.webp'), true);
+  assert.equal(await adapter.fileExists('cms-r2-drop-01.webp'), false);
+  assert.equal(await adapter.deleteFile('cms-r2-drop-01.webp'), false);
+
+  const missing = await adapter.getFile('missing-object.webp');
+  assert.equal(missing.success, false);
+  assert.equal(missing.statusCode, 404);
+
+  // 4. Permission Denied (403) across upload, retrieval, deletion, existence, and bucket access — NO local fallback
+  simulatePermissionDenied = true;
+  const permUpload = await adapter.uploadFile(sampleWebp, 'r2-forbidden.webp', 'image/webp');
+  assert.equal(permUpload.success, false);
+  assert.equal(permUpload.provider, 'r2');
+  assert.equal(permUpload.statusCode, 403);
+  assert.match(String(permUpload.error), /permission denied/i);
+  assert.equal(
+    fs.existsSync(path.resolve(process.cwd(), 'public/generated-assets/r2-forbidden.webp')),
+    false,
+    'Permission-denied R2 upload must NEVER write to local disk'
+  );
+
+  const permGet = await adapter.getFile('r2-forbidden.webp');
+  assert.equal(permGet.success, false);
+  assert.equal(permGet.statusCode, 403);
+
+  assert.equal(await adapter.deleteFile('r2-forbidden.webp'), false);
+  assert.equal(await adapter.fileExists('r2-forbidden.webp'), false);
+  const permBucket = await adapter.verifyBucketAccess();
+  assert.equal(permBucket.ok, false);
+  assert.match(String(permBucket.error), /permission denied/i);
+});
+
+test('CMS Router HTTP endpoints with Cloudflare R2: regular & chunked uploads store WebP with immutable cache metadata, and misconfigured R2 fails closed', async () => {
+  const { cmsRouter } = await import('../server/routes/cmsRouter');
+  const { authStore } = await import('../server/authStore');
+  const { userStore } = await import('../server/userStore');
+
+  const adminUser = userStore.getAllUsers().find((u) => u.role === 'SUPER_ADMIN') || userStore.getAllUsers()[0]!;
+  const session = (authStore as any).createSession(adminUser, { ip: '127.0.0.1', userAgent: 'node-test-r2' });
+  const authHeaders = { Authorization: `Bearer ${session.token}` };
+
+  const app = express();
+  app.use(express.json({ limit: '20mb' }));
+  app.use('/api/v1/admin/cms', cmsRouter);
+
+  const server = await new Promise<http.Server>((resolve) => {
+    const srv = app.listen(0, '127.0.0.1', () => resolve(srv));
+  });
+  const port = (server.address() as any).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  const prevProvider = process.env.STORAGE_PROVIDER;
+  const prevBucket = process.env.R2_BUCKET_NAME;
+
+  const storedObjects = new Map<string, { contentType: string; cacheControl: string; body: Buffer }>();
+  const mockS3Client = {
+    send: async (command: any): Promise<any> => {
+      if (command instanceof PutObjectCommand) {
+        storedObjects.set(String(command.input.Key), {
+          contentType: String(command.input.ContentType || ''),
+          cacheControl: String(command.input.CacheControl || ''),
+          body: Buffer.from(command.input.Body as Buffer),
+        });
+        return {};
+      }
+      if (command instanceof HeadObjectCommand) {
+        if (!storedObjects.has(String(command.input.Key))) {
+          const err: any = new Error('Not Found');
+          err.$metadata = { httpStatusCode: 404 };
+          throw err;
+        }
+        return {};
+      }
+      return {};
+    },
+  };
+
+  try {
+    process.env.STORAGE_PROVIDER = 'r2';
+    const mockedR2 = new CloudflareR2StorageAdapter({
+      bucketName: 'toriwear',
+      endpoint: 'https://mockaccount.r2.cloudflarestorage.com',
+      publicBaseUrl: 'https://pub-mockbucket.r2.dev',
+      s3Client: mockS3Client,
+    });
+    setStorageAdapterForTests(mockedR2);
+
+    // 1. Regular CMS upload -> R2
+    const jpegBuf = await createSampleRaster('jpeg', 600, 400);
+    const regularRes = await fetch(`${baseUrl}/api/v1/admin/cms/upload-asset`, {
+      method: 'POST',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: 'r2-hero.jpg',
+        dataUrl: `data:image/jpeg;base64,${jpegBuf.toString('base64')}`,
+      }),
+    });
+    assert.equal(regularRes.status, 200);
+    const regularJson: any = await regularRes.json();
+    assert.equal(regularJson.success, true);
+    assert.equal(regularJson.storageProvider, 'r2');
+    assert.equal(regularJson.contentType, 'image/webp');
+    assert.match(regularJson.url, /^https:\/\/pub-mockbucket\.r2\.dev\/cms-r2-hero-.*\.webp$/);
+
+    const regularKey = regularJson.url.replace('https://pub-mockbucket.r2.dev/', '');
+    assert.equal(storedObjects.get(regularKey)?.contentType, 'image/webp');
+    assert.equal(storedObjects.get(regularKey)?.cacheControl, IMMUTABLE_IMAGE_CACHE_CONTROL);
+
+    // 2. Chunked CMS upload -> R2
+    const pngBuf = await createSampleRaster('png', 400, 400);
+    const mid = Math.floor(pngBuf.length / 2);
+    const uid = `r2_chunk_${Date.now()}`;
+
+    const ch0 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${uid}&chunkIndex=0&totalChunks=2&filename=r2-tee.png&mimeType=image/png`,
+      {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/octet-stream' },
+        body: new Uint8Array(pngBuf.subarray(0, mid)),
+      }
+    );
+    assert.equal(ch0.status, 200);
+
+    const ch1 = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=${uid}&chunkIndex=1&totalChunks=2&filename=r2-tee.png&mimeType=image/png`,
+      {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/octet-stream' },
+        body: new Uint8Array(pngBuf.subarray(mid)),
+      }
+    );
+    assert.equal(ch1.status, 200);
+    const ch1Json: any = await ch1.json();
+    assert.equal(ch1Json.success, true);
+    assert.equal(ch1Json.completed, true);
+    assert.equal(ch1Json.storageProvider, 'r2');
+    assert.equal(ch1Json.contentType, 'image/webp');
+    assert.match(ch1Json.url, /^https:\/\/pub-mockbucket\.r2\.dev\/cms-r2-tee-.*\.webp$/);
+
+    const chunkKey = ch1Json.url.replace('https://pub-mockbucket.r2.dev/', '');
+    assert.equal(storedObjects.get(chunkKey)?.contentType, 'image/webp');
+    assert.equal(storedObjects.get(chunkKey)?.cacheControl, IMMUTABLE_IMAGE_CACHE_CONTROL);
+
+    // 3. Misconfigured R2 fails closed with 503 on BOTH regular & chunked routes without local fallback
+    delete process.env.R2_BUCKET_NAME;
+    resetStorageAdapterForTests();
+
+    const failReg = await fetch(`${baseUrl}/api/v1/admin/cms/upload-asset`, {
+      method: 'POST',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: 'r2-fail.jpg',
+        dataUrl: `data:image/jpeg;base64,${jpegBuf.toString('base64')}`,
+      }),
+    });
+    assert.equal(failReg.status, 503);
+
+    const failChunk = await fetch(
+      `${baseUrl}/api/v1/admin/cms/upload-asset-chunk?uploadId=r2fail_${Date.now()}&chunkIndex=0&totalChunks=1&filename=r2-fail.png&mimeType=image/png`,
+      {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/octet-stream' },
+        body: new Uint8Array(pngBuf),
+      }
+    );
+    assert.equal(failChunk.status, 503);
+  } finally {
+    chunkUploadSessionManager.clearAllSessions();
+    if (prevProvider === undefined) delete process.env.STORAGE_PROVIDER;
+    else process.env.STORAGE_PROVIDER = prevProvider;
+    if (prevBucket === undefined) delete process.env.R2_BUCKET_NAME;
+    else process.env.R2_BUCKET_NAME = prevBucket;
+    resetStorageAdapterForTests();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+

@@ -4,17 +4,28 @@
  * Supports:
  * 1. LocalStorageAdapter (Default / local disk persistence under public/generated-assets)
  * 2. GoogleCloudStorageAdapter (Official @google-cloud/storage SDK for production cloud storage)
+ * 3. CloudflareR2StorageAdapter (Official @aws-sdk/client-s3 S3-compatible SDK for Cloudflare R2)
  *
  * Security & Reliability Rules:
  * - Credentials are read strictly from private server-side environment variables.
- * - Never exposes service-account keys or internal storage secrets to clients.
- * - Does NOT activate GCS unless STORAGE_PROVIDER="gcs" (or "google") is explicitly configured.
- * - When GCS is enabled, never silently falls back to local disk on misconfiguration or upload failure.
+ * - Never exposes service-account keys, R2 access keys, or internal storage secrets to clients.
+ * - Keeps "local" as the default provider unless STORAGE_PROVIDER="gcs" or "r2" is explicitly configured.
+ * - When a cloud provider (GCS or R2) is enabled, never silently falls back to local disk on misconfiguration or upload failure.
  */
 
 import fs from 'fs';
 import path from 'path';
 import { Storage, Bucket } from '@google-cloud/storage';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+  HeadObjectCommand,
+  HeadBucketCommand,
+} from '@aws-sdk/client-s3';
+
+export type StorageProviderName = 'local' | 'gcs' | 'r2';
 
 export const IMMUTABLE_IMAGE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 
@@ -28,7 +39,7 @@ export interface UploadResult {
   destinationPath: string;
   sizeBytes?: number;
   contentType?: string;
-  provider?: 'local' | 'gcs';
+  provider?: StorageProviderName;
   statusCode?: number;
   error?: string;
 }
@@ -43,7 +54,7 @@ export interface RetrieveFileResult {
 }
 
 export interface StorageConfigStatus {
-  provider: 'local' | 'gcs';
+  provider: StorageProviderName;
   configured: boolean;
   bucketName?: string;
   publicBaseUrl?: string;
@@ -51,7 +62,7 @@ export interface StorageConfigStatus {
 }
 
 export interface StorageAdapter {
-  readonly providerName: 'local' | 'gcs';
+  readonly providerName: StorageProviderName;
   uploadFile(
     buffer: Buffer,
     destinationPath: string,
@@ -649,14 +660,463 @@ export class GoogleCloudStorageAdapter implements StorageAdapter {
   }
 }
 
+interface ParsedR2Config {
+  valid: boolean;
+  accountId: string;
+  bucketName: string;
+  endpoint: string;
+  publicBaseUrl: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  error?: string;
+}
+
+function resolveR2Configuration(overrides?: {
+  bucketName?: string;
+  endpoint?: string;
+  publicBaseUrl?: string;
+  accountId?: string;
+}): ParsedR2Config {
+  const accountId = String(overrides?.accountId ?? process.env.R2_ACCOUNT_ID ?? '').trim();
+  const bucketName = String(overrides?.bucketName ?? process.env.R2_BUCKET_NAME ?? '').trim();
+  const accessKeyId = String(process.env.R2_ACCESS_KEY_ID || '').trim();
+  const secretAccessKey = String(process.env.R2_SECRET_ACCESS_KEY || '').trim();
+  const rawEndpoint = String(overrides?.endpoint ?? process.env.R2_ENDPOINT ?? '').trim().replace(/\/+$/, '');
+  const rawPublicUrl = String(overrides?.publicBaseUrl ?? process.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, '');
+
+  const derivedEndpoint =
+    rawEndpoint && !isPlaceholderValue(rawEndpoint)
+      ? rawEndpoint
+      : accountId && !isPlaceholderValue(accountId)
+        ? `https://${accountId}.r2.cloudflarestorage.com`
+        : '';
+
+  const publicBaseUrl = rawPublicUrl && !isPlaceholderValue(rawPublicUrl) ? rawPublicUrl : '';
+
+  if (!bucketName || isPlaceholderValue(bucketName)) {
+    return {
+      valid: false,
+      accountId,
+      bucketName: '',
+      endpoint: derivedEndpoint,
+      publicBaseUrl,
+      error: 'Cloudflare R2 storage is not properly configured: R2_BUCKET_NAME is missing.',
+    };
+  }
+
+  if (!/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: derivedEndpoint,
+      publicBaseUrl,
+      error: 'Cloudflare R2 storage is not properly configured: R2_BUCKET_NAME format is invalid.',
+    };
+  }
+
+  if (!derivedEndpoint) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: '',
+      publicBaseUrl,
+      error: 'Cloudflare R2 storage is not properly configured: provide R2_ENDPOINT or R2_ACCOUNT_ID.',
+    };
+  }
+
+  if (!/^https:\/\/.+/i.test(derivedEndpoint)) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: derivedEndpoint,
+      publicBaseUrl,
+      error: 'Cloudflare R2 storage is not properly configured: R2_ENDPOINT must use HTTPS.',
+    };
+  }
+
+  if (!publicBaseUrl) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: derivedEndpoint,
+      publicBaseUrl: '',
+      error: 'Cloudflare R2 storage is not properly configured: R2_PUBLIC_URL is missing.',
+    };
+  }
+
+  if (!/^https:\/\/.+/i.test(publicBaseUrl)) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: derivedEndpoint,
+      publicBaseUrl,
+      error: 'Cloudflare R2 storage is not properly configured: R2_PUBLIC_URL must use HTTPS.',
+    };
+  }
+
+  if (!accessKeyId || isPlaceholderValue(accessKeyId) || !secretAccessKey || isPlaceholderValue(secretAccessKey)) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: derivedEndpoint,
+      publicBaseUrl,
+      error: 'Cloudflare R2 storage is not properly configured: provide R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY.',
+    };
+  }
+
+  return {
+    valid: true,
+    accountId,
+    bucketName,
+    endpoint: derivedEndpoint,
+    publicBaseUrl,
+    accessKeyId,
+    secretAccessKey,
+  };
+}
+
+function getAwsErrorStatusCode(err: any): number | undefined {
+  const metaStatus = Number(err?.$metadata?.httpStatusCode);
+  if (Number.isFinite(metaStatus) && metaStatus > 0) return metaStatus;
+  const codeNum = Number(err?.code ?? err?.statusCode);
+  if (Number.isFinite(codeNum) && codeNum > 0) return codeNum;
+  const name = String(err?.name || err?.Code || '');
+  if (name === 'NotFound' || name === 'NoSuchKey') return 404;
+  if (name === 'AccessDenied' || name === 'Forbidden' || name === 'InvalidAccessKeyId' || name === 'SignatureDoesNotMatch') {
+    return 403;
+  }
+  return undefined;
+}
+
+async function s3BodyToBuffer(body: any): Promise<Buffer> {
+  if (!body) return Buffer.alloc(0);
+  if (Buffer.isBuffer(body)) return body;
+  if (body instanceof Uint8Array) return Buffer.from(body);
+  if (typeof body.transformToByteArray === 'function') {
+    const bytes = await body.transformToByteArray();
+    return Buffer.from(bytes);
+  }
+  if (typeof body[Symbol.asyncIterator] === 'function') {
+    const chunks: Buffer[] = [];
+    for await (const chunk of body) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+  throw new Error('Unsupported S3 response body stream format.');
+}
+
+export interface CloudflareR2StorageAdapterOptions {
+  accountId?: string;
+  bucketName?: string;
+  endpoint?: string;
+  publicBaseUrl?: string;
+  /** Optional injected @aws-sdk/client-s3 client (used for automated mocked SDK tests). */
+  s3Client?: Pick<S3Client, 'send'>;
+}
+
+/**
+ * Genuine Cloudflare R2 storage adapter using official @aws-sdk/client-s3 SDK (region: "auto").
+ *
+ * Security & Reliability Rules:
+ * - Credentials are read strictly from private server-side environment variables.
+ * - Never exposes access keys or secret keys in URLs, responses, or error messages.
+ * - Fails closed whenever credentials, bucket, endpoint, or public URL are missing/invalid.
+ * - Never silently falls back to local disk storage.
+ */
+export class CloudflareR2StorageAdapter implements StorageAdapter {
+  public readonly providerName = 'r2' as const;
+  private config: ParsedR2Config;
+  private s3Client: Pick<S3Client, 'send'> | null = null;
+
+  constructor(options?: CloudflareR2StorageAdapterOptions) {
+    if (options?.s3Client) {
+      const accountId = String(options.accountId ?? process.env.R2_ACCOUNT_ID ?? '').trim();
+      const bucketName = String(options.bucketName ?? process.env.R2_BUCKET_NAME ?? '').trim();
+      const rawEndpoint = String(options.endpoint ?? process.env.R2_ENDPOINT ?? '').trim().replace(/\/+$/, '');
+      const endpoint = rawEndpoint || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : '');
+      const publicBaseUrl = String(options.publicBaseUrl ?? process.env.R2_PUBLIC_URL ?? '').trim().replace(/\/+$/, '');
+
+      if (!bucketName || !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
+        this.config = {
+          valid: false,
+          accountId,
+          bucketName,
+          endpoint,
+          publicBaseUrl,
+          error: 'Cloudflare R2 storage is not properly configured: R2_BUCKET_NAME is missing or invalid.',
+        };
+      } else if (!endpoint || !/^https:\/\/.+/i.test(endpoint)) {
+        this.config = {
+          valid: false,
+          accountId,
+          bucketName,
+          endpoint,
+          publicBaseUrl,
+          error: 'Cloudflare R2 storage is not properly configured: R2_ENDPOINT must use HTTPS.',
+        };
+      } else if (!publicBaseUrl || !/^https:\/\/.+/i.test(publicBaseUrl)) {
+        this.config = {
+          valid: false,
+          accountId,
+          bucketName,
+          endpoint,
+          publicBaseUrl,
+          error: 'Cloudflare R2 storage is not properly configured: R2_PUBLIC_URL must use HTTPS.',
+        };
+      } else {
+        this.config = {
+          valid: true,
+          accountId,
+          bucketName,
+          endpoint,
+          publicBaseUrl,
+        };
+        this.s3Client = options.s3Client;
+      }
+      return;
+    }
+
+    this.config = resolveR2Configuration(options);
+    if (this.config.valid && this.config.accessKeyId && this.config.secretAccessKey) {
+      this.s3Client = new S3Client({
+        region: 'auto',
+        endpoint: this.config.endpoint,
+        credentials: {
+          accessKeyId: this.config.accessKeyId,
+          secretAccessKey: this.config.secretAccessKey,
+        },
+      });
+    }
+  }
+
+  public getConfigStatus(): StorageConfigStatus {
+    return {
+      provider: 'r2',
+      configured: this.config.valid,
+      bucketName: this.config.bucketName || undefined,
+      publicBaseUrl: this.config.publicBaseUrl || undefined,
+      error: this.config.error,
+    };
+  }
+
+  public async verifyBucketAccess(): Promise<{ ok: boolean; error?: string }> {
+    if (!this.config.valid || !this.s3Client) {
+      return { ok: false, error: this.config.error || 'Cloudflare R2 storage is not configured.' };
+    }
+    try {
+      await this.s3Client.send(
+        new HeadBucketCommand({
+          Bucket: this.config.bucketName,
+        })
+      );
+      return { ok: true };
+    } catch (err: any) {
+      const status = getAwsErrorStatusCode(err);
+      console.error('[STORAGE:R2] Bucket verification failed:', status || err?.name || '', err?.message || err);
+      if (status === 403 || status === 401) {
+        return {
+          ok: false,
+          error: 'Cloudflare R2 permission denied. Verify R2 API token permissions on the configured bucket.',
+        };
+      }
+      return {
+        ok: false,
+        error: 'Unable to verify Cloudflare R2 bucket access. Check endpoint, bucket name, and credentials.',
+      };
+    }
+  }
+
+  public async uploadFile(
+    buffer: Buffer,
+    destinationPath: string,
+    contentType: string = 'application/octet-stream',
+    options?: UploadFileOptions
+  ): Promise<UploadResult> {
+    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+
+    if (!this.config.valid || !this.s3Client) {
+      return {
+        success: false,
+        url: '',
+        destinationPath: cleanPath,
+        provider: 'r2',
+        statusCode: 503,
+        error: this.config.error || 'Cloudflare R2 storage is not properly configured.',
+      };
+    }
+
+    try {
+      const cacheControl = options?.cacheControl || IMMUTABLE_IMAGE_CACHE_CONTROL;
+
+      await this.s3Client.send(
+        new PutObjectCommand({
+          Bucket: this.config.bucketName,
+          Key: cleanPath,
+          Body: buffer,
+          ContentType: contentType,
+          CacheControl: cacheControl,
+        })
+      );
+
+      const exists = await this.fileExists(cleanPath);
+      if (!exists) {
+        throw new Error('Uploaded object could not be verified in Cloudflare R2 storage.');
+      }
+
+      return {
+        success: true,
+        url: this.getFileUrl(cleanPath),
+        destinationPath: cleanPath,
+        sizeBytes: buffer.length,
+        contentType,
+        provider: 'r2',
+      };
+    } catch (err: any) {
+      const status = getAwsErrorStatusCode(err);
+      console.error('[STORAGE:R2] Upload failed:', status || err?.name || '', err?.message || err);
+      if (status === 403 || status === 401) {
+        return {
+          success: false,
+          url: '',
+          destinationPath: cleanPath,
+          provider: 'r2',
+          statusCode: 403,
+          error: 'Cloudflare R2 permission denied. Verify R2 API token write permissions on the configured bucket.',
+        };
+      }
+      return {
+        success: false,
+        url: '',
+        destinationPath: cleanPath,
+        provider: 'r2',
+        statusCode: 502,
+        error: 'Cloudflare R2 upload failed. Verify R2 credentials, endpoint, bucket permissions, and network availability.',
+      };
+    }
+  }
+
+  public async getFile(destinationPath: string): Promise<RetrieveFileResult> {
+    if (!this.config.valid || !this.s3Client) {
+      return {
+        success: false,
+        statusCode: 503,
+        error: this.config.error || 'Cloudflare R2 storage is not properly configured.',
+      };
+    }
+
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      const response = await this.s3Client.send(
+        new GetObjectCommand({
+          Bucket: this.config.bucketName,
+          Key: cleanPath,
+        })
+      );
+      const buffer = await s3BodyToBuffer(response.Body);
+      return {
+        success: true,
+        buffer,
+        contentType: response.ContentType || guessContentTypeFromPath(cleanPath),
+        sizeBytes: buffer.length,
+        statusCode: 200,
+      };
+    } catch (err: any) {
+      const status = getAwsErrorStatusCode(err);
+      console.error('[STORAGE:R2] File retrieval failed:', status || err?.name || '', err?.message || err);
+      if (status === 404) {
+        return {
+          success: false,
+          statusCode: 404,
+          error: 'File not found in Cloudflare R2 storage.',
+        };
+      }
+      if (status === 403 || status === 401) {
+        return {
+          success: false,
+          statusCode: 403,
+          error: 'Cloudflare R2 permission denied while retrieving file.',
+        };
+      }
+      return {
+        success: false,
+        statusCode: 502,
+        error: 'Failed to retrieve file from Cloudflare R2 storage.',
+      };
+    }
+  }
+
+  public async deleteFile(destinationPath: string): Promise<boolean> {
+    if (!this.config.valid || !this.s3Client) {
+      return false;
+    }
+
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      const exists = await this.fileExists(cleanPath);
+      if (!exists) return false;
+
+      await this.s3Client.send(
+        new DeleteObjectCommand({
+          Bucket: this.config.bucketName,
+          Key: cleanPath,
+        })
+      );
+      return true;
+    } catch (err: any) {
+      const status = getAwsErrorStatusCode(err);
+      console.error('[STORAGE:R2] File deletion failed:', status || err?.name || '', err?.message || err);
+      return false;
+    }
+  }
+
+  public getFileUrl(destinationPath: string): string {
+    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+    const encoded = cleanPath.split('/').map(encodeURIComponent).join('/');
+    return `${this.config.publicBaseUrl}/${encoded}`;
+  }
+
+  public async fileExists(destinationPath: string): Promise<boolean> {
+    if (!this.config.valid || !this.s3Client) {
+      return false;
+    }
+
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      await this.s3Client.send(
+        new HeadObjectCommand({
+          Bucket: this.config.bucketName,
+          Key: cleanPath,
+        })
+      );
+      return true;
+    } catch (err: any) {
+      const status = getAwsErrorStatusCode(err);
+      if (status !== 404) {
+        console.error('[STORAGE:R2] Existence check failed:', status || err?.name || '', err?.message || err);
+      }
+      return false;
+    }
+  }
+}
+
 // Global Singleton Storage Provider Factory
 let activeStorageAdapter: StorageAdapter | null = null;
-let activeProviderKey: string | null = null;
+let activeProviderKey: StorageProviderName | null = null;
 
-export function getConfiguredStorageProvider(): 'local' | 'gcs' {
+export function getConfiguredStorageProvider(): StorageProviderName {
   const provider = String(process.env.STORAGE_PROVIDER || 'local').toLowerCase().trim();
   if (provider === 'gcs' || provider === 'google' || provider === 'google-cloud-storage') {
     return 'gcs';
+  }
+  if (provider === 'r2' || provider === 'cloudflare-r2') {
+    return 'r2';
   }
   return 'local';
 }
@@ -664,6 +1124,11 @@ export function getConfiguredStorageProvider(): 'local' | 'gcs' {
 export function resetStorageAdapterForTests(): void {
   activeStorageAdapter = null;
   activeProviderKey = null;
+}
+
+export function setStorageAdapterForTests(adapter: StorageAdapter | null): void {
+  activeStorageAdapter = adapter;
+  activeProviderKey = adapter ? adapter.providerName : null;
 }
 
 export function getStorageAdapter(): StorageAdapter {
@@ -682,6 +1147,15 @@ export function getStorageAdapter(): StorageAdapter {
       console.log(`[STORAGE] Initialized GoogleCloudStorageAdapter (bucket=${status.bucketName}).`);
     } else {
       console.warn(`[STORAGE] GoogleCloudStorageAdapter selected via STORAGE_PROVIDER=gcs, but configuration is incomplete: ${status.error}`);
+    }
+  } else if (provider === 'r2') {
+    const r2Adapter = new CloudflareR2StorageAdapter();
+    activeStorageAdapter = r2Adapter;
+    const status = r2Adapter.getConfigStatus();
+    if (status.configured) {
+      console.log(`[STORAGE] Initialized CloudflareR2StorageAdapter (bucket=${status.bucketName}).`);
+    } else {
+      console.warn(`[STORAGE] CloudflareR2StorageAdapter selected via STORAGE_PROVIDER=r2, but configuration is incomplete: ${status.error}`);
     }
   } else {
     activeStorageAdapter = new LocalStorageAdapter();
