@@ -25,6 +25,11 @@ import {
   extractAllMediaUrlsFromValue,
   mediaCleanupService,
 } from '../services/storage/mediaCleanupService';
+import {
+  buildMediaCompositeKey,
+  isMediaCoordinationError,
+  mediaWriteCoordinator,
+} from '../services/storage/mediaCoordination';
 
 export const cmsRouter = Router();
 
@@ -269,6 +274,9 @@ cmsRouter.put(['/v1/admin/store/contact', '/admin/store/contact'], requireAdminA
     const publicContact = await cmsRepository.getPublicContactConfig(false);
     return res.json({ success: true, message: 'Contact & social settings saved.', data: adminContact, rawSettings: saved, publicContact });
   } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
     return res.status(500).json({ success: false, error: err.message || 'Failed to update contact settings' });
   }
 });
@@ -320,6 +328,9 @@ cmsRouter.put(['/v1/admin/store/meta', '/admin/store/meta'], requireAdminAuth('e
       },
     });
   } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
     return res.status(500).json({ success: false, error: err.message || 'Failed to update Meta Business settings' });
   }
 });
@@ -375,6 +386,9 @@ cmsRouter.post(['/admin/frontpage', '/frontpage', '/cms/frontpage', '/admin/cms/
       data: saved,
     });
   } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
     res.status(500).json({ success: false, error: err.message || 'Failed to save frontpage CMS data' });
   }
 });
@@ -399,6 +413,9 @@ cmsRouter.put(['/admin/sections', '/sections', '/cms/sections', '/admin/cms/sect
       data: updated,
     });
   } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
     return res.status(500).json({ success: false, error: err.message || 'Failed to update sections' });
   }
 });
@@ -420,6 +437,9 @@ cmsRouter.put(['/admin/hero', '/hero', '/cms/hero', '/admin/cms/hero', '/cms/adm
       data: updated,
     });
   } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
     res.status(500).json({ success: false, error: err.message || 'Failed to update hero settings' });
   }
 });
@@ -436,6 +456,9 @@ cmsRouter.post(['/admin/reset', '/reset', '/cms/reset', '/admin/cms/reset', '/cm
       data: reset,
     });
   } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
     res.status(500).json({ success: false, error: err.message || 'Failed to reset CMS defaults' });
   }
 });
@@ -457,6 +480,9 @@ cmsRouter.put(['/admin/settings', '/settings', '/cms/settings', '/admin/cms/sett
       data: updated,
     });
   } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
     res.status(500).json({ success: false, error: err.message || 'Failed to update store settings' });
   }
 });
@@ -464,7 +490,8 @@ cmsRouter.put(['/admin/settings', '/settings', '/cms/settings', '/admin/cms/sett
 function buildUniqueAssetFilename(rawFilename: string | undefined, extension: string): string {
   const baseName = rawFilename ? path.basename(rawFilename, path.extname(rawFilename)) : 'cms';
   const safePrefix = baseName.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 20) || 'cms';
-  return `cms-${safePrefix}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${extension}`;
+  // Always generate a fresh 96-bit crypto-random key; retired storage keys are never reused.
+  return `cms-${safePrefix}-${Date.now()}-${crypto.randomBytes(12).toString('hex')}.${extension}`;
 }
 
 cmsRouter.post(['/upload-asset', '/cms/upload-asset', '/admin/upload-asset', '/admin/cms/upload-asset'], requireAdminAuth(), async (req: Request, res: Response) => {
@@ -493,6 +520,10 @@ cmsRouter.post(['/upload-asset', '/cms/upload-asset', '/admin/upload-asset', '/a
 
     const storage = getStorageAdapter();
     const outName = buildUniqueAssetFilename(typeof filename === 'string' ? filename : undefined, optimized.extension);
+    await mediaWriteCoordinator.assertKeysNotRetiredOrDeleting(
+      [buildMediaCompositeKey(storage.providerName, outName)],
+      { codeOnRetired: 'MEDIA_KEY_PERMANENTLY_RETIRED' }
+    );
     const uploadRes = await storage.uploadFile(optimized.buffer, outName, optimized.contentType, {
       cacheControl: IMMUTABLE_IMAGE_CACHE_CONTROL,
     });
@@ -514,7 +545,9 @@ cmsRouter.post(['/upload-asset', '/cms/upload-asset', '/admin/upload-asset', '/a
         storageKey: uploadRes.destinationPath,
         provider: storage.providerName,
       })
-      .catch(() => {});
+      .catch((regErr) => {
+        if (isMediaCoordinationError(regErr)) throw regErr;
+      });
 
     return res.json({
       success: true,
@@ -529,6 +562,13 @@ cmsRouter.post(['/upload-asset', '/cms/upload-asset', '/admin/upload-asset', '/a
     });
   } catch (err: any) {
     if (err instanceof ImageValidationError) {
+      return res.status(err.statusCode).json({
+        success: false,
+        code: err.code,
+        error: err.message,
+      });
+    }
+    if (isMediaCoordinationError(err)) {
       return res.status(err.statusCode).json({
         success: false,
         code: err.code,
@@ -625,6 +665,10 @@ cmsRouter.post(
       });
 
       const outName = buildUniqueAssetFilename(rawFilename, optimized.extension);
+      await mediaWriteCoordinator.assertKeysNotRetiredOrDeleting(
+        [buildMediaCompositeKey(storage.providerName, outName)],
+        { codeOnRetired: 'MEDIA_KEY_PERMANENTLY_RETIRED' }
+      );
       const uploadRes = await storage.uploadFile(optimized.buffer, outName, optimized.contentType, {
         cacheControl: IMMUTABLE_IMAGE_CACHE_CONTROL,
       });
@@ -645,7 +689,9 @@ cmsRouter.post(
           storageKey: uploadRes.destinationPath,
           provider: storage.providerName,
         })
-        .catch(() => {});
+        .catch((regErr) => {
+          if (isMediaCoordinationError(regErr)) throw regErr;
+        });
 
       return res.json({
         success: true,
@@ -668,6 +714,13 @@ cmsRouter.post(
         });
       }
       if (err instanceof ImageValidationError) {
+        return res.status(err.statusCode).json({
+          success: false,
+          code: err.code,
+          error: err.message,
+        });
+      }
+      if (isMediaCoordinationError(err)) {
         return res.status(err.statusCode).json({
           success: false,
           code: err.code,
@@ -761,6 +814,13 @@ cmsRouter.post(
         expiresAt: lease?.expiresAt ?? null,
       });
     } catch (err: any) {
+      if (isMediaCoordinationError(err)) {
+        return res.status(err.statusCode).json({
+          success: false,
+          code: err.code,
+          error: err.message,
+        });
+      }
       console.warn('[CMS] Media lease error (non-fatal):', err?.message || err);
       return res.json({ success: true, leasedKeysCount: 0 });
     }

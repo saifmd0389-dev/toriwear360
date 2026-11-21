@@ -19,6 +19,7 @@ import {
   MEDIA_CLEANUP_MYSQL_GROUP,
   MEDIA_CLEANUP_MYSQL_KEY,
   buildMediaCompositeKey,
+  createPrismaMySqlMediaStateBackend,
   mergeDurableMediaState,
   type MySqlMediaStateBackend,
   type MySqlWebsiteSettingRow,
@@ -27,6 +28,18 @@ import {
   MediaCleanupService,
   type MediaReferenceProviders,
 } from '../server/services/storage/mediaCleanupService';
+import {
+  MEDIA_COORDINATION_MYSQL_KEY,
+  MEDIA_TOMBSTONE_MYSQL_GROUP,
+  MediaConflictError,
+  MediaCoordinationUnavailableError,
+  MediaEnumerationIncompleteError,
+  MediaWriteCoordinator,
+  extractManagedKeysStrict,
+  toRetiredTombstoneKey,
+} from '../server/services/storage/mediaCoordination';
+import { getPrismaClient, setPrismaClientOverrideForTests } from '../server/db/prisma';
+import { OrderRepository, type OrderRecord } from '../server/repositories/orderRepository';
 
 /**
  * In-memory mocked Cloudflare R2 S3Client (Preview-only; zero real network/production calls).
@@ -126,7 +139,7 @@ function createMockGcsAdapter(publicBaseUrl = 'https://storage.googleapis.com/to
 }
 
 /**
- * In-memory mocked MySQL WebsiteSetting backend with outage & CAS conflict controls.
+ * In-memory mocked MySQL WebsiteSetting backend with outage & unique revision-token CAS conflict controls.
  */
 function createMockMySqlBackend() {
   let row: MySqlWebsiteSettingRow | null = null;
@@ -139,28 +152,28 @@ function createMockMySqlBackend() {
     isAvailable: () => true,
     async readRow() {
       if (!online) throw new Error('Simulated MySQL ECONNREFUSED');
-      return row ? { ...row, updatedAt: new Date(row.updatedAt.getTime()) } : null;
+      return row ? { ...row } : null;
     },
-    async createRow(value: string) {
+    async createRow(value: string, revisionToken: string) {
       if (!online) throw new Error('Simulated MySQL ECONNREFUSED');
       if (row) return { created: false, conflict: true };
       tick += 10;
-      row = { key: MEDIA_CLEANUP_MYSQL_KEY, value, updatedAt: new Date(tick) };
+      row = { key: MEDIA_CLEANUP_MYSQL_KEY, value, revisionToken };
       return { created: true };
     },
-    async compareAndSwapRow(expectedUpdatedAt: Date, nextValue: string) {
+    async compareAndSwapRow(expectedRevisionToken: string | null, nextValue: string, nextRevisionToken: string) {
       if (!online) throw new Error('Simulated MySQL ECONNREFUSED');
       if (nextConflictInjector) {
         const inject = nextConflictInjector;
         nextConflictInjector = null;
         inject();
       }
-      if (!row || row.updatedAt.getTime() !== expectedUpdatedAt.getTime()) {
+      if (!row || row.revisionToken !== expectedRevisionToken) {
         casConflictsObserved += 1;
         return { updated: false };
       }
       tick += 10;
-      row = { key: MEDIA_CLEANUP_MYSQL_KEY, value: nextValue, updatedAt: new Date(tick) };
+      row = { key: MEDIA_CLEANUP_MYSQL_KEY, value: nextValue, revisionToken: nextRevisionToken };
       return { updated: true };
     },
   };
@@ -173,9 +186,13 @@ function createMockMySqlBackend() {
     getRow() {
       return row;
     },
-    forceSetRawRow(value: string) {
+    forceSetRawRow(value: string, revisionToken?: string) {
       tick += 10;
-      row = { key: MEDIA_CLEANUP_MYSQL_KEY, value, updatedAt: new Date(tick) };
+      row = {
+        key: MEDIA_CLEANUP_MYSQL_KEY,
+        value,
+        revisionToken: revisionToken || `rev:forced:${tick}`,
+      };
     },
     injectNextCasConflict(fn: () => void) {
       nextConflictInjector = fn;
@@ -1058,3 +1075,1268 @@ test('mergeDurableMediaState preserves earliest uploadedAt, latest eligibleAt, a
   assert.equal(mergedBA.deferredQueue[k].eligibleAt, now + 90_000); // Commutative!
   assert.equal(mergedAB.deferredQueue[k].attempts, 2);
 });
+
+// ============================================================================
+// 8. SIMULATED TRANSACTIONAL INNODB MYSQL HARNESS (READ COMMITTED + S/X LOCKS)
+// ============================================================================
+
+interface MockWsRow {
+  id: string;
+  key: string;
+  value: string;
+  group: string;
+  description: string | null;
+  isPublic: boolean;
+  updatedAt: Date;
+}
+
+interface RowLockEntry {
+  sharedHolders: Set<number>;
+  exclusiveHolder: number | null;
+  waiters: Array<{
+    txId: number;
+    mode: 'S' | 'X';
+    resolve: () => void;
+    reject: (err: Error) => void;
+  }>;
+}
+
+/**
+ * Faithful in-memory InnoDB transactional MySQL simulator for Preview-only concurrency testing:
+ * - Supports `READ COMMITTED` isolation (writes buffer inside each tx and become visible only on commit).
+ * - Enforces genuine row-level Shared (`LOCK IN SHARE MODE`) vs Exclusive (`FOR UPDATE`) lock queues
+ *   with FIFO writer priority.
+ * - Supports simulating server-side transaction timeout/rollback (`abortTransaction(txId)`) which
+ *   immediately discards uncommitted mutations, releases InnoDB locks, and rejects any subsequent
+ *   DB calls from the paused/waking worker.
+ */
+function createMockInnoDbMySql() {
+  let online = true;
+  let nextTxId = 1;
+
+  const websiteSettings = new Map<string, MockWsRow>();
+  const productImages = new Map<string, { id: string; productId: string; url: string }>();
+  const categories = new Map<string, { id: string; image: string | null }>();
+  const collections = new Map<string, { id: string; image: string | null; bannerImage: string | null }>();
+  const orders = new Map<string, { id: string; orderNumber: string; items: Array<{ image: string | null }> }>();
+
+  const rowLocks = new Map<string, RowLockEntry>();
+  const activeTxControls = new Map<
+    number,
+    {
+      aborted: boolean;
+      abortReason: string;
+      heldLockKeys: Set<string>;
+      abort: (reason: string) => void;
+    }
+  >();
+
+  const lockEvents: string[] = [];
+
+  function getLockEntry(key: string): RowLockEntry {
+    let entry = rowLocks.get(key);
+    if (!entry) {
+      entry = { sharedHolders: new Set(), exclusiveHolder: null, waiters: [] };
+      rowLocks.set(key, entry);
+    }
+    return entry;
+  }
+
+  function pumpLockQueue(key: string) {
+    const entry = rowLocks.get(key);
+    if (!entry) return;
+    while (entry.waiters.length > 0) {
+      const next = entry.waiters[0];
+      if (next.mode === 'S') {
+        if (entry.exclusiveHolder === null || entry.exclusiveHolder === next.txId) {
+          entry.waiters.shift();
+          entry.sharedHolders.add(next.txId);
+          next.resolve();
+        } else {
+          break;
+        }
+      } else {
+        const onlySelfShared =
+          entry.sharedHolders.size === 0 ||
+          (entry.sharedHolders.size === 1 && entry.sharedHolders.has(next.txId));
+        if ((entry.exclusiveHolder === null || entry.exclusiveHolder === next.txId) && onlySelfShared) {
+          entry.waiters.shift();
+          entry.sharedHolders.delete(next.txId);
+          entry.exclusiveHolder = next.txId;
+          next.resolve();
+        } else {
+          break;
+        }
+      }
+    }
+  }
+
+  async function acquireRowLock(txId: number, key: string, mode: 'S' | 'X'): Promise<void> {
+    const ctrl = activeTxControls.get(txId);
+    if (!ctrl || ctrl.aborted) {
+      throw new Error(ctrl?.abortReason || 'MySQL transaction aborted');
+    }
+    const entry = getLockEntry(key);
+    const hasPendingExclusiveWaiter = entry.waiters.some((w) => w.mode === 'X');
+
+    if (mode === 'S') {
+      if (
+        (entry.exclusiveHolder === null || entry.exclusiveHolder === txId) &&
+        (!hasPendingExclusiveWaiter || entry.sharedHolders.has(txId))
+      ) {
+        entry.sharedHolders.add(txId);
+        ctrl.heldLockKeys.add(key);
+        lockEvents.push(`tx${txId}:ACQUIRE_S:${key}`);
+        return;
+      }
+    } else {
+      const onlySelfShared =
+        entry.sharedHolders.size === 0 ||
+        (entry.sharedHolders.size === 1 && entry.sharedHolders.has(txId));
+      if (
+        (entry.exclusiveHolder === null || entry.exclusiveHolder === txId) &&
+        onlySelfShared &&
+        entry.waiters.length === 0
+      ) {
+        entry.sharedHolders.delete(txId);
+        entry.exclusiveHolder = txId;
+        ctrl.heldLockKeys.add(key);
+        lockEvents.push(`tx${txId}:ACQUIRE_X:${key}`);
+        return;
+      }
+    }
+
+    lockEvents.push(`tx${txId}:WAIT_${mode}:${key}`);
+    await new Promise<void>((resolve, reject) => {
+      entry.waiters.push({ txId, mode, resolve, reject });
+    });
+    if (ctrl.aborted) {
+      releaseTxLocks(txId);
+      throw new Error(ctrl.abortReason);
+    }
+    ctrl.heldLockKeys.add(key);
+    lockEvents.push(`tx${txId}:ACQUIRE_${mode}:${key}`);
+  }
+
+  function releaseTxLocks(txId: number) {
+    const ctrl = activeTxControls.get(txId);
+    if (!ctrl) return;
+    for (const key of Array.from(ctrl.heldLockKeys)) {
+      const entry = rowLocks.get(key);
+      if (entry) {
+        entry.sharedHolders.delete(txId);
+        if (entry.exclusiveHolder === txId) {
+          entry.exclusiveHolder = null;
+        }
+        entry.waiters = entry.waiters.filter((w) => w.txId !== txId);
+        pumpLockQueue(key);
+      }
+    }
+    ctrl.heldLockKeys.clear();
+  }
+
+  function assertOnline() {
+    if (!online) {
+      const err: any = new Error('Simulated MySQL ECONNREFUSED');
+      err.code = 'ECONNREFUSED';
+      throw err;
+    }
+  }
+
+  function createTxClient(txId: number) {
+    const wsStaging = new Map<string, MockWsRow>();
+    const prodImgStaging = new Map<string, { id: string; productId: string; url: string }>();
+    const orderStaging = new Map<string, { id: string; orderNumber: string; items: Array<{ image: string | null }> }>();
+
+    const checkAlive = () => {
+      assertOnline();
+      const ctrl = activeTxControls.get(txId);
+      if (!ctrl || ctrl.aborted) {
+        throw new Error(ctrl?.abortReason || 'MySQL Transaction already rolled back');
+      }
+    };
+
+    const getWs = (key: string): MockWsRow | undefined =>
+      wsStaging.has(key) ? wsStaging.get(key) : websiteSettings.get(key);
+
+    const txClient: any = {
+      __txId: txId,
+      async $queryRawUnsafe(sql: string, ...params: any[]) {
+        checkAlive();
+        const isExclusive = /FOR UPDATE/i.test(sql);
+        const isShared = /LOCK IN SHARE MODE/i.test(sql);
+        const mode: 'S' | 'X' | null = isExclusive ? 'X' : isShared ? 'S' : null;
+
+        if (/WHERE `key` IN \(/i.test(sql)) {
+          const keys = params.map(String);
+          const rows: any[] = [];
+          for (const k of keys) {
+            if (mode) await acquireRowLock(txId, `ws:${k}`, mode);
+            const r = getWs(k);
+            if (r) rows.push({ key: r.key, value: r.value, description: r.description });
+          }
+          return rows;
+        }
+
+        if (/WHERE `key` = \?/i.test(sql)) {
+          const k = String(params[0]);
+          if (mode) await acquireRowLock(txId, `ws:${k}`, mode);
+          const r = getWs(k);
+          return r ? [{ key: r.key, value: r.value, description: r.description }] : [];
+        }
+
+        throw new Error(`Unsupported mock SQL query: ${sql}`);
+      },
+      async $executeRawUnsafe(sql: string, ...params: any[]) {
+        checkAlive();
+        if (/^INSERT IGNORE INTO `website_settings`/i.test(sql)) {
+          const [id, key, value, group, description, isPublic, updatedAt] = params;
+          const k = String(key);
+          if (getWs(k)) return 0;
+          wsStaging.set(k, {
+            id: String(id),
+            key: k,
+            value: String(value),
+            group: String(group),
+            description: description === null || description === undefined ? null : String(description),
+            isPublic: Boolean(isPublic),
+            updatedAt: updatedAt instanceof Date ? updatedAt : new Date(),
+          });
+          return 1;
+        }
+        if (/^INSERT INTO `website_settings`/i.test(sql)) {
+          const [id, key, value, group, description, isPublic, updatedAt] = params;
+          const k = String(key);
+          if (getWs(k)) {
+            const err: any = new Error('Unique constraint failed');
+            err.code = 'P2002';
+            throw err;
+          }
+          wsStaging.set(k, {
+            id: String(id),
+            key: k,
+            value: String(value),
+            group: String(group),
+            description: description === null || description === undefined ? null : String(description),
+            isPublic: Boolean(isPublic),
+            updatedAt: updatedAt instanceof Date ? updatedAt : new Date(),
+          });
+          return 1;
+        }
+        if (/^UPDATE `website_settings` SET `value` = \?, `description` = \?/i.test(sql)) {
+          const [value, description, group, isPublic, updatedAt, key, expectedDescription] = params;
+          const k = String(key);
+          const existing = getWs(k);
+          if (!existing) return 0;
+          const exp = expectedDescription === undefined ? null : expectedDescription;
+          if (existing.description !== exp) return 0;
+          wsStaging.set(k, {
+            ...existing,
+            value: String(value),
+            description: description === null || description === undefined ? null : String(description),
+            group: String(group),
+            isPublic: Boolean(isPublic),
+            updatedAt: updatedAt instanceof Date ? updatedAt : new Date(),
+          });
+          return 1;
+        }
+        throw new Error(`Unsupported mock SQL execute: ${sql}`);
+      },
+      websiteSetting: {
+        async findUnique({ where }: any) {
+          checkAlive();
+          const r = getWs(String(where?.key || ''));
+          return r ? { ...r } : null;
+        },
+        async findMany() {
+          checkAlive();
+          const merged = new Map<string, MockWsRow>(websiteSettings);
+          for (const [k, v] of wsStaging.entries()) merged.set(k, v);
+          return Array.from(merged.values()).map((r) => ({ ...r }));
+        },
+        async create({ data }: any) {
+          checkAlive();
+          const k = String(data.key);
+          if (getWs(k)) {
+            const err: any = new Error('Unique constraint failed');
+            err.code = 'P2002';
+            throw err;
+          }
+          const rec: MockWsRow = {
+            id: data.id || `ws-${k}`,
+            key: k,
+            value: String(data.value),
+            group: String(data.group || 'GENERAL'),
+            description: data.description ?? null,
+            isPublic: Boolean(data.isPublic),
+            updatedAt: new Date(),
+          };
+          wsStaging.set(k, rec);
+          return { ...rec };
+        },
+      },
+      productImage: {
+        async findMany() {
+          checkAlive();
+          const merged = new Map(productImages);
+          for (const [k, v] of prodImgStaging.entries()) merged.set(k, v);
+          return Array.from(merged.values()).map((r) => ({ ...r }));
+        },
+        async create({ data }: any) {
+          checkAlive();
+          const rec = {
+            id: String(data.id || `pi-${Date.now()}-${Math.random()}`),
+            productId: String(data.productId || 'prod-1'),
+            url: String(data.url),
+          };
+          prodImgStaging.set(rec.id, rec);
+          return { ...rec };
+        },
+      },
+      category: {
+        async findMany() {
+          checkAlive();
+          return Array.from(categories.values()).map((r) => ({ ...r }));
+        },
+      },
+      collection: {
+        async findMany() {
+          checkAlive();
+          return Array.from(collections.values()).map((r) => ({ ...r }));
+        },
+      },
+      orderItem: {
+        async findMany() {
+          checkAlive();
+          const rows: Array<{ image: string | null }> = [];
+          for (const o of orders.values()) {
+            for (const item of o.items) rows.push({ image: item.image });
+          }
+          for (const o of orderStaging.values()) {
+            for (const item of o.items) rows.push({ image: item.image });
+          }
+          return rows;
+        },
+      },
+      order: {
+        async create({ data }: any) {
+          checkAlive();
+          const items = Array.isArray(data?.items?.create)
+            ? data.items.create.map((i: any) => ({ image: i.image ?? null }))
+            : [];
+          const rec = {
+            id: String(data.id),
+            orderNumber: String(data.orderNumber),
+            items,
+          };
+          orderStaging.set(rec.id, rec);
+          return {
+            ...data,
+            items: (data?.items?.create || []).map((i: any, idx: number) => ({
+              ...i,
+              id: i.id || `oi-${idx}`,
+              image: i.image ?? null,
+            })),
+          };
+        },
+      },
+    };
+
+    const commit = () => {
+      checkAlive();
+      for (const [k, v] of wsStaging.entries()) websiteSettings.set(k, v);
+      for (const [k, v] of prodImgStaging.entries()) productImages.set(k, v);
+      for (const [k, v] of orderStaging.entries()) orders.set(k, v);
+    };
+
+    return { txClient, commit };
+  }
+
+  const prisma: any = {
+    async $executeRawUnsafe(sql: string, ...params: any[]) {
+      assertOnline();
+      if (/^INSERT IGNORE INTO `website_settings`/i.test(sql)) {
+        const [id, key, value, group, description, isPublic, updatedAt] = params;
+        const k = String(key);
+        if (websiteSettings.has(k)) return 0;
+        websiteSettings.set(k, {
+          id: String(id),
+          key: k,
+          value: String(value),
+          group: String(group),
+          description: description === null || description === undefined ? null : String(description),
+          isPublic: Boolean(isPublic),
+          updatedAt: updatedAt instanceof Date ? updatedAt : new Date(),
+        });
+        return 1;
+      }
+      throw new Error(`Unsupported top-level mock SQL execute: ${sql}`);
+    },
+    async $transaction<T>(fn: (tx: any) => Promise<T>, _opts?: any): Promise<T> {
+      assertOnline();
+      const txId = nextTxId++;
+      const ctrl = {
+        aborted: false,
+        abortReason: '',
+        heldLockKeys: new Set<string>(),
+        abort(reason: string) {
+          if (ctrl.aborted) return;
+          ctrl.aborted = true;
+          ctrl.abortReason = reason;
+          // Immediately release InnoDB row locks as MySQL does upon server-side rollback/timeout!
+          releaseTxLocks(txId);
+        },
+      };
+      activeTxControls.set(txId, ctrl);
+      const { txClient, commit } = createTxClient(txId);
+
+      try {
+        const result = await fn(txClient);
+        if (ctrl.aborted) {
+          throw new Error(ctrl.abortReason);
+        }
+        commit();
+        return result;
+      } finally {
+        releaseTxLocks(txId);
+        activeTxControls.delete(txId);
+      }
+    },
+    websiteSetting: {
+      async findUnique({ where }: any) {
+        assertOnline();
+        const r = websiteSettings.get(String(where?.key || ''));
+        return r ? { ...r } : null;
+      },
+      async findMany() {
+        assertOnline();
+        return Array.from(websiteSettings.values()).map((r) => ({ ...r }));
+      },
+      async create({ data }: any) {
+        assertOnline();
+        const k = String(data.key);
+        if (websiteSettings.has(k)) {
+          const err: any = new Error('Unique constraint failed');
+          err.code = 'P2002';
+          throw err;
+        }
+        const rec: MockWsRow = {
+          id: data.id || `ws-${k}`,
+          key: k,
+          value: String(data.value),
+          group: String(data.group || 'GENERAL'),
+          description: data.description ?? null,
+          isPublic: Boolean(data.isPublic),
+          updatedAt: new Date(),
+        };
+        websiteSettings.set(k, rec);
+        return { ...rec };
+      },
+    },
+    productImage: {
+      async findMany() {
+        assertOnline();
+        return Array.from(productImages.values()).map((r) => ({ ...r }));
+      },
+    },
+    category: {
+      async findMany() {
+        assertOnline();
+        return Array.from(categories.values()).map((r) => ({ ...r }));
+      },
+    },
+    collection: {
+      async findMany() {
+        assertOnline();
+        return Array.from(collections.values()).map((r) => ({ ...r }));
+      },
+    },
+    orderItem: {
+      async findMany() {
+        assertOnline();
+        const rows: Array<{ image: string | null }> = [];
+        for (const o of orders.values()) {
+          for (const item of o.items) rows.push({ image: item.image });
+        }
+        return rows;
+      },
+    },
+    order: {
+      async create({ data }: any) {
+        assertOnline();
+        const items = Array.isArray(data?.items?.create)
+          ? data.items.create.map((i: any) => ({ image: i.image ?? null }))
+          : [];
+        const rec = {
+          id: String(data.id),
+          orderNumber: String(data.orderNumber),
+          items,
+        };
+        orders.set(rec.id, rec);
+        return {
+          ...data,
+          items: (data?.items?.create || []).map((i: any, idx: number) => ({
+            ...i,
+            id: i.id || `oi-${idx}`,
+            image: i.image ?? null,
+          })),
+        };
+      },
+    },
+  };
+
+  return {
+    prisma,
+    websiteSettings,
+    productImages,
+    orders,
+    lockEvents,
+    setOnline(v: boolean) {
+      online = v;
+    },
+    abortTransaction(txId: number, reason = 'MySQL Transaction timed out and rolled back') {
+      activeTxControls.get(txId)?.abort(reason);
+    },
+    getActiveTxIds() {
+      return Array.from(activeTxControls.keys());
+    },
+  };
+}
+
+// ============================================================================
+// 9. HARDENED CONCURRENCY, PERMANENT TOMBSTONES & TRANSACTIONAL INNODB TESTS
+// ============================================================================
+
+test('Permanent Tombstone Protection: atomic deletingKeys -> media_retired_v1:<sha256> transition blocks stale writers and key reuse forever', async () => {
+  const db = createMockInnoDbMySql();
+  const r2 = createMockR2Adapter();
+  const tmp = makeTempFile('permanent-tombstones');
+
+  try {
+    const key = 'cms-retired-tee.webp';
+    const url = r2.adapter.getFileUrl(key);
+    const compositeKey = buildMediaCompositeKey('r2', key);
+    r2.objects.set(key, Buffer.from('retired-img'));
+
+    const coordinator = new MediaWriteCoordinator({
+      prismaProvider: () => db.prisma,
+      storageAdapterProvider: () => r2.adapter,
+      localCoordinationFilePath: path.join(tmp.dir, 'coord.json'),
+      localRetiredFilePath: path.join(tmp.dir, 'retired.json'),
+    });
+    const store = new DurableMediaStateStore({
+      runtimeFilePath: tmp.filePath,
+      mysqlBackend: createPrismaMySqlMediaStateBackend(() => db.prisma),
+    });
+    const service = new MediaCleanupService({
+      storageAdapterProvider: () => r2.adapter,
+      stateStore: store,
+      coordinator,
+      cleanupCooldownMs: 0,
+      referenceProviders: createEmptyRefs({
+        getPrismaClient: () => db.prisma,
+      }),
+    });
+
+    // Clean up unreferenced object -> deletes from R2 and atomically inserts permanent tombstone
+    const report = await service.cleanupUnreferencedMedia([url], { reason: 'retire-test' });
+    assert.deepEqual(report.deletedKeys, [key]);
+    assert.equal(r2.objects.has(key), false);
+
+    // Verify permanent per-key tombstone row exists in website_settings and deletingKeys is clean
+    const tombstoneRowKey = toRetiredTombstoneKey(compositeKey);
+    const tombstoneRow = db.websiteSettings.get(tombstoneRowKey);
+    assert.ok(tombstoneRow, 'Permanent per-key tombstone row must exist in website_settings');
+    assert.equal(tombstoneRow!.group, MEDIA_TOMBSTONE_MYSQL_GROUP);
+    assert.equal(tombstoneRow!.isPublic, false);
+
+    const coordSnapshot = await coordinator.getCoordinationSnapshot();
+    assert.equal(coordSnapshot.state.deletingKeys[compositeKey], undefined);
+
+    // 1. Stale browser tab / writer attempting to reference retired key MUST be rejected with 409 MEDIA_OBJECT_RETIRED
+    await assert.rejects(
+      () =>
+        coordinator.executeCoordinatedWrite({
+          payload: { images: [url] },
+          executeInTx: async (tx) => {
+            await tx.productImage.create({ data: { productId: 'p-stale', url } });
+          },
+        }),
+      (err: any) => err instanceof MediaConflictError && err.statusCode === 409 && err.code === 'MEDIA_OBJECT_RETIRED'
+    );
+    assert.equal(db.productImages.size, 0, 'Stale write must commit zero product references');
+
+    // 2. registerPendingUpload() MUST NEVER clear or reuse a permanently retired key -> 409 MEDIA_KEY_PERMANENTLY_RETIRED
+    await assert.rejects(
+      () => service.registerPendingUpload({ url, ownerId: 'admin-1', storageKey: key, provider: 'r2' }),
+      (err: any) =>
+        err instanceof MediaConflictError &&
+        err.statusCode === 409 &&
+        err.code === 'MEDIA_KEY_PERMANENTLY_RETIRED'
+    );
+    assert.ok(db.websiteSettings.has(tombstoneRowKey), 'Permanent tombstone must never be cleared or pruned');
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test('Single-Transaction InnoDB S/X Locking: paused Worker A blocks Worker B Gate 5 until commit, then Gate 5 sees committed reference and aborts delete', async () => {
+  const db = createMockInnoDbMySql();
+  const r2 = createMockR2Adapter();
+  const tmp = makeTempFile('innodb-sx-lock');
+
+  try {
+    const key = 'cms-concurrent-shared.webp';
+    const url = r2.adapter.getFileUrl(key);
+    r2.objects.set(key, Buffer.from('live-image'));
+
+    const workerACoordinator = new MediaWriteCoordinator({
+      workerId: 'worker-A',
+      prismaProvider: () => db.prisma,
+      storageAdapterProvider: () => r2.adapter,
+    });
+    const workerBCoordinator = new MediaWriteCoordinator({
+      workerId: 'worker-B',
+      prismaProvider: () => db.prisma,
+      storageAdapterProvider: () => r2.adapter,
+    });
+    const workerBStore = new DurableMediaStateStore({
+      runtimeFilePath: tmp.filePath,
+      mysqlBackend: createPrismaMySqlMediaStateBackend(() => db.prisma),
+    });
+    const workerBCleanup = new MediaCleanupService({
+      storageAdapterProvider: () => r2.adapter,
+      stateStore: workerBStore,
+      coordinator: workerBCoordinator,
+      cleanupCooldownMs: 0,
+      referenceProviders: createEmptyRefs({
+        getPrismaClient: () => db.prisma,
+      }),
+    });
+
+    let signalWorkerAInsideTx!: () => void;
+    const workerAInsideTx = new Promise<void>((resolve) => {
+      signalWorkerAInsideTx = resolve;
+    });
+    let resumeWorkerA!: () => void;
+    const workerAResumeGate = new Promise<void>((resolve) => {
+      resumeWorkerA = resolve;
+    });
+
+    // Worker A starts Tx_W (acquires InnoDB LOCK IN SHARE MODE on media_write_coordination_v1) and pauses before committing!
+    const workerAPromise = workerACoordinator.executeCoordinatedWrite({
+      payload: { images: [url] },
+      executeInTx: async (tx) => {
+        signalWorkerAInsideTx();
+        await workerAResumeGate;
+        // Write reference inside the SAME transaction before committing
+        await tx.productImage.create({ data: { productId: 'prod-A', url } });
+        return 'saved-by-A';
+      },
+    });
+
+    await workerAInsideTx;
+
+    // Worker B starts cleanup while Worker A is paused mid-transaction!
+    let workerBFinished = false;
+    const workerBPromise = workerBCleanup
+      .cleanupUnreferencedMedia([url], { reason: 'worker-B-sweep' })
+      .then((res) => {
+        workerBFinished = true;
+        return res;
+      });
+
+    // Yield event loop: Worker B MUST be blocked on InnoDB FOR UPDATE lock and NOT finish or delete!
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(workerBFinished, false, 'Worker B Gate 5 MUST wait on InnoDB FOR UPDATE while Worker A holds LOCK IN SHARE MODE');
+    assert.equal(r2.deleteCalls.length, 0);
+
+    // Now Worker A resumes and commits its ProductImage reference
+    resumeWorkerA();
+    const workerAResult = await workerAPromise;
+    assert.equal(workerAResult, 'saved-by-A');
+
+    // Worker B now acquires FOR UPDATE, sees Worker A's committed row under READ COMMITTED, and preserves the object!
+    const workerBReport = await workerBPromise;
+    assert.deepEqual(workerBReport.deletedKeys, []);
+    assert.deepEqual(workerBReport.preservedReferencedKeys, [key]);
+    assert.equal(r2.deleteCalls.length, 0);
+    assert.equal(r2.objects.has(key), true);
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test('Former Lease-Expiry Hazard Eliminated: paused Worker A whose Tx_W times out/rolls back CANNOT commit after Worker B fences and deletes', async () => {
+  const db = createMockInnoDbMySql();
+  const r2 = createMockR2Adapter();
+  const tmp = makeTempFile('tx-timeout-safety');
+
+  try {
+    const key = 'cms-timeout-hazard.webp';
+    const url = r2.adapter.getFileUrl(key);
+    r2.objects.set(key, Buffer.from('hazard-img'));
+
+    const workerACoordinator = new MediaWriteCoordinator({
+      workerId: 'worker-A',
+      prismaProvider: () => db.prisma,
+      storageAdapterProvider: () => r2.adapter,
+    });
+    const workerBCoordinator = new MediaWriteCoordinator({
+      workerId: 'worker-B',
+      prismaProvider: () => db.prisma,
+      storageAdapterProvider: () => r2.adapter,
+    });
+    const workerBStore = new DurableMediaStateStore({
+      runtimeFilePath: tmp.filePath,
+      mysqlBackend: createPrismaMySqlMediaStateBackend(() => db.prisma),
+    });
+    const workerBCleanup = new MediaCleanupService({
+      storageAdapterProvider: () => r2.adapter,
+      stateStore: workerBStore,
+      coordinator: workerBCoordinator,
+      cleanupCooldownMs: 0,
+      referenceProviders: createEmptyRefs({
+        getPrismaClient: () => db.prisma,
+      }),
+    });
+
+    let workerATxId = 0;
+    let signalPaused!: () => void;
+    const workerAPaused = new Promise<void>((resolve) => {
+      signalPaused = resolve;
+    });
+    let wakeWorkerA!: () => void;
+    const workerAWakeGate = new Promise<void>((resolve) => {
+      wakeWorkerA = resolve;
+    });
+
+    // 1. Worker A enters Tx_W and freezes (GC pause / network stall)
+    const workerAPromise = workerACoordinator.executeCoordinatedWrite({
+      payload: { images: [url] },
+      executeInTx: async (tx) => {
+        workerATxId = tx.__txId;
+        signalPaused();
+        await workerAWakeGate;
+        // Worker A wakes up AFTER its DB transaction timed out and tries to insert the reference!
+        await tx.productImage.create({ data: { productId: 'prod-late', url } });
+      },
+    });
+
+    await workerAPaused;
+    assert.ok(workerATxId > 0);
+
+    // 2. Worker B begins cleanup -> blocked waiting for Worker A's InnoDB shared lock
+    const workerBPromise = workerBCleanup.cleanupUnreferencedMedia([url], { reason: 'cleanup-after-timeout' });
+    await new Promise((r) => setTimeout(r, 15));
+
+    // 3. MySQL server aborts / times out Worker A's transaction -> rolls back & releases shared lock
+    db.abortTransaction(workerATxId, 'Simulated MySQL interactive transaction timeout');
+
+    // 4. Worker B now acquires FOR UPDATE, confirms 0 references, fences, deletes from R2, and permanently retires K
+    const reportB = await workerBPromise;
+    assert.deepEqual(reportB.deletedKeys, [key]);
+    assert.equal(r2.objects.has(key), false);
+
+    // 5. Worker A wakes up: its old Tx_W MUST fail to commit (rolled back by DB!)
+    wakeWorkerA();
+    await assert.rejects(() => workerAPromise, /timeout|rolled back|unavailable/i);
+    assert.equal(db.productImages.size, 0, 'Aborted Tx_W MUST NOT commit any reference');
+
+    // 6. If Worker A retries in a brand-new Tx_W2, permanent tombstone rejects it with 409 MEDIA_OBJECT_RETIRED!
+    await assert.rejects(
+      () =>
+        workerACoordinator.executeCoordinatedWrite({
+          payload: { images: [url] },
+          executeInTx: async (tx) => {
+            await tx.productImage.create({ data: { productId: 'prod-retry', url } });
+          },
+        }),
+      (err: any) => err instanceof MediaConflictError && err.statusCode === 409 && err.code === 'MEDIA_OBJECT_RETIRED'
+    );
+    assert.equal(db.productImages.size, 0);
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test('Crash Reconciliation: crashed worker fence is NEVER resurrected for writers; reconciler drives forward-completion to permanent tombstone', async () => {
+  const db = createMockInnoDbMySql();
+  let r2Outage = true;
+  const objects = new Map<string, Buffer>([['cms-crashed-delete.webp', Buffer.from('orphan-data')]]);
+  const deleteCalls: string[] = [];
+  const publicBaseUrl = 'https://pub-preview-test.r2.dev';
+
+  const flakyR2 = new CloudflareR2StorageAdapter({
+    bucketName: 'toriwear-preview-mock',
+    endpoint: 'https://preview-mock-account.r2.cloudflarestorage.com',
+    publicBaseUrl,
+    s3Client: {
+      async send(command: any) {
+        if (command instanceof HeadObjectCommand) {
+          const k = String(command.input.Key || '');
+          if (!objects.has(k)) {
+            const err: any = new Error('NotFound');
+            err.name = 'NotFound';
+            err.$metadata = { httpStatusCode: 404 };
+            throw err;
+          }
+          return { ContentLength: objects.get(k)!.length };
+        }
+        if (command instanceof DeleteObjectCommand) {
+          const k = String(command.input.Key || '');
+          deleteCalls.push(k);
+          if (r2Outage) {
+            const err: any = new Error('Simulated R2 503 outage');
+            err.$metadata = { httpStatusCode: 503 };
+            throw err;
+          }
+          objects.delete(k);
+          return {};
+        }
+        throw new Error('Unexpected S3 command');
+      },
+    },
+  });
+
+  const tmp = makeTempFile('crash-reconcile');
+  let clock = 20_000_000;
+
+  try {
+    const key = 'cms-crashed-delete.webp';
+    const url = flakyR2.getFileUrl(key);
+    const compositeKey = buildMediaCompositeKey('r2', key);
+
+    const crashedCoordinator = new MediaWriteCoordinator({
+      workerId: 'worker-crashed',
+      prismaProvider: () => db.prisma,
+      storageAdapterProvider: () => flakyR2,
+      now: () => clock,
+    });
+    const recoveryCoordinator = new MediaWriteCoordinator({
+      workerId: 'worker-reconciler',
+      prismaProvider: () => db.prisma,
+      storageAdapterProvider: () => flakyR2,
+      now: () => clock,
+    });
+    const recoveryService = new MediaCleanupService({
+      storageAdapterProvider: () => flakyR2,
+      stateStore: new DurableMediaStateStore({
+        runtimeFilePath: tmp.filePath,
+        mysqlBackend: createPrismaMySqlMediaStateBackend(() => db.prisma),
+        now: () => clock,
+      }),
+      coordinator: recoveryCoordinator,
+      now: () => clock,
+      referenceProviders: createEmptyRefs({ getPrismaClient: () => db.prisma }),
+    });
+
+    // 1. Worker 1 acquires deletion fence and crashes BEFORE deleting from R2 (fence stays IN_PROGRESS)
+    const fenceRes = await crashedCoordinator.acquireDeletionFenceAtomic({
+      provider: 'r2',
+      storageKey: key,
+      isReferencedInTx: async () => false,
+    });
+    assert.equal(fenceRes.status, 'fenced');
+
+    // 2. Advance clock far past 60s stale window -> writers MUST STILL be blocked (zero timer-based resurrection!)
+    clock += 120_000;
+    await assert.rejects(
+      () =>
+        recoveryCoordinator.executeCoordinatedWrite({
+          payload: { images: [url] },
+          executeInTx: async (tx) => {
+            await tx.productImage.create({ data: { productId: 'p-blocked', url } });
+          },
+        }),
+      (err: any) => err instanceof MediaConflictError && err.statusCode === 409 && err.code === 'MEDIA_OBJECT_DELETING'
+    );
+
+    // 3. Reconciler runs while R2 is STILL failing -> key moves to UNCERTAIN and stays blocked (NEVER unblocked!)
+    const reconcile1 = await recoveryService.reconcileUncertainDeletingKeys();
+    assert.equal(reconcile1.reconciledRetiredKeys.length, 0);
+    assert.equal(reconcile1.stillUncertainKeys.length, 1);
+
+    const snapAfterFail = await recoveryCoordinator.getCoordinationSnapshot();
+    assert.equal(snapAfterFail.state.deletingKeys[compositeKey]?.status, 'UNCERTAIN');
+
+    await assert.rejects(
+      () =>
+        recoveryCoordinator.executeCoordinatedWrite({
+          payload: { images: [url] },
+          executeInTx: async () => {},
+        }),
+      (err: any) => err instanceof MediaConflictError && err.code === 'MEDIA_OBJECT_DELETING'
+    );
+
+    // 4. R2 recovers -> reconciler runs again, completes delete, verifies fileExists === false, and permanently retires K!
+    r2Outage = false;
+    clock += 120_000;
+    const reconcile2 = await recoveryService.reconcileUncertainDeletingKeys();
+    assert.deepEqual(reconcile2.reconciledRetiredKeys, [key]);
+    assert.equal(reconcile2.stillUncertainKeys.length, 0);
+    assert.equal(objects.has(key), false);
+    assert.ok(db.websiteSettings.has(toRetiredTombstoneKey(compositeKey)));
+
+    // 5. Writer is now permanently rejected with 409 MEDIA_OBJECT_RETIRED
+    await assert.rejects(
+      () =>
+        recoveryCoordinator.executeCoordinatedWrite({
+          payload: { images: [url] },
+          executeInTx: async () => {},
+        }),
+      (err: any) => err instanceof MediaConflictError && err.code === 'MEDIA_OBJECT_RETIRED'
+    );
+  } finally {
+    tmp.cleanup();
+  }
+});
+
+test('MySQL Outage Policy: cleanup & media-bearing writes fail closed (503), pure non-media writes proceed, and checkout strips unverified managed OrderItem.image to null', async () => {
+  const db = createMockInnoDbMySql();
+  const r2 = createMockR2Adapter();
+  const tmp = makeTempFile('mysql-outage-policy');
+
+  const key = 'cms-outage-protected.webp';
+  const managedUrl = r2.adapter.getFileUrl(key);
+  const staticUrl = '/assets/toriwear-official-logo.png';
+  r2.objects.set(key, Buffer.from('protected'));
+
+  const coordinator = new MediaWriteCoordinator({
+    prismaProvider: () => db.prisma,
+    storageAdapterProvider: () => r2.adapter,
+  });
+  const service = new MediaCleanupService({
+    storageAdapterProvider: () => r2.adapter,
+    stateStore: new DurableMediaStateStore({
+      runtimeFilePath: tmp.filePath,
+      mysqlBackend: createPrismaMySqlMediaStateBackend(() => db.prisma),
+    }),
+    coordinator,
+    cleanupCooldownMs: 0,
+    referenceProviders: createEmptyRefs({ getPrismaClient: () => db.prisma }),
+  });
+
+  // Simulate MySQL outage!
+  db.setOnline(false);
+
+  try {
+    // 1. Cleanup MUST fail closed with zero storage deletions
+    const cleanupReport = await service.cleanupUnreferencedMedia([managedUrl], { reason: 'outage-sweep' });
+    assert.equal(cleanupReport.abortedFailClosed, true);
+    assert.deepEqual(cleanupReport.deletedKeys, []);
+    assert.equal(r2.deleteCalls.length, 0);
+    assert.equal(r2.objects.has(key), true);
+
+    // 2. Media-bearing admin write MUST fail closed with 503 MEDIA_COORDINATION_UNAVAILABLE
+    await assert.rejects(
+      () =>
+        coordinator.executeCoordinatedWrite({
+          payload: { name: 'Hoodie', images: [managedUrl] },
+          executeInTx: async () => 'must-not-run',
+        }),
+      (err: any) =>
+        err instanceof MediaCoordinationUnavailableError &&
+        err.statusCode === 503 &&
+        err.code === 'MEDIA_COORDINATION_UNAVAILABLE'
+    );
+
+    // 3. Editor media lease for managed URL MUST fail closed with 503 MEDIA_COORDINATION_UNAVAILABLE
+    await assert.rejects(
+      () =>
+        service.upsertEditorMediaLease({
+          sessionId: 'sess-outage',
+          ownerId: 'admin-1',
+          urls: [managedUrl],
+        }),
+      (err: any) => err instanceof MediaCoordinationUnavailableError && err.statusCode === 503
+    );
+
+    // 4. Pure non-media write (0 managed keys) proceeds non-fatally even during coordination outage!
+    let nonMediaRan = false;
+    const nonMediaRes = await coordinator.executeCoordinatedWrite({
+      payload: { codFee: 99, logoUrl: staticUrl },
+      executeInTx: async () => {
+        nonMediaRan = true;
+        return 'non-media-ok';
+      },
+    });
+    assert.equal(nonMediaRan, true);
+    assert.equal(nonMediaRes, 'non-media-ok');
+
+    // 5. Checkout resilience: when a managed OrderItem.image is blocked (e.g. permanently retired or coordination unavailable),
+    //    OrderRepository.create strips the unsafe managed OrderItem.image to null while preserving static URLs and completing checkout!
+    db.setOnline(true);
+    // Permanently retire a local-managed image using the default local storage adapter so OrderRepository hits real conflict
+    const localUrl = '/generated-assets/cms-checkout-retired.webp';
+    const localComposite = buildMediaCompositeKey('local', 'cms-checkout-retired.webp');
+    const localTombstoneKey = toRetiredTombstoneKey(localComposite);
+    db.websiteSettings.set(localTombstoneKey, {
+      id: 'ret-checkout',
+      key: localTombstoneKey,
+      value: JSON.stringify({
+        compositeKey: localComposite,
+        provider: 'local',
+        storageKey: 'cms-checkout-retired.webp',
+        retiredAt: Date.now(),
+        workerId: 'test',
+        reason: 'retired',
+      }),
+      group: MEDIA_TOMBSTONE_MYSQL_GROUP,
+      description: 'rev:1:0000000000000001',
+      isPublic: false,
+      updatedAt: new Date(),
+    });
+
+    setPrismaClientOverrideForTests(db.prisma);
+    const orderRepo = new OrderRepository();
+    const orderInput: OrderRecord = {
+      id: `ord-test-${Date.now()}`,
+      orderNumber: `TW-TEST-${Date.now()}`,
+      customerName: 'Preview Tester',
+      customerEmail: 'preview@toriwear.test',
+      customerPhone: '9999999999',
+      subtotal: 1999,
+      discount: 0,
+      tax: 0,
+      shippingFee: 0,
+      total: 1999,
+      currency: 'INR',
+      paymentMethod: 'COD',
+      paymentStatus: 'PENDING',
+      fulfillmentStatus: 'CONFIRMED',
+      shippingAddress: {
+        fullName: 'Preview Tester',
+        phone: '9999999999',
+        email: 'preview@toriwear.test',
+        addressLine1: '123 Test Street',
+        city: 'Mumbai',
+        state: 'MH',
+        pincode: '400001',
+      },
+      items: [
+        {
+          id: 'item-1',
+          productId: 'p1',
+          productName: 'Retired Image Tee',
+          variantId: 'v1',
+          sku: 'SKU-1',
+          size: 'L',
+          color: 'Black',
+          unitPrice: 1199,
+          quantity: 1,
+          totalPrice: 1199,
+          image: localUrl, // Managed & permanently retired -> MUST be stripped to empty/null!
+        },
+        {
+          id: 'item-2',
+          productId: 'p2',
+          productName: 'Static Logo Tee',
+          variantId: 'v2',
+          sku: 'SKU-2',
+          size: 'M',
+          color: 'White',
+          unitPrice: 800,
+          quantity: 1,
+          totalPrice: 800,
+          image: staticUrl, // Unmanaged static asset -> MUST be preserved!
+        },
+      ],
+      timeline: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const createdOrder = await orderRepo.create(orderInput);
+    assert.equal(createdOrder.id, orderInput.id);
+    const persisted = db.orders.get(orderInput.id);
+    assert.ok(persisted, 'Order must be committed even when managed item image is retired');
+    assert.equal(persisted!.items[0].image, null, 'Blocked managed OrderItem.image must be stripped to null');
+    assert.equal(persisted!.items[1].image, staticUrl, 'Unmanaged static OrderItem.image must be preserved');
+  } finally {
+    setPrismaClientOverrideForTests(null);
+    tmp.cleanup();
+  }
+});
+
+test('Strict Payload Enumeration: fails closed (400 MEDIA_ENUMERATION_INCOMPLETE) on opaque/over-depth payloads and extracts nested JSON + HTML URLs', async () => {
+  const r2 = createMockR2Adapter();
+  const urlA = r2.adapter.getFileUrl('nested-json-hero.webp');
+  const urlB = r2.adapter.getFileUrl('html-banner.webp');
+
+  // 1. Nested JSON string & HTML attribute URLs are extracted completely
+  const nestedPayload = {
+    cmsBlob: JSON.stringify({
+      hero: { bg: urlA },
+      richText: `<section><img src="${urlB}" alt="hero" /></section>`,
+    }),
+  };
+  const extracted = extractManagedKeysStrict(nestedPayload, r2.adapter);
+  assert.equal(extracted.complete, true);
+  assert.deepEqual(extracted.storageKeys, ['html-banner.webp', 'nested-json-hero.webp']);
+
+  // 2. Opaque binary payload fails closed -> complete === false
+  const binaryCheck = extractManagedKeysStrict({ blob: Buffer.from('raw-bytes') }, r2.adapter);
+  assert.equal(binaryCheck.complete, false);
+
+  // 3. Over-depth payload fails closed -> 400 MEDIA_ENUMERATION_INCOMPLETE inside executeCoordinatedWrite
+  let deep: any = { url: urlA };
+  for (let i = 0; i < 40; i++) {
+    deep = { child: deep };
+  }
+  const coordinator = new MediaWriteCoordinator({
+    prismaProvider: () => null,
+    storageAdapterProvider: () => r2.adapter,
+  });
+  await assert.rejects(
+    () =>
+      coordinator.executeCoordinatedWrite({
+        payload: deep,
+        executeInTx: async () => 'must-not-run',
+      }),
+    (err: any) =>
+      err instanceof MediaEnumerationIncompleteError &&
+      err.statusCode === 400 &&
+      err.code === 'MEDIA_ENUMERATION_INCOMPLETE'
+  );
+});
+
+test('Rapid Same-Millisecond Concurrent Updates: InnoDB FOR UPDATE + unique description revision tokens never collide or lose entries when clock is frozen', async () => {
+  const db = createMockInnoDbMySql();
+  const r2 = createMockR2Adapter();
+  const tmpA = makeTempFile('same-ms-A');
+  const tmpB = makeTempFile('same-ms-B');
+  const frozenClock = 55_555_555; // Exact same millisecond across all concurrent workers!
+
+  try {
+    const storeA = new DurableMediaStateStore({
+      runtimeFilePath: tmpA.filePath,
+      mysqlBackend: createPrismaMySqlMediaStateBackend(() => db.prisma),
+      instanceId: 'worker-A',
+      now: () => frozenClock,
+    });
+    const storeB = new DurableMediaStateStore({
+      runtimeFilePath: tmpB.filePath,
+      mysqlBackend: createPrismaMySqlMediaStateBackend(() => db.prisma),
+      instanceId: 'worker-B',
+      now: () => frozenClock,
+    });
+    const serviceA = new MediaCleanupService({
+      storageAdapterProvider: () => r2.adapter,
+      stateStore: storeA,
+      coordinator: new MediaWriteCoordinator({
+        workerId: 'worker-A',
+        prismaProvider: () => db.prisma,
+        storageAdapterProvider: () => r2.adapter,
+        now: () => frozenClock,
+      }),
+      now: () => frozenClock,
+      referenceProviders: createEmptyRefs({ getPrismaClient: () => db.prisma }),
+    });
+    const serviceB = new MediaCleanupService({
+      storageAdapterProvider: () => r2.adapter,
+      stateStore: storeB,
+      coordinator: new MediaWriteCoordinator({
+        workerId: 'worker-B',
+        prismaProvider: () => db.prisma,
+        storageAdapterProvider: () => r2.adapter,
+        now: () => frozenClock,
+      }),
+      now: () => frozenClock,
+      referenceProviders: createEmptyRefs({ getPrismaClient: () => db.prisma }),
+    });
+
+    // Fire 10 concurrent mutations from 2 distinct worker instances at the exact same millisecond timestamp
+    await Promise.all([
+      ...Array.from({ length: 5 }, (_, i) =>
+        serviceA.registerPendingUpload({
+          provider: 'r2',
+          storageKey: `same-ms-a-${i}.webp`,
+          url: r2.adapter.getFileUrl(`same-ms-a-${i}.webp`),
+          ownerId: 'admin-A',
+        })
+      ),
+      ...Array.from({ length: 5 }, (_, i) =>
+        serviceB.registerPendingUpload({
+          provider: 'r2',
+          storageKey: `same-ms-b-${i}.webp`,
+          url: r2.adapter.getFileUrl(`same-ms-b-${i}.webp`),
+          ownerId: 'admin-B',
+        })
+      ),
+    ]);
+
+    // Verify zero entries lost and unique rev:<version>:<hex-nonce> token persisted in WebsiteSetting.description
+    const wsRow = db.websiteSettings.get(MEDIA_CLEANUP_MYSQL_KEY);
+    assert.ok(wsRow);
+    assert.match(String(wsRow!.description || ''), /^rev:\d+:[0-9a-f]{16}$/);
+
+    const finalState = JSON.parse(wsRow!.value);
+    assert.equal(Object.keys(finalState.pendingUploads).length, 10);
+  } finally {
+    tmpA.cleanup();
+    tmpB.cleanup();
+  }
+});
+
+test('Gap 1 TOCTOU Verification: concurrent write beginning during awaited storage.fileExists() is caught by Gate 5 authoritative audit before delete', async () => {
+  const db = createMockInnoDbMySql();
+  const r2 = createMockR2Adapter();
+  const tmp = makeTempFile('gap1-fileexists-toctou');
+
+  try {
+    const key = 'cms-gap1-race.webp';
+    const url = r2.adapter.getFileUrl(key);
+    r2.objects.set(key, Buffer.from('gap1-img'));
+
+    const writerCoordinator = new MediaWriteCoordinator({
+      workerId: 'writer-worker',
+      prismaProvider: () => db.prisma,
+      storageAdapterProvider: () => r2.adapter,
+    });
+    const cleanupCoordinator = new MediaWriteCoordinator({
+      workerId: 'cleanup-worker',
+      prismaProvider: () => db.prisma,
+      storageAdapterProvider: () => r2.adapter,
+    });
+
+    let raceTriggered = false;
+    // Wrap r2.adapter.fileExists to simulate a concurrent worker saving a product reference
+    // right during the awaited network round-trip of storage.fileExists()!
+    const racingAdapter: typeof r2.adapter = Object.create(r2.adapter);
+    racingAdapter.fileExists = async (storageKey: string) => {
+      const exists = await r2.adapter.fileExists(storageKey);
+      if (!raceTriggered && storageKey === key) {
+        raceTriggered = true;
+        await writerCoordinator.executeCoordinatedWrite({
+          payload: { images: [url] },
+          executeInTx: async (tx) => {
+            await tx.productImage.create({ data: { productId: 'prod-during-head', url } });
+          },
+        });
+      }
+      return exists;
+    };
+
+    const cleanupService = new MediaCleanupService({
+      storageAdapterProvider: () => racingAdapter,
+      stateStore: new DurableMediaStateStore({
+        runtimeFilePath: tmp.filePath,
+        mysqlBackend: createPrismaMySqlMediaStateBackend(() => db.prisma),
+      }),
+      coordinator: cleanupCoordinator,
+      cleanupCooldownMs: 0,
+      referenceProviders: createEmptyRefs({ getPrismaClient: () => db.prisma }),
+    });
+
+    const report = await cleanupService.cleanupUnreferencedMedia([url], { reason: 'gap1-test' });
+    assert.equal(raceTriggered, true);
+    assert.deepEqual(report.deletedKeys, []);
+    assert.deepEqual(report.preservedReferencedKeys, [key]);
+    assert.equal(r2.deleteCalls.length, 0);
+    assert.equal(r2.objects.has(key), true);
+  } finally {
+    tmp.cleanup();
+  }
+});
+

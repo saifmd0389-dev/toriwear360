@@ -13,7 +13,8 @@
  * - Restart-safe dual-backed persistence via DurableMediaStateStore (MySQL WebsiteSetting CAS + atomic runtime JSON).
  */
 
-import { getPrismaClient } from '../../db/prisma';
+import path from 'path';
+import { getPrismaClient, getRawPrismaClient } from '../../db/prisma';
 import { productRepository } from '../../repositories/productRepository';
 import { cmsRepository } from '../../repositories/cmsRepository';
 import { orderRepository } from '../../repositories/orderRepository';
@@ -31,6 +32,17 @@ import {
   type EditorMediaLeaseRecord,
   type PendingUploadRecord,
 } from './durableMediaStateStore';
+import {
+  DEFAULT_FENCE_HEARTBEAT_STALE_MS,
+  MEDIA_COORDINATION_MYSQL_KEY,
+  MEDIA_RETIRED_KEY_PREFIX,
+  MEDIA_TOMBSTONE_MYSQL_GROUP,
+  MediaWriteCoordinator,
+  isInternalMediaSettingRow,
+  isMediaCoordinationError,
+  mediaWriteCoordinator,
+  type DeletingKeyFence,
+} from './mediaCoordination';
 
 export const DEFAULT_PENDING_UPLOAD_TTL_MS = 60 * 60 * 1000; // 60 minutes
 export const DEFAULT_CLEANUP_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
@@ -67,11 +79,13 @@ export interface MediaCleanupReport {
 export interface MediaCleanupServiceOptions {
   storageAdapterProvider?: () => StorageAdapter;
   stateStore?: DurableMediaStateStore;
+  coordinator?: MediaWriteCoordinator;
   referenceProviders?: Partial<MediaReferenceProviders>;
   pendingUploadTtlMs?: number;
   cleanupCooldownMs?: number;
   claimTtlMs?: number;
   editorLeaseTtlMs?: number;
+  fenceHeartbeatStaleMs?: number;
   sweepIntervalMs?: number;
   startupSweepDelayMs?: number;
   dryRun?: boolean;
@@ -125,7 +139,7 @@ export function extractAllMediaUrlsFromValue(value: unknown, out: Set<string>, d
 
   if (typeof value === 'object') {
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (k === MEDIA_CLEANUP_MYSQL_KEY || k === MEDIA_CLEANUP_MYSQL_GROUP) {
+      if (isInternalMediaSettingRow(k, k)) {
         continue;
       }
       extractAllMediaUrlsFromValue(v, out, depth + 1);
@@ -136,17 +150,19 @@ export function extractAllMediaUrlsFromValue(value: unknown, out: Set<string>, d
 export class MediaCleanupService {
   private readonly getStorage: () => StorageAdapter;
   private readonly stateStore: DurableMediaStateStore;
+  private readonly coordinator: MediaWriteCoordinator;
   private readonly refs: MediaReferenceProviders;
   private readonly now: () => number;
   private readonly pendingUploadTtlMsOverride?: number;
   private readonly cleanupCooldownMsOverride?: number;
   private readonly claimTtlMsOverride?: number;
   private readonly editorLeaseTtlMsOverride?: number;
+  private readonly fenceHeartbeatStaleMs: number;
   private readonly sweepIntervalMs: number;
   private readonly startupSweepDelayMs: number;
   private readonly dryRunOverride?: boolean;
 
-  // Write-Epoch Barrier & TOCTOU coordination
+  // In-process Write-Epoch Barrier (additional local TOCTOU guard alongside InnoDB/RWLock)
   private inFlightWriteCount = 0;
   private mediaReferenceEpoch = 0;
   private writeSettleWaiters: Array<() => void> = [];
@@ -165,6 +181,7 @@ export class MediaCleanupService {
     this.cleanupCooldownMsOverride = options?.cleanupCooldownMs;
     this.claimTtlMsOverride = options?.claimTtlMs;
     this.editorLeaseTtlMsOverride = options?.editorLeaseTtlMs;
+    this.fenceHeartbeatStaleMs = options?.fenceHeartbeatStaleMs ?? DEFAULT_FENCE_HEARTBEAT_STALE_MS;
     this.sweepIntervalMs =
       options?.sweepIntervalMs ?? parseEnvPositiveMs('MEDIA_CLEANUP_SWEEP_INTERVAL_MS', DEFAULT_SWEEP_INTERVAL_MS);
     this.startupSweepDelayMs =
@@ -184,10 +201,30 @@ export class MediaCleanupService {
           ? options.referenceProviders.getPrismaClient
           : () => getPrismaClient(),
     };
+
+    if (options?.coordinator) {
+      this.coordinator = options.coordinator;
+    } else if (options?.stateStore || options?.storageAdapterProvider || options?.referenceProviders?.getPrismaClient) {
+      const baseDir = path.dirname(this.stateStore.getRuntimeFilePath());
+      this.coordinator = new MediaWriteCoordinator({
+        prismaProvider: this.refs.getPrismaClient || (() => getRawPrismaClient()),
+        storageAdapterProvider: this.getStorage,
+        localCoordinationFilePath: path.join(baseDir, 'media_write_coordination.json'),
+        localRetiredFilePath: path.join(baseDir, 'media_retired_keys.json'),
+        workerId: this.stateStore.instanceId,
+        now: this.now,
+      });
+    } else {
+      this.coordinator = mediaWriteCoordinator;
+    }
   }
 
   public getStateStore(): DurableMediaStateStore {
     return this.stateStore;
+  }
+
+  public getCoordinator(): MediaWriteCoordinator {
+    return this.coordinator;
   }
 
   public getPendingUploadTtlMs(): number {
@@ -301,14 +338,20 @@ export class MediaCleanupService {
     storageKey?: string;
     provider?: StorageProviderName;
   }): Promise<PendingUploadRecord | null> {
+    const storage = this.getStorage();
+    const resolvedKey = params.storageKey || storage.resolveManagedStorageKey(params.url);
+    if (!resolvedKey) return null;
+
+    const provider = params.provider || storage.providerName;
+    const compositeKey = buildMediaCompositeKey(provider, resolvedKey);
+
+    // PERMANENT RETIREMENT ENFORCEMENT:
+    // Never clear a retired tombstone and never allow reuse of a deleting or retired storage key.
+    await this.coordinator.assertKeysNotRetiredOrDeleting([compositeKey], {
+      codeOnRetired: 'MEDIA_KEY_PERMANENTLY_RETIRED',
+    });
+
     try {
-      const storage = this.getStorage();
-      const resolvedKey = params.storageKey || storage.resolveManagedStorageKey(params.url);
-      if (!resolvedKey) return null;
-
-      const provider = params.provider || storage.providerName;
-      const compositeKey = buildMediaCompositeKey(provider, resolvedKey);
-
       return await this.stateStore.mutate((draft, nowMs) => {
         const existing = draft.pendingUploads[compositeKey];
         const prevTombstone = draft.tombstones[buildPendingTombstoneKey(compositeKey)];
@@ -330,6 +373,7 @@ export class MediaCleanupService {
         return { result: record, changed: true };
       });
     } catch (err: any) {
+      if (isMediaCoordinationError(err)) throw err;
       console.warn('[MEDIA-CLEANUP] Failed to register pending upload (non-fatal):', err?.message || err);
       return null;
     }
@@ -403,46 +447,53 @@ export class MediaCleanupService {
     const cleanOwnerId = String(params.ownerId || '').trim();
     if (!cleanSessionId || !cleanOwnerId) return null;
 
-    try {
-      const storage = this.getStorage();
-      const managedKeys = new Set<string>();
-      const cleanUrls = new Set<string>();
-      for (const rawUrl of Array.isArray(params.urls) ? params.urls : []) {
-        if (typeof rawUrl !== 'string' || !rawUrl.trim()) continue;
-        const resolved = storage.resolveManagedStorageKey(rawUrl);
-        if (resolved) {
-          managedKeys.add(resolved);
-          cleanUrls.add(rawUrl.trim());
-        }
+    const storage = this.getStorage();
+    const managedKeys = new Set<string>();
+    const cleanUrls = new Set<string>();
+    for (const rawUrl of Array.isArray(params.urls) ? params.urls : []) {
+      if (typeof rawUrl !== 'string' || !rawUrl.trim()) continue;
+      const resolved = storage.resolveManagedStorageKey(rawUrl);
+      if (resolved) {
+        managedKeys.add(resolved);
+        cleanUrls.add(rawUrl.trim());
       }
-
-      const ttlMs = Math.max(10_000, params.ttlMs ?? this.getEditorLeaseTtlMs());
-      const leaseKey = buildLeaseKey(cleanOwnerId, cleanSessionId);
-
-      return await this.stateStore.mutate((draft, nowMs) => {
-        const existing = draft.editorLeases[leaseKey];
-        const prevTombstone = draft.tombstones[buildLeaseTombstoneKey(leaseKey)];
-        const nextRev = Math.max(existing?.revision ?? 0, prevTombstone?.revision ?? 0) + 1;
-
-        const record: EditorMediaLeaseRecord = {
-          leaseKey,
-          ownerId: cleanOwnerId,
-          sessionId: cleanSessionId,
-          entityId: params.entityId ? String(params.entityId).trim() : existing?.entityId,
-          storageKeys: Array.from(managedKeys),
-          urls: Array.from(cleanUrls),
-          expiresAt: nowMs + ttlMs,
-          createdAt: existing ? Math.min(existing.createdAt, nowMs) : nowMs,
-          updatedAt: nowMs,
-          revision: nextRev,
-        };
-        draft.editorLeases[leaseKey] = record;
-        return { result: record, changed: true };
-      });
-    } catch (err: any) {
-      console.warn('[MEDIA-CLEANUP] Failed to upsert editor media lease (non-fatal):', err?.message || err);
-      return null;
     }
+
+    const ttlMs = Math.max(10_000, params.ttlMs ?? this.getEditorLeaseTtlMs());
+    const leaseKey = buildLeaseKey(cleanOwnerId, cleanSessionId);
+
+    const buildMutation = (draft: any, nowMs: number) => {
+      const existing = draft.editorLeases[leaseKey];
+      const prevTombstone = draft.tombstones[buildLeaseTombstoneKey(leaseKey)];
+      const nextRev = Math.max(existing?.revision ?? 0, prevTombstone?.revision ?? 0) + 1;
+
+      const record: EditorMediaLeaseRecord = {
+        leaseKey,
+        ownerId: cleanOwnerId,
+        sessionId: cleanSessionId,
+        entityId: params.entityId ? String(params.entityId).trim() : existing?.entityId,
+        storageKeys: Array.from(managedKeys),
+        urls: Array.from(cleanUrls),
+        expiresAt: nowMs + ttlMs,
+        createdAt: existing ? Math.min(existing.createdAt, nowMs) : nowMs,
+        updatedAt: nowMs,
+        revision: nextRev,
+      };
+      draft.editorLeases[leaseKey] = record;
+      return { result: record, changed: true };
+    };
+
+    // Participate in the single-transaction InnoDB shared-lock coordination protocol
+    // so editor leases can never attach to a deleting or permanently retired object.
+    return this.coordinator.executeCoordinatedWrite({
+      payload: Array.from(cleanUrls),
+      executeInTx: async (tx) => {
+        if (tx) {
+          return this.stateStore.mutateInsideMySqlTx(tx, buildMutation);
+        }
+        return this.stateStore.mutate(buildMutation);
+      },
+    });
   }
 
   public async releaseEditorMediaLease(params: { sessionId: string; ownerId: string }): Promise<boolean> {
@@ -668,14 +719,17 @@ export class MediaCleanupService {
           prismaClient.websiteSetting
             .findMany({
               where: {
-                key: { not: MEDIA_CLEANUP_MYSQL_KEY },
-                group: { not: MEDIA_CLEANUP_MYSQL_GROUP },
+                key: {
+                  notIn: [MEDIA_CLEANUP_MYSQL_KEY, MEDIA_COORDINATION_MYSQL_KEY],
+                  not: { startsWith: MEDIA_RETIRED_KEY_PREFIX },
+                },
+                group: { notIn: [MEDIA_CLEANUP_MYSQL_GROUP, MEDIA_TOMBSTONE_MYSQL_GROUP] },
               },
               select: { key: true, group: true, value: true },
             })
             .then((rows: Array<{ key?: string; group?: string; value?: string | null }>) => {
               for (const row of rows || []) {
-                if (!row || row.key === MEDIA_CLEANUP_MYSQL_KEY || row.group === MEDIA_CLEANUP_MYSQL_GROUP) {
+                if (!row || isInternalMediaSettingRow(row.key, row.group)) {
                   continue;
                 }
                 if (!row.value) continue;
@@ -703,6 +757,211 @@ export class MediaCleanupService {
     }
 
     return referencedKeys;
+  }
+
+  /**
+   * Authoritative, fail-closed reference audit executed INSIDE the Gate 5 exclusive lock (`Tx_C`).
+   * - When `tx` is a live MySQL Prisma transaction (under READ COMMITTED while holding `FOR UPDATE`
+   *   on `media_write_coordination_v1`), reads committed MySQL entity rows and `media_cleanup_state_v1`
+   *   editor leases directly through `tx` (plus repository sources for complete coverage).
+   * - When `tx` is `null` (single-process Preview JSON mode under exclusive AsyncRWLock), runs the
+   *   complete cross-entity reference audit.
+   */
+  private async isStorageKeyReferencedAuthoritativeInTx(
+    tx: any | null,
+    storage: StorageAdapter,
+    storageKey: string,
+    excludeLeaseSessionId?: string
+  ): Promise<boolean> {
+    if (!tx) {
+      const refs = await this.collectActiveReferencedStorageKeys(storage, { excludeLeaseSessionId });
+      return refs.has(storageKey);
+    }
+
+    const rawUrls = new Set<string>();
+    const nowMs = this.now();
+
+    // 1. Authoritative in-tx check of active editor leases (LOCK IN SHARE MODE on media_cleanup_state_v1)
+    const txStateSnapshot = await this.stateStore.readSnapshotInsideMySqlTx(tx);
+    for (const lease of Object.values(txStateSnapshot.editorLeases || {})) {
+      if (!lease || lease.expiresAt <= nowMs) continue;
+      if (excludeLeaseSessionId && lease.sessionId === excludeLeaseSessionId) continue;
+      if ((lease.storageKeys || []).includes(storageKey)) {
+        return true;
+      }
+      for (const url of lease.urls || []) {
+        if (storage.resolveManagedStorageKey(url) === storageKey) {
+          return true;
+        }
+      }
+    }
+
+    // 2. Authoritative in-tx checks across all MySQL entity tables (fail-closed: any error aborts Tx_C!)
+    const queries: Array<Promise<void>> = [];
+
+    if (tx.productImage?.findMany) {
+      queries.push(
+        tx.productImage.findMany({ select: { url: true } }).then((rows: Array<{ url?: string | null }>) => {
+          for (const row of rows || []) {
+            if (row?.url) rawUrls.add(row.url);
+          }
+        })
+      );
+    }
+    if (tx.category?.findMany) {
+      queries.push(
+        tx.category
+          .findMany({ select: { image: true, bannerImage: true } })
+          .then((rows: Array<{ image?: string | null; bannerImage?: string | null }>) => {
+            for (const row of rows || []) {
+              if (row?.image) rawUrls.add(row.image);
+              if (row?.bannerImage) rawUrls.add(row.bannerImage);
+            }
+          })
+      );
+    }
+    if (tx.subcategory?.findMany) {
+      queries.push(
+        tx.subcategory.findMany({ select: { image: true } }).then((rows: Array<{ image?: string | null }>) => {
+          for (const row of rows || []) {
+            if (row?.image) rawUrls.add(row.image);
+          }
+        })
+      );
+    }
+    if (tx.collection?.findMany) {
+      queries.push(
+        tx.collection
+          .findMany({ select: { bannerImage: true, heroImage: true } })
+          .then((rows: Array<{ bannerImage?: string | null; heroImage?: string | null }>) => {
+            for (const row of rows || []) {
+              if (row?.bannerImage) rawUrls.add(row.bannerImage);
+              if (row?.heroImage) rawUrls.add(row.heroImage);
+            }
+          })
+      );
+    }
+    if (tx.orderItem?.findMany) {
+      queries.push(
+        tx.orderItem.findMany({ select: { image: true } }).then((rows: Array<{ image?: string | null }>) => {
+          for (const row of rows || []) {
+            if (row?.image) rawUrls.add(row.image);
+          }
+        })
+      );
+    }
+    if (tx.banner?.findMany) {
+      queries.push(
+        tx.banner
+          .findMany({ select: { imageUrl: true, mobileImageUrl: true } })
+          .then((rows: Array<{ imageUrl?: string | null; mobileImageUrl?: string | null }>) => {
+            for (const row of rows || []) {
+              if (row?.imageUrl) rawUrls.add(row.imageUrl);
+              if (row?.mobileImageUrl) rawUrls.add(row.mobileImageUrl);
+            }
+          })
+      );
+    }
+    if (tx.websiteBanner?.findMany) {
+      queries.push(
+        tx.websiteBanner
+          .findMany({ select: { bgImageUrl: true } })
+          .then((rows: Array<{ bgImageUrl?: string | null }>) => {
+            for (const row of rows || []) {
+              if (row?.bgImageUrl) rawUrls.add(row.bgImageUrl);
+            }
+          })
+      );
+    }
+    if (tx.homepageSection?.findMany) {
+      queries.push(
+        tx.homepageSection
+          .findMany({ select: { configJson: true } })
+          .then((rows: Array<{ configJson?: string | null }>) => {
+            for (const row of rows || []) {
+              if (!row?.configJson) continue;
+              try {
+                extractAllMediaUrlsFromValue(JSON.parse(row.configJson), rawUrls);
+              } catch {
+                extractAllMediaUrlsFromValue(row.configJson, rawUrls);
+              }
+            }
+          })
+      );
+    }
+    if (tx.websiteSetting?.findMany) {
+      queries.push(
+        tx.websiteSetting
+          .findMany({
+            where: {
+              key: {
+                notIn: [MEDIA_CLEANUP_MYSQL_KEY, MEDIA_COORDINATION_MYSQL_KEY],
+                not: { startsWith: MEDIA_RETIRED_KEY_PREFIX },
+              },
+              group: { notIn: [MEDIA_CLEANUP_MYSQL_GROUP, MEDIA_TOMBSTONE_MYSQL_GROUP] },
+            },
+            select: { key: true, group: true, value: true },
+          })
+          .then((rows: Array<{ key?: string; group?: string; value?: string | null }>) => {
+            for (const row of rows || []) {
+              if (!row || isInternalMediaSettingRow(row.key, row.group)) continue;
+              if (!row.value) continue;
+              try {
+                extractAllMediaUrlsFromValue(JSON.parse(row.value), rawUrls);
+              } catch {
+                extractAllMediaUrlsFromValue(row.value, rawUrls);
+              }
+            }
+          })
+      );
+    }
+
+    if (queries.length > 0) {
+      await Promise.all(queries);
+    }
+
+    for (const url of rawUrls) {
+      if (storage.resolveManagedStorageKey(url) === storageKey) {
+        return true;
+      }
+    }
+
+    // 3. Also check local repository reference providers (covers JSON-only collections/settings)
+    const [products, categories, collections, frontPageCms, storeSettings, orders] = await Promise.all([
+      this.refs.getAllProducts(),
+      this.refs.getAllCategories(),
+      this.refs.getAllCollections(),
+      this.refs.getFrontPageCms(),
+      this.refs.getStoreSettings(),
+      this.refs.getAllOrders(),
+    ]);
+    const repoUrls = new Set<string>();
+    for (const p of products || []) {
+      for (const img of p?.images || []) if (typeof img === 'string') repoUrls.add(img);
+      for (const v of p?.variants || []) if (typeof v?.image === 'string') repoUrls.add(v.image);
+    }
+    for (const cat of categories || []) {
+      if (typeof cat?.image === 'string') repoUrls.add(cat.image);
+      if (typeof cat?.bannerImage === 'string') repoUrls.add(cat.bannerImage);
+      for (const sub of cat?.subcategories || []) if (typeof sub?.image === 'string') repoUrls.add(sub.image);
+    }
+    for (const col of collections || []) {
+      if (typeof col?.bannerImage === 'string') repoUrls.add(col.bannerImage);
+      if (typeof col?.heroImage === 'string') repoUrls.add(col.heroImage);
+      if (typeof col?.image === 'string') repoUrls.add(col.image);
+    }
+    extractAllMediaUrlsFromValue(frontPageCms, repoUrls);
+    extractAllMediaUrlsFromValue(storeSettings, repoUrls);
+    for (const order of orders || []) {
+      for (const item of order?.items || []) if (typeof item?.image === 'string') repoUrls.add(item.image);
+    }
+    for (const url of repoUrls) {
+      if (storage.resolveManagedStorageKey(url) === storageKey) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   // ==========================================================================
@@ -1025,7 +1284,32 @@ export class MediaCleanupService {
               return;
             }
 
-            // Gate 4: TOCTOU Double-Check Gate immediately before deletion
+            // Gate 4: Fast-path existence check BEFORE acquiring exclusive Gate 5 lock (eliminates TOCTOU gap)
+            // + in-process Write-Epoch Double-Check Gate
+            let existsBeforeGate5: boolean;
+            try {
+              existsBeforeGate5 = await storage.fileExists(storageKey);
+            } catch (existsErr: any) {
+              const errMsg = existsErr?.message || 'Storage existence pre-check failed';
+              report.failedKeys.push({ storageKey, error: errMsg });
+              if (acquiredDeferredClaim) {
+                await this.releaseClaimAndRecordAttempt(compositeKey, {
+                  error: errMsg,
+                  bumpEligibleAtMs: 30_000,
+                });
+              }
+              return;
+            }
+
+            if (!existsBeforeGate5) {
+              report.alreadyAbsentKeys.push(storageKey);
+              await this.completeKeyWithTombstone(compositeKey, 'already-absent', {
+                clearDeferred: options?.clearDeferredOnComplete ?? true,
+                clearPending: options?.clearPendingOnComplete ?? true,
+              });
+              return;
+            }
+
             const postAuditLeased = await this.getActiveLeasedKeys(storage, options?.excludeLeaseSessionId);
             if (
               this.inFlightWriteCount > 0 ||
@@ -1049,7 +1333,7 @@ export class MediaCleanupService {
               return;
             }
 
-            // Gate 5: Dry-run audit OR idempotent storage deletion
+            // Dry-run mode NEVER acquires a destructive deletion fence and NEVER invokes storage.deleteFile()
             if (dryRun) {
               console.log(
                 `[MEDIA-CLEANUP][DRY-RUN] Would delete unreferenced ${storage.providerName} object: ${storageKey} (reason=${options?.reason || 'cleanup'})`
@@ -1064,50 +1348,115 @@ export class MediaCleanupService {
               return;
             }
 
-            try {
-              const exists = await storage.fileExists(storageKey);
-              if (!exists) {
-                report.alreadyAbsentKeys.push(storageKey);
-                await this.completeKeyWithTombstone(compositeKey, 'already-absent', {
-                  clearDeferred: options?.clearDeferredOnComplete ?? true,
-                  clearPending: options?.clearPendingOnComplete ?? true,
-                });
-                return;
-              }
-
-              const deleted = await storage.deleteFile(storageKey);
-              if (deleted) {
-                report.deletedKeys.push(storageKey);
-                await this.completeKeyWithTombstone(compositeKey, options?.reason || 'deleted', {
-                  clearDeferred: options?.clearDeferredOnComplete ?? true,
-                  clearPending: options?.clearPendingOnComplete ?? true,
-                });
-                console.log(
-                  `[MEDIA-CLEANUP] Safely deleted unreferenced ${storage.providerName} object: ${storageKey} (reason=${options?.reason || 'cleanup'})`
+            // Gate 5 (Authoritative Single-Transaction Exclusive Lock Tx_C):
+            // Acquires InnoDB FOR UPDATE (or in-process exclusive RWLock), re-verifies 0 references
+            // inside the transaction, and atomically commits `deletingKeys[compositeKey]` BEFORE storage.deleteFile().
+            const fenceResult = await this.coordinator.acquireDeletionFenceAtomic({
+              provider: storage.providerName,
+              storageKey,
+              isReferencedInTx: async (tx) => {
+                if (this.inFlightWriteCount > 0 || this.mediaReferenceEpoch !== epochBefore) {
+                  return true;
+                }
+                return this.isStorageKeyReferencedAuthoritativeInTx(
+                  tx,
+                  storage,
+                  storageKey,
+                  options?.excludeLeaseSessionId
                 );
+              },
+            });
+
+            if (fenceResult.status === 'coordination-unavailable') {
+              report.abortedFailClosed = true;
+              report.abortReason = fenceResult.error;
+              console.warn(
+                `[MEDIA-CLEANUP] Gate 5 coordination unavailable for ${compositeKey} (fail-closed, zero deletions):`,
+                fenceResult.error
+              );
+              if (acquiredDeferredClaim) {
+                await this.releaseClaimAndRecordAttempt(compositeKey, {
+                  error: fenceResult.error,
+                  bumpEligibleAtMs: 15_000,
+                });
+              }
+              return;
+            }
+
+            if (fenceResult.status === 'referenced') {
+              if (this.inFlightWriteCount > 0 || this.mediaReferenceEpoch !== epochBefore) {
+                report.deferredConflictKeys.push(storageKey);
               } else {
-                // Re-check existence to distinguish idempotent 404 from silent delete failure
-                const stillExists = await storage.fileExists(storageKey);
-                if (!stillExists) {
-                  report.alreadyAbsentKeys.push(storageKey);
-                  await this.completeKeyWithTombstone(compositeKey, 'already-absent', {
-                    clearDeferred: options?.clearDeferredOnComplete ?? true,
-                    clearPending: options?.clearPendingOnComplete ?? true,
-                  });
+                report.preservedReferencedKeys.push(storageKey);
+              }
+              if (acquiredDeferredClaim) {
+                await this.releaseClaimAndRecordAttempt(compositeKey, {
+                  error: 'Referenced during authoritative Gate 5 audit.',
+                  bumpEligibleAtMs: 15_000,
+                });
+              } else if (options?.requeueOnConflict) {
+                await this.enqueueDeferredMediaCleanup([url], {
+                  reason: `${options.reason || 'cleanup'}-gate5-retry`,
+                });
+              }
+              return;
+            }
+
+            if (fenceResult.status === 'already-fenced') {
+              report.skippedClaimedKeys.push(storageKey);
+              return;
+            }
+
+            if (fenceResult.status === 'already-retired') {
+              report.alreadyAbsentKeys.push(storageKey);
+              await this.completeKeyWithTombstone(compositeKey, 'already-retired', {
+                clearDeferred: options?.clearDeferredOnComplete ?? true,
+                clearPending: options?.clearPendingOnComplete ?? true,
+              });
+              return;
+            }
+
+            // Phase 2 (Outside DB lock): Execute idempotent storage delete and verify `fileExists === false`.
+            // Once fenced in `deletingKeys`, key retirement is strictly ONE-WAY (never resurrected for writers!).
+            try {
+              const deleted = await storage.deleteFile(storageKey, { skipExistenceCheck: true });
+              const stillExists = await storage.fileExists(storageKey);
+
+              if (!stillExists) {
+                // Positively verified absent -> atomically transition deletingKeys[K] -> permanent media_retired_v1:<hash>
+                await this.coordinator.finalizeDeletionFenceToPermanentTombstone({
+                  provider: storage.providerName,
+                  storageKey,
+                  reason: deleted ? options?.reason || 'deleted' : 'already-absent',
+                });
+                if (deleted) {
+                  report.deletedKeys.push(storageKey);
+                  console.log(
+                    `[MEDIA-CLEANUP] Safely deleted & permanently retired ${storage.providerName} object: ${storageKey} (reason=${options?.reason || 'cleanup'})`
+                  );
                 } else {
-                  const errMsg = `Storage adapter returned false deleting ${storageKey}.`;
-                  report.failedKeys.push({ storageKey, error: errMsg });
-                  if (acquiredDeferredClaim) {
-                    await this.releaseClaimAndRecordAttempt(compositeKey, {
-                      error: errMsg,
-                      bumpEligibleAtMs: 30_000,
-                    });
-                  }
+                  report.alreadyAbsentKeys.push(storageKey);
+                }
+                await this.completeKeyWithTombstone(compositeKey, deleted ? options?.reason || 'deleted' : 'already-absent', {
+                  clearDeferred: options?.clearDeferredOnComplete ?? true,
+                  clearPending: options?.clearPendingOnComplete ?? true,
+                });
+              } else {
+                // Storage delete failed or object still exists -> mark fence UNCERTAIN (keep writers blocked forever until reconciled!)
+                const errMsg = `Storage object ${storageKey} still exists after delete attempt; fence kept UNCERTAIN for forward reconciliation.`;
+                await this.coordinator.markDeletionFenceUncertain(compositeKey, errMsg);
+                report.failedKeys.push({ storageKey, error: errMsg });
+                if (acquiredDeferredClaim) {
+                  await this.releaseClaimAndRecordAttempt(compositeKey, {
+                    error: errMsg,
+                    bumpEligibleAtMs: 30_000,
+                  });
                 }
               }
             } catch (deleteErr: any) {
               const errMsg = deleteErr?.message || 'Storage deletion error';
-              console.error(`[MEDIA-CLEANUP] Storage delete failed for ${compositeKey} (non-fatal):`, errMsg);
+              console.error(`[MEDIA-CLEANUP] Storage delete failed for ${compositeKey} (fence kept UNCERTAIN):`, errMsg);
+              await this.coordinator.markDeletionFenceUncertain(compositeKey, errMsg);
               report.failedKeys.push({ storageKey, error: errMsg });
               if (acquiredDeferredClaim) {
                 await this.releaseClaimAndRecordAttempt(compositeKey, {
@@ -1282,11 +1631,117 @@ export class MediaCleanupService {
   }
 
   /**
-   * Single-flight combined maintenance pass (reconciles backends, sweeps expired pending uploads,
-   * and processes eligible deferred cleanup queue items).
+   * Forward-completion crash reconciliation for stale `IN_PROGRESS` or `UNCERTAIN` deletion fences.
+   *
+   * Safety Guarantee (NO timer-based resurrection):
+   * - Never unblocks a fenced key back to writers based on `fileExists === true` or elapsed time.
+   * - Re-verifies fail-closed that zero references exist (sanity check).
+   * - Executes idempotent `storage.deleteFile(key, { skipExistenceCheck: true })` and verifies
+   *   `await storage.fileExists(key) === false`.
+   * - ONLY once `fileExists === false` is positively observed does it atomically move the key
+   *   from `deletingKeys` to permanent `media_retired_v1:<sha256>`.
+   * - If storage fails or `fileExists` remains `true`, keeps the key blocked in `UNCERTAIN`.
+   */
+  public async reconcileUncertainDeletingKeys(): Promise<{
+    reconciledRetiredKeys: string[];
+    stillUncertainKeys: string[];
+    abortedFailClosed: boolean;
+    abortReason?: string;
+  }> {
+    const storage = this.getStorage();
+    const result = {
+      reconciledRetiredKeys: [] as string[],
+      stillUncertainKeys: [] as string[],
+      abortedFailClosed: false,
+      abortReason: undefined as string | undefined,
+    };
+
+    if (this.isDryRun()) {
+      return result;
+    }
+
+    const configStatus = storage.getConfigStatus();
+    if (!configStatus.configured) {
+      result.abortedFailClosed = true;
+      result.abortReason = configStatus.error || 'Storage not configured';
+      return result;
+    }
+
+    const fences: DeletingKeyFence[] = await this.coordinator.claimReconcilableDeletingFences(
+      storage.providerName,
+      this.fenceHeartbeatStaleMs
+    );
+    if (fences.length === 0) {
+      return result;
+    }
+
+    // Fail-closed reference audit sanity check before issuing forward delete
+    let referencedKeys: Set<string>;
+    try {
+      referencedKeys = await this.collectActiveReferencedStorageKeys(storage);
+    } catch (err: any) {
+      result.abortedFailClosed = true;
+      result.abortReason = err?.message || 'Reference audit failed during crash reconciliation (fail-closed)';
+      for (const f of fences) result.stillUncertainKeys.push(f.storageKey);
+      return result;
+    }
+
+    for (const fence of fences) {
+      await this.withPerKeyLock(fence.compositeKey, async () => {
+        if (referencedKeys.has(fence.storageKey)) {
+          // Unexpected invariant breach -> fail closed, keep fence UNCERTAIN and never delete
+          const msg = `Sanity audit found active reference for fenced key ${fence.storageKey}; holding UNCERTAIN fail-closed.`;
+          await this.coordinator.markDeletionFenceUncertain(fence.compositeKey, msg);
+          result.stillUncertainKeys.push(fence.storageKey);
+          return;
+        }
+
+        try {
+          await storage.deleteFile(fence.storageKey, { skipExistenceCheck: true });
+          const stillExists = await storage.fileExists(fence.storageKey);
+          if (!stillExists) {
+            await this.coordinator.finalizeDeletionFenceToPermanentTombstone({
+              provider: storage.providerName,
+              storageKey: fence.storageKey,
+              reason: 'crash-reconciled-deleted',
+            });
+            await this.completeKeyWithTombstone(fence.compositeKey, 'crash-reconciled-deleted', {
+              clearDeferred: true,
+              clearPending: true,
+            });
+            result.reconciledRetiredKeys.push(fence.storageKey);
+          } else {
+            await this.coordinator.markDeletionFenceUncertain(
+              fence.compositeKey,
+              'Object still exists after forward-completion delete attempt.'
+            );
+            result.stillUncertainKeys.push(fence.storageKey);
+          }
+        } catch (err: any) {
+          await this.coordinator.markDeletionFenceUncertain(
+            fence.compositeKey,
+            err?.message || 'Storage error during forward-completion reconciliation.'
+          );
+          result.stillUncertainKeys.push(fence.storageKey);
+        }
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Single-flight combined maintenance pass (reconciles uncertain deletion fences,
+   * sweeps expired pending uploads, and processes eligible deferred cleanup queue items).
    */
   public async runMaintenanceSweep(nowOverrideMs?: number): Promise<{
     skippedOverlap: boolean;
+    reconciledReport?: {
+      reconciledRetiredKeys: string[];
+      stillUncertainKeys: string[];
+      abortedFailClosed: boolean;
+      abortReason?: string;
+    };
     deferredReport?: MediaCleanupReport;
     expiredPendingReport?: MediaCleanupReport;
   }> {
@@ -1296,9 +1751,10 @@ export class MediaCleanupService {
     this.sweepInProgress = true;
     try {
       const nowMs = nowOverrideMs ?? this.now();
+      const reconciledReport = await this.reconcileUncertainDeletingKeys();
       const expiredPendingReport = await this.sweepExpiredPendingUploads(nowMs);
       const deferredReport = await this.processDeferredCleanupQueue(nowMs);
-      return { skippedOverlap: false, deferredReport, expiredPendingReport };
+      return { skippedOverlap: false, reconciledReport, deferredReport, expiredPendingReport };
     } finally {
       this.sweepInProgress = false;
     }
@@ -1344,4 +1800,4 @@ export class MediaCleanupService {
   }
 }
 
-export const mediaCleanupService = new MediaCleanupService();
+export const mediaCleanupService = new MediaCleanupService({ coordinator: mediaWriteCoordinator });

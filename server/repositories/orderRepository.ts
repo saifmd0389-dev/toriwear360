@@ -3,6 +3,13 @@ import path from 'path';
 import crypto from 'crypto';
 import { getPrismaClient } from '../db/prisma';
 import { resolveSecureStorePath } from '../utils/storageHelper';
+import { getStorageAdapter } from '../services/storage/storageAdapter';
+import {
+  MediaConflictError,
+  MediaCoordinationUnavailableError,
+  buildMediaCompositeKey,
+  mediaWriteCoordinator,
+} from '../services/storage/mediaCoordination';
 
 const STORE_PATH = resolveSecureStorePath('orders-store.json', 'public/generated-assets/orders-store.json');
 
@@ -241,133 +248,217 @@ export class OrderRepository {
   }
 
   async create(order: OrderRecord): Promise<OrderRecord> {
-    this.fallbackOrders.set(order.id, order);
-    this.saveToDisk();
+    const persistOrderToDb = async (db: any, orderToSave: OrderRecord) => {
+      let validCustomerId: string | null = null;
+      if (orderToSave.customerId && db.customer) {
+        const cust = await db.customer.findUnique({ where: { id: orderToSave.customerId } });
+        if (cust) {
+          validCustomerId = cust.id;
+        } else {
+          try {
+            const newCust = await db.customer.create({
+              data: {
+                id: orderToSave.customerId,
+                name: orderToSave.customerName,
+                email: orderToSave.customerEmail,
+                phone: orderToSave.customerPhone,
+                isGuest: true,
+                status: 'ACTIVE',
+              },
+            });
+            validCustomerId = newCust.id;
+          } catch {
+            validCustomerId = null;
+          }
+        }
+      }
 
-    const prisma = getPrismaClient();
-    if (prisma?.order) {
-      try {
-        let validCustomerId: string | null = null;
-        if (order.customerId) {
-          const cust = await prisma.customer.findUnique({ where: { id: order.customerId } });
-          if (cust) {
-            validCustomerId = cust.id;
-          } else {
-            try {
-              const newCust = await prisma.customer.create({
-                data: {
-                  id: order.customerId,
-                  name: order.customerName,
-                  email: order.customerEmail,
-                  phone: order.customerPhone,
-                  isGuest: true,
-                  status: 'ACTIVE',
-                },
-              });
-              validCustomerId = newCust.id;
-            } catch {
-              validCustomerId = null;
+      const itemsToCreate = [];
+      for (const it of orderToSave.items) {
+        let validVariantId: string | null = null;
+        if (it.variantId && db.productVariant) {
+          const variantExists = await db.productVariant.findUnique({ where: { id: it.variantId } });
+          if (variantExists) {
+            validVariantId = variantExists.id;
+          } else if (it.sku) {
+            const bySku = await db.productVariant.findUnique({ where: { sku: it.sku } });
+            if (bySku) {
+              validVariantId = bySku.id;
             }
           }
         }
 
-        const itemsToCreate = [];
-        for (const it of order.items) {
-          let validVariantId: string | null = null;
-          if (it.variantId) {
-            const variantExists = await prisma.productVariant.findUnique({ where: { id: it.variantId } });
-            if (variantExists) {
-              validVariantId = variantExists.id;
-            } else if (it.sku) {
-              const bySku = await prisma.productVariant.findUnique({ where: { sku: it.sku } });
-              if (bySku) {
-                validVariantId = bySku.id;
-              }
-            }
-          }
-
-          let validProductId = it.productId;
-          const prodExists = await prisma.product.findUnique({ where: { id: it.productId } });
+        let validProductId = it.productId;
+        if (db.product) {
+          const prodExists = await db.product.findUnique({ where: { id: it.productId } });
           if (!prodExists) {
-            const firstProd = await prisma.product.findFirst();
+            const firstProd = await db.product.findFirst();
             if (firstProd) {
               validProductId = firstProd.id;
             }
           }
-
-          itemsToCreate.push({
-            id: it.id || `item-${crypto.randomBytes(8).toString('hex')}`,
-            productId: validProductId,
-            variantId: validVariantId,
-            productName: it.productName,
-            productSku: it.sku || `SKU-${it.variantId || validProductId}`,
-            size: it.size || 'M',
-            color: it.color || 'Void Black',
-            quantity: it.quantity || 1,
-            unitPrice: it.unitPrice,
-            totalPrice: it.totalPrice,
-            image: typeof it.image === 'string' ? it.image : ((it.image as any)?.url || ''),
-          });
         }
 
-        await prisma.order.create({
-          data: {
-            id: order.id,
-            orderNumber: order.orderNumber,
-            customerId: validCustomerId,
-            customerName: order.customerName,
-            customerEmail: order.customerEmail,
-            customerPhone: order.customerPhone,
-            subtotal: order.subtotal,
-            discount: order.discount,
-            discountCode: order.discountCode,
-            tax: order.tax,
-            shippingFee: order.shippingFee,
-            total: order.total,
-            currency: order.currency || 'INR',
-            paymentMethod: order.paymentMethod.toLowerCase(),
-            paymentStatus: (order.paymentStatus === 'PENDING_PAYMENT' ? 'PENDING' : order.paymentStatus) as any,
-            shippingStatus: (order.fulfillmentStatus === 'PENDING_PAYMENT' ? 'CONFIRMED' : order.fulfillmentStatus) as any,
-            courierPartner: order.courierPartner,
-            courierTrackingNumber: order.courierTrackingNumber,
-            awbNumber: order.awbNumber,
-            orderAccessToken: order.orderAccessToken,
-            idempotencyKey: order.idempotencyKey || null,
-            cancellationReason: order.cancellationReason,
-            cancelledAt: order.cancelledAt,
-            refundStatus: order.refundStatus,
-            refundAmount: order.refundAmount,
-            items: {
-              create: itemsToCreate,
-            },
-            addresses: {
-              create: {
-                fullName: order.shippingAddress.fullName,
-                phone: order.shippingAddress.phone,
-                email: order.shippingAddress.email,
-                addressLine1: order.shippingAddress.addressLine1,
-                addressLine2: order.shippingAddress.addressLine2,
-                city: order.shippingAddress.city,
-                state: order.shippingAddress.state,
-                pincode: order.shippingAddress.pincode,
-                country: order.shippingAddress.country || 'India',
-              },
-            },
-            statusHistory: {
-              create: order.timeline.map((tl) => ({
-                toStatus: (order.fulfillmentStatus === 'PENDING_PAYMENT' ? 'CONFIRMED' : order.fulfillmentStatus) as any,
-                note: tl.description,
-                timestamp: new Date(tl.timestamp),
-              })),
+        const resolvedImage =
+          typeof it.image === 'string'
+            ? it.image
+            : it.image && typeof (it.image as any).url === 'string'
+              ? (it.image as any).url
+              : null;
+
+        itemsToCreate.push({
+          id: it.id || `item-${crypto.randomBytes(8).toString('hex')}`,
+          productId: validProductId,
+          variantId: validVariantId,
+          productName: it.productName,
+          productSku: it.sku || `SKU-${it.variantId || validProductId}`,
+          size: it.size || 'M',
+          color: it.color || 'Void Black',
+          quantity: it.quantity || 1,
+          unitPrice: it.unitPrice,
+          totalPrice: it.totalPrice,
+          image: resolvedImage,
+        });
+      }
+
+      await db.order.create({
+        data: {
+          id: orderToSave.id,
+          orderNumber: orderToSave.orderNumber,
+          customerId: validCustomerId,
+          customerName: orderToSave.customerName,
+          customerEmail: orderToSave.customerEmail,
+          customerPhone: orderToSave.customerPhone,
+          subtotal: orderToSave.subtotal,
+          discount: orderToSave.discount,
+          discountCode: orderToSave.discountCode,
+          tax: orderToSave.tax,
+          shippingFee: orderToSave.shippingFee,
+          total: orderToSave.total,
+          currency: orderToSave.currency || 'INR',
+          paymentMethod: orderToSave.paymentMethod.toLowerCase(),
+          paymentStatus: (orderToSave.paymentStatus === 'PENDING_PAYMENT' ? 'PENDING' : orderToSave.paymentStatus) as any,
+          shippingStatus: (orderToSave.fulfillmentStatus === 'PENDING_PAYMENT' ? 'CONFIRMED' : orderToSave.fulfillmentStatus) as any,
+          courierPartner: orderToSave.courierPartner,
+          courierTrackingNumber: orderToSave.courierTrackingNumber,
+          awbNumber: orderToSave.awbNumber,
+          orderAccessToken: orderToSave.orderAccessToken,
+          idempotencyKey: orderToSave.idempotencyKey || null,
+          cancellationReason: orderToSave.cancellationReason,
+          cancelledAt: orderToSave.cancelledAt,
+          refundStatus: orderToSave.refundStatus,
+          refundAmount: orderToSave.refundAmount,
+          items: {
+            create: itemsToCreate,
+          },
+          addresses: {
+            create: {
+              fullName: orderToSave.shippingAddress.fullName,
+              phone: orderToSave.shippingAddress.phone,
+              email: orderToSave.shippingAddress.email,
+              addressLine1: orderToSave.shippingAddress.addressLine1,
+              addressLine2: orderToSave.shippingAddress.addressLine2,
+              city: orderToSave.shippingAddress.city,
+              state: orderToSave.shippingAddress.state,
+              pincode: orderToSave.shippingAddress.pincode,
+              country: orderToSave.shippingAddress.country || 'India',
             },
           },
+          statusHistory: {
+            create: orderToSave.timeline.map((tl) => ({
+              toStatus: (orderToSave.fulfillmentStatus === 'PENDING_PAYMENT' ? 'CONFIRMED' : orderToSave.fulfillmentStatus) as any,
+              note: tl.description,
+              timestamp: new Date(tl.timestamp),
+            })),
+          },
+        },
+      });
+    };
+
+    let finalOrder: OrderRecord = order;
+
+    try {
+      await mediaWriteCoordinator.executeCoordinatedWrite({
+        payload: (order.items || []).map((it) => it.image),
+        executeInTx: async (tx) => {
+          if (tx?.order) {
+            await persistOrderToDb(tx, order);
+            return;
+          }
+          const prisma = getPrismaClient();
+          if (prisma?.order) {
+            await persistOrderToDb(prisma, order);
+          }
+        },
+      });
+    } catch (err: any) {
+      if (err instanceof MediaConflictError || err instanceof MediaCoordinationUnavailableError) {
+        // Checkout resilience without unsafe managed media references:
+        // Strip blocked/unverified managed OrderItem.image to null (column is nullable `String? @db.Text`)
+        // so customer checkout succeeds without ever bypassing media coordination!
+        const storage = getStorageAdapter();
+        const blockedSet = err instanceof MediaConflictError ? new Set(err.compositeKeys) : null;
+        const sanitizedItems = (order.items || []).map((it) => {
+          const rawImg = typeof it.image === 'string' ? it.image : ((it.image as any)?.url || '');
+          const managedKey = rawImg ? storage.resolveManagedStorageKey(rawImg) : null;
+          if (!managedKey) return it;
+          const compositeKey = buildMediaCompositeKey(storage.providerName, managedKey);
+          if (!blockedSet || blockedSet.has(compositeKey)) {
+            return { ...it, image: null as any };
+          }
+          return it;
         });
-      } catch (err) {
+
+        finalOrder = { ...order, items: sanitizedItems };
+        console.warn(
+          `[ORDER_REPO] Sanitized ${err instanceof MediaConflictError ? 'blocked/retired' : 'unverified'} managed OrderItem.image to null for order ${order.orderNumber} so checkout completes safely (${err.code}).`
+        );
+
+        // Retry persistence with sanitized order (zero blocked/unverified managed references)
+        try {
+          await mediaWriteCoordinator.executeCoordinatedWrite({
+            payload: finalOrder.items.map((it) => it.image),
+            executeInTx: async (tx) => {
+              if (tx?.order) {
+                await persistOrderToDb(tx, finalOrder);
+                return;
+              }
+              const prisma = getPrismaClient();
+              if (prisma?.order) {
+                await persistOrderToDb(prisma, finalOrder);
+              }
+            },
+          });
+        } catch (retryErr: any) {
+          // If coordination is still unreachable for remaining managed URLs, strip all managed URLs and persist directly
+          finalOrder = {
+            ...order,
+            items: (order.items || []).map((it) => {
+              const rawImg = typeof it.image === 'string' ? it.image : ((it.image as any)?.url || '');
+              return rawImg && storage.resolveManagedStorageKey(rawImg)
+                ? { ...it, image: null as any }
+                : it;
+            }),
+          };
+          const prisma = getPrismaClient();
+          if (prisma?.order) {
+            try {
+              await persistOrderToDb(prisma, finalOrder);
+            } catch (dbErr) {
+              console.warn('[ORDER_REPO] Failed to persist sanitized order to Prisma, fallback active:', dbErr);
+            }
+          } else {
+            console.warn('[ORDER_REPO] Checkout retry note:', retryErr?.message || retryErr);
+          }
+        }
+      } else {
         console.warn('[ORDER_REPO] Failed to persist order to Prisma, fallback active:', err);
       }
     }
 
-    return order;
+    this.fallbackOrders.set(finalOrder.id, finalOrder);
+    this.saveToDisk();
+    return finalOrder;
   }
 
   async update(id: string, updates: Partial<OrderRecord>): Promise<OrderRecord | null> {

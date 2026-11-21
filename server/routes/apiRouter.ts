@@ -38,6 +38,7 @@ import {
   validatePaymentVerificationInput,
 } from '../validation/schemas';
 import { mediaCleanupService } from '../services/storage/mediaCleanupService';
+import { isMediaCoordinationError } from '../services/storage/mediaCoordination';
 
 export const apiRouter = Router();
 
@@ -925,6 +926,9 @@ apiRouter.post('/v1/admin/products', requireStaffPermission('products.create'), 
     console.log(`[API] ✅ CREATE persisted successfully to repository/store for Product "${saved.name}" (ID: ${saved.id}, status=${saved.status})`);
     return res.status(201).json({ success: true, message: 'Product created successfully.', data: saved });
   } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
     console.error('[API] Error creating product:', err);
     return res.status(500).json({ success: false, error: err.message || 'Failed to create product.' });
   }
@@ -1020,31 +1024,50 @@ apiRouter.put('/v1/admin/products/:id', requireStaffPermission('products.edit'),
     console.log(`[API] ✅ UPDATE persisted successfully for Product "${saved.name}" (${saved.id}, status=${saved.status})`);
     return res.json({ success: true, message: 'Product updated successfully.', data: saved });
   } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
     console.error('[API] Error updating product:', err);
     return res.status(500).json({ success: false, error: err.message || 'Failed to update product.' });
   }
 });
 
 apiRouter.post('/v1/admin/products/:id/archive', requireStaffPermission('products.archive'), async (req: Request, res: Response) => {
-  const productId = String(req.params.id || '');
-  console.log(`[API] 📦 ARCHIVE request for Product ID: ${productId}`);
-  const product = await productRepository.archive(productId);
-  if (!product) {
-    return res.status(404).json({ success: false, error: 'Product not found.' });
+  try {
+    const productId = String(req.params.id || '');
+    console.log(`[API] 📦 ARCHIVE request for Product ID: ${productId}`);
+    const product = await productRepository.archive(productId);
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Product not found.' });
+    }
+    console.log(`[API] ✅ Product archived: "${product.name}" (${product.id})`);
+    return res.json({ success: true, message: 'Product archived successfully.', data: product });
+  } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
+    console.error('[API] Error archiving product:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to archive product.' });
   }
-  console.log(`[API] ✅ Product archived: "${product.name}" (${product.id})`);
-  return res.json({ success: true, message: 'Product archived successfully.', data: product });
 });
 
 apiRouter.post('/v1/admin/products/:id/restore', requireStaffPermission('products.edit'), async (req: Request, res: Response) => {
-  const productId = String(req.params.id || '');
-  console.log(`[API] 🔄 RESTORE request for Product ID: ${productId}`);
-  const product = await productRepository.restore(productId);
-  if (!product) {
-    return res.status(404).json({ success: false, error: 'Product not found.' });
+  try {
+    const productId = String(req.params.id || '');
+    console.log(`[API] 🔄 RESTORE request for Product ID: ${productId}`);
+    const product = await productRepository.restore(productId);
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Product not found.' });
+    }
+    console.log(`[API] ✅ Product restored: "${product.name}" (${product.id})`);
+    return res.json({ success: true, message: 'Product restored successfully.', data: product });
+  } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
+    console.error('[API] Error restoring product:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to restore product.' });
   }
-  console.log(`[API] ✅ Product restored: "${product.name}" (${product.id})`);
-  return res.json({ success: true, message: 'Product restored successfully.', data: product });
 });
 
 apiRouter.delete('/v1/admin/products/:id', requireStaffPermission('products.delete'), async (req: Request, res: Response) => {
@@ -1110,129 +1133,169 @@ apiRouter.post('/v1/admin/products/clear-all', requireStaffPermission('products.
 });
 
 apiRouter.post('/v1/admin/products/:id/variants', requireStaffPermission('products.edit'), async (req: Request, res: Response) => {
-  const { size, colorName, colorHex, price, originalPrice, stock, sku } = req.body;
-  if (!size || !colorName) {
-    return res.status(400).json({ success: false, error: 'Size and colorName are required.' });
-  }
+  try {
+    const { size, colorName, colorHex, price, originalPrice, stock, sku } = req.body;
+    if (!size || !colorName) {
+      return res.status(400).json({ success: false, error: 'Size and colorName are required.' });
+    }
 
-  const productId = String(req.params.id || '');
-  const newVariant: ProductVariantRecord = {
-    id: `var-${productId}-${Date.now()}`,
-    productId,
-    sku: sku || `SKU-${productId}-${size}`,
-    size,
-    colorName,
-    colorHex: colorHex || '#0f0f14',
-    price: Number(price || 1199),
-    originalPrice: Number(originalPrice || 1599),
-    stock: Number(stock || 20),
-    reservedStock: 0,
-    isActive: true,
-  };
+    const productId = String(req.params.id || '');
+    const newVariant: ProductVariantRecord = {
+      id: `var-${productId}-${Date.now()}`,
+      productId,
+      sku: sku || `SKU-${productId}-${size}`,
+      size,
+      colorName,
+      colorHex: colorHex || '#0f0f14',
+      price: Number(price || 1199),
+      originalPrice: Number(originalPrice || 1599),
+      stock: Number(stock || 20),
+      reservedStock: 0,
+      isActive: true,
+    };
 
-  const saved = await productRepository.saveVariant(productId, newVariant);
-  if (!saved) {
-    return res.status(404).json({ success: false, error: 'Product not found.' });
+    const saved = await productRepository.saveVariant(productId, newVariant);
+    if (!saved) {
+      return res.status(404).json({ success: false, error: 'Product not found.' });
+    }
+    return res.status(201).json({ success: true, data: saved });
+  } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
+    console.error('[API] Error creating variant:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to create variant.' });
   }
-  return res.status(201).json({ success: true, data: saved });
 });
 
 apiRouter.put('/v1/admin/products/:id/variants/:variantId', requireStaffPermission('products.edit'), async (req: Request, res: Response) => {
-  const existing = await productRepository.getVariantById(String(req.params.variantId || ''));
-  if (!existing) {
-    return res.status(404).json({ success: false, error: 'Variant not found.' });
+  try {
+    const existing = await productRepository.getVariantById(String(req.params.variantId || ''));
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Variant not found.' });
+    }
+
+    const updated: ProductVariantRecord = {
+      ...existing,
+      ...req.body,
+      id: existing.id,
+      productId: existing.productId,
+    };
+
+    const saved = await productRepository.saveVariant(String(req.params.id || ''), updated);
+    return res.json({ success: true, data: saved });
+  } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
+    console.error('[API] Error updating variant:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to update variant.' });
   }
-
-  const updated: ProductVariantRecord = {
-    ...existing,
-    ...req.body,
-    id: existing.id,
-    productId: existing.productId,
-  };
-
-  const saved = await productRepository.saveVariant(String(req.params.id || ''), updated);
-  return res.json({ success: true, data: saved });
 });
 
 apiRouter.post('/v1/admin/products/:id/variants/:variantId/archive', requireStaffPermission('products.edit'), async (req: Request, res: Response) => {
-  const success = await productRepository.archiveVariant(String(req.params.variantId || ''));
-  if (!success) {
-    return res.status(404).json({ success: false, error: 'Variant not found.' });
+  try {
+    const success = await productRepository.archiveVariant(String(req.params.variantId || ''));
+    if (!success) {
+      return res.status(404).json({ success: false, error: 'Variant not found.' });
+    }
+    return res.json({ success: true, message: 'Variant archived successfully.' });
+  } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
+    console.error('[API] Error archiving variant:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to archive variant.' });
   }
-  return res.json({ success: true, message: 'Variant archived successfully.' });
 });
 
 apiRouter.post('/v1/admin/categories', requireStaffPermission('catalog.edit'), async (req: Request, res: Response) => {
-  const { name, slug, department, description, image, parentId, seoTitle, seoDescription, showInNav, isActive, isEnabled, displayOrder } = req.body;
-  if (!name || !String(name).trim()) {
-    return res.status(400).json({ success: false, error: 'Category name is required.' });
+  try {
+    const { name, slug, department, description, image, parentId, seoTitle, seoDescription, showInNav, isActive, isEnabled, displayOrder } = req.body;
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ success: false, error: 'Category name is required.' });
+    }
+
+    const normalizedSlug = String(slug || name)
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+
+    const enabledFlag = isEnabled !== undefined ? Boolean(isEnabled) : isActive !== undefined ? Boolean(isActive) : true;
+    const cat: CategoryRecord = {
+      id: `cat-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      name: String(name).trim(),
+      slug: normalizedSlug || `cat-${Date.now()}`,
+      department: department || 'ALL',
+      description: description ? String(description) : undefined,
+      image: image ? String(image) : undefined,
+      parentId: parentId || null,
+      seoTitle: seoTitle ? String(seoTitle) : undefined,
+      seoDescription: seoDescription ? String(seoDescription) : undefined,
+      showInNav: showInNav !== undefined ? Boolean(showInNav) : true,
+      displayOrder: displayOrder !== undefined ? Number(displayOrder) : 50,
+      isActive: enabledFlag,
+      isEnabled: enabledFlag,
+    };
+
+    const saved = await mediaCleanupService.withMediaReferenceWrite(() =>
+      productRepository.saveCategory(cat)
+    );
+    const catUrls = [saved.image, (saved as any).bannerImage].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
+    if (catUrls.length > 0) {
+      mediaCleanupService.markUrlsCommitted(catUrls).catch(() => {});
+    }
+    return res.status(201).json({ success: true, data: saved });
+  } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
+    console.error('[API] Error creating category:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to create category.' });
   }
-
-  const normalizedSlug = String(slug || name)
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  const enabledFlag = isEnabled !== undefined ? Boolean(isEnabled) : isActive !== undefined ? Boolean(isActive) : true;
-  const cat: CategoryRecord = {
-    id: `cat-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    name: String(name).trim(),
-    slug: normalizedSlug || `cat-${Date.now()}`,
-    department: department || 'ALL',
-    description: description ? String(description) : undefined,
-    image: image ? String(image) : undefined,
-    parentId: parentId || null,
-    seoTitle: seoTitle ? String(seoTitle) : undefined,
-    seoDescription: seoDescription ? String(seoDescription) : undefined,
-    showInNav: showInNav !== undefined ? Boolean(showInNav) : true,
-    displayOrder: displayOrder !== undefined ? Number(displayOrder) : 50,
-    isActive: enabledFlag,
-    isEnabled: enabledFlag,
-  };
-
-  const saved = await mediaCleanupService.withMediaReferenceWrite(() =>
-    productRepository.saveCategory(cat)
-  );
-  const catUrls = [saved.image, (saved as any).bannerImage].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
-  if (catUrls.length > 0) {
-    mediaCleanupService.markUrlsCommitted(catUrls).catch(() => {});
-  }
-  return res.status(201).json({ success: true, data: saved });
 });
 
 apiRouter.put('/v1/admin/categories/:id', requireStaffPermission('catalog.edit'), async (req: Request, res: Response) => {
-  const existing = await productRepository.getCategoryById(String(req.params.id || ''));
-  if (!existing) {
-    return res.status(404).json({ success: false, error: 'Category not found.' });
+  try {
+    const existing = await productRepository.getCategoryById(String(req.params.id || ''));
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Category not found.' });
+    }
+
+    const body = req.body || {};
+    const enabledFlag = body.isEnabled !== undefined
+      ? Boolean(body.isEnabled)
+      : body.isActive !== undefined
+        ? Boolean(body.isActive)
+        : existing.isActive !== false;
+
+    const updated: CategoryRecord = {
+      ...existing,
+      ...body,
+      id: existing.id,
+      isActive: enabledFlag,
+      isEnabled: enabledFlag,
+      slug: body.slug
+        ? String(body.slug).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+        : existing.slug,
+    };
+
+    const saved = await mediaCleanupService.withMediaReferenceWrite(() =>
+      productRepository.saveCategory(updated)
+    );
+    const catUrls = [saved.image, (saved as any).bannerImage].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
+    if (catUrls.length > 0) {
+      mediaCleanupService.markUrlsCommitted(catUrls).catch(() => {});
+    }
+    return res.json({ success: true, data: saved });
+  } catch (err: any) {
+    if (isMediaCoordinationError(err)) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
+    console.error('[API] Error updating category:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to update category.' });
   }
-
-  const body = req.body || {};
-  const enabledFlag = body.isEnabled !== undefined
-    ? Boolean(body.isEnabled)
-    : body.isActive !== undefined
-      ? Boolean(body.isActive)
-      : existing.isActive !== false;
-
-  const updated: CategoryRecord = {
-    ...existing,
-    ...body,
-    id: existing.id,
-    isActive: enabledFlag,
-    isEnabled: enabledFlag,
-    slug: body.slug
-      ? String(body.slug).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-      : existing.slug,
-  };
-
-  const saved = await mediaCleanupService.withMediaReferenceWrite(() =>
-    productRepository.saveCategory(updated)
-  );
-  const catUrls = [saved.image, (saved as any).bannerImage].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
-  if (catUrls.length > 0) {
-    mediaCleanupService.markUrlsCommitted(catUrls).catch(() => {});
-  }
-  return res.json({ success: true, data: saved });
 });
 
 apiRouter.put('/v1/admin/categories/:id/products', requireStaffPermission('catalog.edit'), async (req: Request, res: Response) => {

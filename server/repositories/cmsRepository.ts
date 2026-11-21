@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { prisma } from '../db/prisma';
 import { resolveSecureStorePath } from '../utils/storageHelper';
+import { mediaWriteCoordinator } from '../services/storage/mediaCoordination';
 
 export interface WebsiteSectionRecord {
   id: string;
@@ -639,59 +640,73 @@ export class CmsRepository {
         },
         this.frontPageData!
       );
-      this.frontPageData = next;
-      this.saveToDisk();
 
-    // Sync to Prisma HomepageSection and WebsiteBanner if connected
-    try {
-      if (prisma && prisma.homepageSection && Array.isArray(this.frontPageData.sections)) {
-        for (const s of this.frontPageData.sections) {
-          await prisma.homepageSection.upsert({
-            where: { sectionKey: s.key },
+      const syncFrontPageToDb = async (db: any, swallowErrors: boolean) => {
+        if (db?.homepageSection && Array.isArray(next.sections)) {
+          for (const s of next.sections) {
+            const op = db.homepageSection.upsert({
+              where: { sectionKey: s.key },
+              create: {
+                sectionKey: s.key,
+                title: s.name,
+                subtitle: s.description,
+                enabled: s.isEnabled,
+                displayOrder: s.order,
+                configJson: JSON.stringify(s),
+              },
+              update: {
+                title: s.name,
+                subtitle: s.description,
+                enabled: s.isEnabled,
+                displayOrder: s.order,
+                configJson: JSON.stringify(s),
+              },
+            });
+            await (swallowErrors ? op.catch(() => {}) : op);
+          }
+        }
+
+        if (db?.websiteBanner && next.hero) {
+          const op = db.websiteBanner.upsert({
+            where: { bannerKey: 'homepage_hero' },
             create: {
-              sectionKey: s.key,
-              title: s.name,
-              subtitle: s.description,
-              enabled: s.isEnabled,
-              displayOrder: s.order,
-              configJson: JSON.stringify(s),
+              bannerKey: 'homepage_hero',
+              headline: next.hero.headline,
+              subheadline: next.hero.subheadline,
+              ctaText: next.hero.ctaText,
+              ctaLink: next.hero.ctaLink,
+              bgImageUrl: next.hero.bgImage,
+              isLive: true,
             },
             update: {
-              title: s.name,
-              subtitle: s.description,
-              enabled: s.isEnabled,
-              displayOrder: s.order,
-              configJson: JSON.stringify(s),
+              headline: next.hero.headline,
+              subheadline: next.hero.subheadline,
+              ctaText: next.hero.ctaText,
+              ctaLink: next.hero.ctaLink,
+              bgImageUrl: next.hero.bgImage,
             },
-          }).catch(() => {});
+          });
+          await (swallowErrors ? op.catch(() => {}) : op);
         }
-      }
+      };
 
-      if (prisma && prisma.websiteBanner && this.frontPageData.hero) {
-        await prisma.websiteBanner.upsert({
-          where: { bannerKey: 'homepage_hero' },
-          create: {
-            bannerKey: 'homepage_hero',
-            headline: this.frontPageData.hero.headline,
-            subheadline: this.frontPageData.hero.subheadline,
-            ctaText: this.frontPageData.hero.ctaText,
-            ctaLink: this.frontPageData.hero.ctaLink,
-            bgImageUrl: this.frontPageData.hero.bgImage,
-            isLive: true,
-          },
-          update: {
-            headline: this.frontPageData.hero.headline,
-            subheadline: this.frontPageData.hero.subheadline,
-            ctaText: this.frontPageData.hero.ctaText,
-            ctaLink: this.frontPageData.hero.ctaLink,
-            bgImageUrl: this.frontPageData.hero.bgImage,
-          },
-        }).catch(() => {});
-      }
-    } catch {}
+      await mediaWriteCoordinator.executeCoordinatedWrite({
+        payload: next,
+        executeInTx: async (tx, verifiedKeys) => {
+          if (tx) {
+            await syncFrontPageToDb(tx, false);
+            return;
+          }
+          if (prisma && (prisma.homepageSection || prisma.websiteBanner)) {
+            await syncFrontPageToDb(prisma, verifiedKeys.length === 0);
+          }
+        },
+      });
 
-    console.log(`[CmsRepo] ✅ Frontpage CMS saved by ${actorId || 'STAFF'}`);
-    return this.frontPageData!;
+      this.frontPageData = next;
+      this.saveToDisk();
+      console.log(`[CmsRepo] ✅ Frontpage CMS saved by ${actorId || 'STAFF'}`);
+      return this.frontPageData!;
     });
   }
 
@@ -699,11 +714,43 @@ export class CmsRepository {
     return this.enqueueWrite(async () => {
       this.ensureLoaded();
       const normalized = this.normalizeSections(sections);
-      this.frontPageData = {
+      const nextFrontPage: FrontPageCmsRecord = {
         ...this.frontPageData!,
         sections: normalized,
         lastUpdated: new Date().toISOString(),
       };
+
+      await mediaWriteCoordinator.executeCoordinatedWrite({
+        payload: normalized,
+        executeInTx: async (tx, verifiedKeys) => {
+          const db = tx || prisma;
+          if (db?.homepageSection) {
+            for (const s of normalized) {
+              const op = db.homepageSection.upsert({
+                where: { sectionKey: s.key },
+                create: {
+                  sectionKey: s.key,
+                  title: s.name,
+                  subtitle: s.description,
+                  enabled: s.isEnabled,
+                  displayOrder: s.order,
+                  configJson: JSON.stringify(s),
+                },
+                update: {
+                  title: s.name,
+                  subtitle: s.description,
+                  enabled: s.isEnabled,
+                  displayOrder: s.order,
+                  configJson: JSON.stringify(s),
+                },
+              });
+              await (tx || verifiedKeys.length > 0 ? op : op.catch(() => {}));
+            }
+          }
+        },
+      });
+
+      this.frontPageData = nextFrontPage;
       this.saveToDisk();
       console.log(`[CmsRepo] 📋 Sections architecture updated (${normalized.length} sections) by ${actorId || 'STAFF'}`);
       return normalized;
@@ -718,11 +765,42 @@ export class CmsRepository {
         ...(this.frontPageData?.hero || {}),
         ...hero,
       };
-      this.frontPageData = {
+      const nextFrontPage: FrontPageCmsRecord = {
         ...this.frontPageData!,
         hero: mergedHero,
         lastUpdated: new Date().toISOString(),
       };
+
+      await mediaWriteCoordinator.executeCoordinatedWrite({
+        payload: mergedHero,
+        executeInTx: async (tx, verifiedKeys) => {
+          const db = tx || prisma;
+          if (db?.websiteBanner) {
+            const op = db.websiteBanner.upsert({
+              where: { bannerKey: 'homepage_hero' },
+              create: {
+                bannerKey: 'homepage_hero',
+                headline: mergedHero.headline,
+                subheadline: mergedHero.subheadline,
+                ctaText: mergedHero.ctaText,
+                ctaLink: mergedHero.ctaLink,
+                bgImageUrl: mergedHero.bgImage,
+                isLive: true,
+              },
+              update: {
+                headline: mergedHero.headline,
+                subheadline: mergedHero.subheadline,
+                ctaText: mergedHero.ctaText,
+                ctaLink: mergedHero.ctaLink,
+                bgImageUrl: mergedHero.bgImage,
+              },
+            });
+            await (tx || verifiedKeys.length > 0 ? op : op.catch(() => {}));
+          }
+        },
+      });
+
+      this.frontPageData = nextFrontPage;
       this.saveToDisk();
       console.log(`[CmsRepo] 🖼️ Hero settings updated by ${actorId || 'STAFF'}`);
       return mergedHero;
@@ -810,10 +888,36 @@ export class CmsRepository {
         sanitizedInput.metaBusiness = safeMeta;
       }
 
-      this.storeSettings = this.normalizeSettings({
+      const nextStoreSettings = this.normalizeSettings({
         ...this.storeSettings!,
         ...sanitizedInput,
       });
+
+      await mediaWriteCoordinator.executeCoordinatedWrite({
+        payload: sanitizedInput,
+        executeInTx: async (tx, verifiedKeys) => {
+          const db = tx || prisma;
+          if (db?.websiteSetting) {
+            for (const [key, value] of Object.entries(sanitizedInput)) {
+              const op = db.websiteSetting.upsert({
+                where: { key: `store_${key}` },
+                create: {
+                  key: `store_${key}`,
+                  value: typeof value === 'object' ? JSON.stringify(value) : String(value),
+                  group: 'GENERAL',
+                  isPublic: ['freeShippingThreshold', 'standardShippingFee', 'codFee', 'maintenanceMode', 'returnWindowDays'].includes(key),
+                },
+                update: {
+                  value: typeof value === 'object' ? JSON.stringify(value) : String(value),
+                },
+              });
+              await (tx || verifiedKeys.length > 0 ? op : op.catch(() => {}));
+            }
+          }
+        },
+      });
+
+      this.storeSettings = nextStoreSettings;
 
       // Keep footer contact & social links synchronized when channels or support info changes
       if (this.frontPageData?.footer) {
@@ -834,29 +938,8 @@ export class CmsRepository {
       }
 
       this.saveToDisk();
-
-    // Mirror to Prisma WebsiteSetting if connected
-    try {
-      if (prisma && prisma.websiteSetting) {
-        for (const [key, value] of Object.entries(sanitizedInput)) {
-          await prisma.websiteSetting.upsert({
-            where: { key: `store_${key}` },
-            create: {
-              key: `store_${key}`,
-              value: typeof value === 'object' ? JSON.stringify(value) : String(value),
-              group: 'GENERAL',
-              isPublic: ['freeShippingThreshold', 'standardShippingFee', 'codFee', 'maintenanceMode', 'returnWindowDays'].includes(key),
-            },
-            update: {
-              value: typeof value === 'object' ? JSON.stringify(value) : String(value),
-            },
-          }).catch(() => {});
-        }
-      }
-    } catch {}
-
-    console.log(`[CmsRepo] ⚙️ Store settings updated by ${actorId || 'STAFF'}`);
-    return this.storeSettings!;
+      console.log(`[CmsRepo] ⚙️ Store settings updated by ${actorId || 'STAFF'}`);
+      return this.storeSettings!;
     });
   }
 }

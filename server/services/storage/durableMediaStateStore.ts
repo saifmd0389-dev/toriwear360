@@ -18,13 +18,18 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { getPrismaClient } from '../../db/prisma';
+import { getPrismaClient, getRawPrismaClient } from '../../db/prisma';
 import { resolveSecureStorePath } from '../../utils/storageHelper';
 import type { StorageProviderName } from './storageAdapter';
+import {
+  MEDIA_CLEANUP_MYSQL_GROUP,
+  MEDIA_CLEANUP_MYSQL_KEY,
+  buildMediaCompositeKey,
+  buildRevisionToken,
+} from './mediaCoordination';
 
-export const MEDIA_CLEANUP_MYSQL_KEY = 'media_cleanup_state_v1';
-export const MEDIA_CLEANUP_MYSQL_GROUP = 'INTERNAL_MEDIA';
-export const MEDIA_TOMBSTONE_RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours
+export { MEDIA_CLEANUP_MYSQL_GROUP, MEDIA_CLEANUP_MYSQL_KEY, buildMediaCompositeKey };
+export const MEDIA_TOMBSTONE_RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours (queue/lease sync tombstones only; retired storage keys are permanent in media_retired_v1:*)
 const DEFAULT_MAX_CAS_RETRIES = 5;
 
 export interface PendingUploadRecord {
@@ -99,14 +104,30 @@ export interface DurableMediaStateEnvelope {
 export interface MySqlWebsiteSettingRow {
   key: string;
   value: string;
-  updatedAt: Date;
+  /** Unique monotonic revision token (`rev:<version>:<16-hex-nonce>`), stored in `WebsiteSetting.description`. */
+  revisionToken: string | null;
 }
 
 export interface MySqlMediaStateBackend {
   isAvailable(): boolean;
   readRow(): Promise<MySqlWebsiteSettingRow | null>;
-  createRow(value: string): Promise<{ created: boolean; conflict?: boolean }>;
-  compareAndSwapRow(expectedUpdatedAt: Date, nextValue: string): Promise<{ updated: boolean }>;
+  createRow(value: string, revisionToken: string): Promise<{ created: boolean; conflict?: boolean }>;
+  compareAndSwapRow(
+    expectedRevisionToken: string | null,
+    nextValue: string,
+    nextRevisionToken: string
+  ): Promise<{ updated: boolean }>;
+  /**
+   * Optional transactional InnoDB row-lock read-merge-write (`SELECT ... FOR UPDATE`).
+   * Serializes concurrent workers in FIFO lock order at the database engine level with zero timestamp dependency.
+   */
+  runLockedUpdate?<T>(
+    updater: (currentRow: MySqlWebsiteSettingRow | null) => {
+      nextValue: string;
+      nextRevisionToken: string;
+      result: T;
+    }
+  ): Promise<T>;
 }
 
 export interface DurableMediaStateStoreOptions {
@@ -116,10 +137,6 @@ export interface DurableMediaStateStoreOptions {
   maxCasRetries?: number;
   tombstoneRetentionMs?: number;
   now?: () => number;
-}
-
-export function buildMediaCompositeKey(provider: StorageProviderName, storageKey: string): string {
-  return `${provider}:${storageKey}`;
 }
 
 export function buildPendingTombstoneKey(compositeKey: string): string {
@@ -402,16 +419,20 @@ export function mergeDurableMediaState(
 
 /**
  * Default MySQL WebsiteSetting backend using Tori-Wear's existing Prisma client.
- * Uses optimistic concurrency (updateMany with updatedAt guard) to prevent cross-worker clobbering.
+ * Replaces timestamp-based `updatedAt` CAS with:
+ *   1. InnoDB row-level `SELECT ... FOR UPDATE` inside `prisma.$transaction` (current read + FIFO serialization), AND
+ *   2. Monotonic unique revision token `rev:<version>:<16-hex-nonce>` in `WebsiteSetting.description` (zero schema migrations).
  */
-export function createPrismaMySqlMediaStateBackend(): MySqlMediaStateBackend {
+export function createPrismaMySqlMediaStateBackend(
+  prismaProvider: () => any = () => getRawPrismaClient()
+): MySqlMediaStateBackend {
   return {
     isAvailable(): boolean {
-      const client = getPrismaClient();
+      const client = prismaProvider() || getPrismaClient();
       return Boolean(client && client.websiteSetting && typeof client.websiteSetting.findUnique === 'function');
     },
     async readRow(): Promise<MySqlWebsiteSettingRow | null> {
-      const client = getPrismaClient();
+      const client = prismaProvider() || getPrismaClient();
       if (!client?.websiteSetting) return null;
       const row = await client.websiteSetting.findUnique({
         where: { key: MEDIA_CLEANUP_MYSQL_KEY },
@@ -420,11 +441,11 @@ export function createPrismaMySqlMediaStateBackend(): MySqlMediaStateBackend {
       return {
         key: row.key,
         value: row.value,
-        updatedAt: row.updatedAt instanceof Date ? row.updatedAt : new Date(row.updatedAt),
+        revisionToken: typeof row.description === 'string' ? row.description : null,
       };
     },
-    async createRow(value: string): Promise<{ created: boolean; conflict?: boolean }> {
-      const client = getPrismaClient();
+    async createRow(value: string, revisionToken: string): Promise<{ created: boolean; conflict?: boolean }> {
+      const client = prismaProvider() || getPrismaClient();
       if (!client?.websiteSetting) return { created: false };
       try {
         await client.websiteSetting.create({
@@ -432,7 +453,7 @@ export function createPrismaMySqlMediaStateBackend(): MySqlMediaStateBackend {
             key: MEDIA_CLEANUP_MYSQL_KEY,
             value,
             group: MEDIA_CLEANUP_MYSQL_GROUP,
-            description: 'Internal restart-safe media cleanup state (pending uploads, leases, deferred queue).',
+            description: revisionToken,
             isPublic: false,
           },
         });
@@ -444,21 +465,128 @@ export function createPrismaMySqlMediaStateBackend(): MySqlMediaStateBackend {
         throw err;
       }
     },
-    async compareAndSwapRow(expectedUpdatedAt: Date, nextValue: string): Promise<{ updated: boolean }> {
-      const client = getPrismaClient();
+    async compareAndSwapRow(
+      expectedRevisionToken: string | null,
+      nextValue: string,
+      nextRevisionToken: string
+    ): Promise<{ updated: boolean }> {
+      const client = prismaProvider() || getPrismaClient();
       if (!client?.websiteSetting) return { updated: false };
       const res = await client.websiteSetting.updateMany({
         where: {
           key: MEDIA_CLEANUP_MYSQL_KEY,
-          updatedAt: expectedUpdatedAt,
+          description: expectedRevisionToken,
         },
         data: {
           value: nextValue,
+          description: nextRevisionToken,
           group: MEDIA_CLEANUP_MYSQL_GROUP,
           isPublic: false,
         },
       });
       return { updated: Number(res?.count || 0) > 0 };
+    },
+    async runLockedUpdate<T>(
+      updater: (currentRow: MySqlWebsiteSettingRow | null) => {
+        nextValue: string;
+        nextRevisionToken: string;
+        result: T;
+      }
+    ): Promise<T> {
+      const client = prismaProvider() || getPrismaClient();
+      if (!client || typeof client.$transaction !== 'function') {
+        throw new Error('Prisma transactional client unavailable for locked state update.');
+      }
+
+      return client.$transaction(
+        async (tx: any) => {
+          let currentRow: MySqlWebsiteSettingRow | null = null;
+          if (typeof tx.$queryRawUnsafe === 'function') {
+            const rows = (await tx.$queryRawUnsafe(
+              'SELECT `key`, `value`, `description` FROM `website_settings` WHERE `key` = ? FOR UPDATE',
+              MEDIA_CLEANUP_MYSQL_KEY
+            )) as Array<{ key?: string; value?: string; description?: string | null }>;
+            if (Array.isArray(rows) && rows.length > 0 && typeof rows[0].value === 'string') {
+              currentRow = {
+                key: rows[0].key || MEDIA_CLEANUP_MYSQL_KEY,
+                value: rows[0].value,
+                revisionToken: typeof rows[0].description === 'string' ? rows[0].description : null,
+              };
+            }
+          } else if (tx.websiteSetting?.findUnique) {
+            const row = await tx.websiteSetting.findUnique({
+              where: { key: MEDIA_CLEANUP_MYSQL_KEY },
+            });
+            if (row && typeof row.value === 'string') {
+              currentRow = {
+                key: row.key,
+                value: row.value,
+                revisionToken: typeof row.description === 'string' ? row.description : null,
+              };
+            }
+          }
+
+          const { nextValue, nextRevisionToken, result } = updater(currentRow);
+
+          if (!currentRow) {
+            if (typeof tx.$executeRawUnsafe === 'function') {
+              await tx.$executeRawUnsafe(
+                'INSERT INTO `website_settings` (`id`, `key`, `value`, `group`, `description`, `isPublic`, `updatedAt`) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                `mstate-${crypto.randomBytes(8).toString('hex')}`,
+                MEDIA_CLEANUP_MYSQL_KEY,
+                nextValue,
+                MEDIA_CLEANUP_MYSQL_GROUP,
+                nextRevisionToken,
+                false,
+                new Date()
+              );
+            } else {
+              await tx.websiteSetting.create({
+                data: {
+                  key: MEDIA_CLEANUP_MYSQL_KEY,
+                  value: nextValue,
+                  group: MEDIA_CLEANUP_MYSQL_GROUP,
+                  description: nextRevisionToken,
+                  isPublic: false,
+                },
+              });
+            }
+          } else if (typeof tx.$executeRawUnsafe === 'function') {
+            const affected = await tx.$executeRawUnsafe(
+              'UPDATE `website_settings` SET `value` = ?, `description` = ?, `group` = ?, `isPublic` = ?, `updatedAt` = ? WHERE `key` = ? AND (`description` <=> ?)',
+              nextValue,
+              nextRevisionToken,
+              MEDIA_CLEANUP_MYSQL_GROUP,
+              false,
+              new Date(),
+              MEDIA_CLEANUP_MYSQL_KEY,
+              currentRow.revisionToken
+            );
+            if (Number(affected) <= 0) {
+              throw new Error('Revision token conflict while updating media_cleanup_state_v1.');
+            }
+          } else {
+            const res = await tx.websiteSetting.updateMany({
+              where: {
+                key: MEDIA_CLEANUP_MYSQL_KEY,
+                description: currentRow.revisionToken,
+              },
+              data: {
+                value: nextValue,
+                description: nextRevisionToken,
+                group: MEDIA_CLEANUP_MYSQL_GROUP,
+                isPublic: false,
+              },
+            });
+            if (Number(res?.count || 0) <= 0) {
+              throw new Error('Revision token conflict while updating media_cleanup_state_v1.');
+            }
+          }
+
+          return result;
+        },
+        { isolationLevel: 'ReadCommitted', maxWait: 5000, timeout: 10000 }
+      );
     },
   };
 }
@@ -486,6 +614,10 @@ export class DurableMediaStateStore {
     this.maxCasRetries = Math.max(1, options?.maxCasRetries ?? DEFAULT_MAX_CAS_RETRIES);
     this.tombstoneRetentionMs = options?.tombstoneRetentionMs ?? MEDIA_TOMBSTONE_RETENTION_MS;
     this.state = createEmptyDurableMediaState(this.instanceId, this.now());
+  }
+
+  public getRuntimeFilePath(): string {
+    return this.runtimeFilePath;
   }
 
   private async runSerialized<T>(fn: () => Promise<T>): Promise<T> {
@@ -606,8 +738,9 @@ export class DurableMediaStateStore {
   }
 
   /**
-   * Optimistic concurrency (CAS) read-merge-write into MySQL WebsiteSetting.
-   * Never lets an older JSON snapshot overwrite newer MySQL state.
+   * Serialized MySQL persistence using InnoDB `SELECT ... FOR UPDATE` (when available)
+   * or unique `description` revision-token CAS read-merge-retry.
+   * Never uses `updatedAt` timestamps for CAS and never lets an older JSON snapshot overwrite newer MySQL state.
    */
   private async persistToMySqlWithCasUnlocked(
     candidate: DurableMediaStateEnvelope,
@@ -618,6 +751,42 @@ export class DurableMediaStateStore {
       return candidate;
     }
 
+    // Primary path: InnoDB SELECT ... FOR UPDATE + unique description revision token
+    if (typeof this.mysqlBackend.runLockedUpdate === 'function') {
+      try {
+        return await this.mysqlBackend.runLockedUpdate((currentRow) => {
+          let working = cloneEnvelope(candidate);
+          if (currentRow) {
+            const remote = parseEnvelopeJson(currentRow.value, this.instanceId, nowMs);
+            if (remote) {
+              working = mergeDurableMediaState(remote, working, nowMs, this.tombstoneRetentionMs);
+              working.stateVersion = Math.max(working.stateVersion, remote.stateVersion) + 1;
+              working.updatedAt = Math.max(working.updatedAt, nowMs);
+              working.instanceId = this.instanceId;
+            }
+          } else {
+            working.stateVersion = Math.max(1, working.stateVersion);
+          }
+
+          const payloadToStore: DurableMediaStateEnvelope = {
+            ...working,
+            pendingMySqlSync: false,
+            lastSyncedMySqlVersion: working.stateVersion,
+          };
+          const nextRevisionToken = buildRevisionToken(payloadToStore.stateVersion);
+          return {
+            nextValue: JSON.stringify(payloadToStore),
+            nextRevisionToken,
+            result: payloadToStore,
+          };
+        });
+      } catch (err: any) {
+        console.warn('[MEDIA-STATE] MySQL locked persistence temporarily unavailable; retaining state on runtime disk:', err?.message || err);
+        return { ...cloneEnvelope(candidate), pendingMySqlSync: true };
+      }
+    }
+
+    // Fallback path (mocked/custom MySqlMediaStateBackend): unique revision-token CAS
     let working = cloneEnvelope(candidate);
     let currentRow = initialRow;
 
@@ -642,20 +811,24 @@ export class DurableMediaStateStore {
           lastSyncedMySqlVersion: working.stateVersion,
         };
         const serialized = JSON.stringify(payloadToStore);
+        const nextRevisionToken = buildRevisionToken(Math.max(1, payloadToStore.stateVersion));
 
         if (!currentRow) {
-          const createRes = await this.mysqlBackend.createRow(serialized);
+          const createRes = await this.mysqlBackend.createRow(serialized, nextRevisionToken);
           if (createRes.created) {
             return payloadToStore;
           }
           if (createRes.conflict) {
             continue; // Another worker inserted first; re-read, merge, and retry CAS
           }
-          // Backend became unavailable
           return { ...working, pendingMySqlSync: true };
         }
 
-        const casRes = await this.mysqlBackend.compareAndSwapRow(currentRow.updatedAt, serialized);
+        const casRes = await this.mysqlBackend.compareAndSwapRow(
+          currentRow.revisionToken,
+          serialized,
+          nextRevisionToken
+        );
         if (casRes.updated) {
           return payloadToStore;
         }
@@ -668,6 +841,160 @@ export class DurableMediaStateStore {
 
     console.warn('[MEDIA-STATE] Exhausted MySQL CAS retries under high contention; retaining dirty sync flag for next sweep.');
     return { ...working, pendingMySqlSync: true };
+  }
+
+  /**
+   * Reads `media_cleanup_state_v1` inside an already-open MySQL transaction using InnoDB
+   * `LOCK IN SHARE MODE` (current read) for authoritative Gate 5 editor-lease verification.
+   */
+  public async readSnapshotInsideMySqlTx(tx: any): Promise<DurableMediaStateEnvelope> {
+    const nowMs = this.now();
+    let rowValue: string | null = null;
+
+    if (typeof tx?.$queryRawUnsafe === 'function') {
+      const rows = (await tx.$queryRawUnsafe(
+        'SELECT `value` FROM `website_settings` WHERE `key` = ? LOCK IN SHARE MODE',
+        MEDIA_CLEANUP_MYSQL_KEY
+      )) as Array<{ value?: string }>;
+      if (Array.isArray(rows) && rows.length > 0 && typeof rows[0].value === 'string') {
+        rowValue = rows[0].value;
+      }
+    } else if (tx?.websiteSetting?.findUnique) {
+      const row = await tx.websiteSetting.findUnique({
+        where: { key: MEDIA_CLEANUP_MYSQL_KEY },
+      });
+      if (row && typeof row.value === 'string') {
+        rowValue = row.value;
+      }
+    }
+
+    const remote = rowValue ? parseEnvelopeJson(rowValue, this.instanceId, nowMs) : null;
+    if (remote) {
+      return remote;
+    }
+    return createEmptyDurableMediaState(this.instanceId, nowMs);
+  }
+
+  /**
+   * Mutates `media_cleanup_state_v1` inside an already-open MySQL transaction (`Tx_W`)
+   * in strict lock order (called AFTER `media_write_coordination_v1` and `media_retired_v1:*` locks).
+   * Used by `upsertEditorMediaLease` so lease registration is atomic with deletion-fence & tombstone checks.
+   */
+  public async mutateInsideMySqlTx<T>(
+    tx: any,
+    mutator: (draft: DurableMediaStateEnvelope, nowMs: number) => { result: T; changed?: boolean }
+  ): Promise<T> {
+    const nowMs = this.now();
+    let currentRow: MySqlWebsiteSettingRow | null = null;
+
+    if (typeof tx?.$queryRawUnsafe === 'function') {
+      const rows = (await tx.$queryRawUnsafe(
+        'SELECT `key`, `value`, `description` FROM `website_settings` WHERE `key` = ? FOR UPDATE',
+        MEDIA_CLEANUP_MYSQL_KEY
+      )) as Array<{ key?: string; value?: string; description?: string | null }>;
+      if (Array.isArray(rows) && rows.length > 0 && typeof rows[0].value === 'string') {
+        currentRow = {
+          key: rows[0].key || MEDIA_CLEANUP_MYSQL_KEY,
+          value: rows[0].value,
+          revisionToken: typeof rows[0].description === 'string' ? rows[0].description : null,
+        };
+      }
+    } else if (tx?.websiteSetting?.findUnique) {
+      const row = await tx.websiteSetting.findUnique({
+        where: { key: MEDIA_CLEANUP_MYSQL_KEY },
+      });
+      if (row && typeof row.value === 'string') {
+        currentRow = {
+          key: row.key,
+          value: row.value,
+          revisionToken: typeof row.description === 'string' ? row.description : null,
+        };
+      }
+    }
+
+    let base = cloneEnvelope(this.state);
+    if (currentRow) {
+      const remote = parseEnvelopeJson(currentRow.value, this.instanceId, nowMs);
+      if (remote) {
+        base = mergeDurableMediaState(base, remote, nowMs, this.tombstoneRetentionMs);
+      }
+    }
+
+    const { result, changed = true } = mutator(base, nowMs);
+    if (!changed) {
+      return result;
+    }
+
+    const compacted = this.compactEnvelope(base, nowMs);
+    compacted.stateVersion = Math.max(compacted.stateVersion, 0) + 1;
+    compacted.updatedAt = nowMs;
+    compacted.instanceId = this.instanceId;
+    compacted.pendingMySqlSync = false;
+    compacted.lastSyncedMySqlVersion = compacted.stateVersion;
+
+    const nextValue = JSON.stringify(compacted);
+    const nextToken = buildRevisionToken(compacted.stateVersion);
+
+    if (!currentRow) {
+      if (typeof tx?.$executeRawUnsafe === 'function') {
+        await tx.$executeRawUnsafe(
+          'INSERT INTO `website_settings` (`id`, `key`, `value`, `group`, `description`, `isPublic`, `updatedAt`) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          `mstate-${crypto.randomBytes(8).toString('hex')}`,
+          MEDIA_CLEANUP_MYSQL_KEY,
+          nextValue,
+          MEDIA_CLEANUP_MYSQL_GROUP,
+          nextToken,
+          false,
+          new Date()
+        );
+      } else {
+        await tx.websiteSetting.create({
+          data: {
+            key: MEDIA_CLEANUP_MYSQL_KEY,
+            value: nextValue,
+            group: MEDIA_CLEANUP_MYSQL_GROUP,
+            description: nextToken,
+            isPublic: false,
+          },
+        });
+      }
+    } else if (typeof tx?.$executeRawUnsafe === 'function') {
+      const affected = await tx.$executeRawUnsafe(
+        'UPDATE `website_settings` SET `value` = ?, `description` = ?, `group` = ?, `isPublic` = ?, `updatedAt` = ? WHERE `key` = ? AND (`description` <=> ?)',
+        nextValue,
+        nextToken,
+        MEDIA_CLEANUP_MYSQL_GROUP,
+        false,
+        new Date(),
+        MEDIA_CLEANUP_MYSQL_KEY,
+        currentRow.revisionToken
+      );
+      if (Number(affected) <= 0) {
+        throw new Error('Revision token conflict while mutating media_cleanup_state_v1 in transaction.');
+      }
+    } else {
+      const res = await tx.websiteSetting.updateMany({
+        where: {
+          key: MEDIA_CLEANUP_MYSQL_KEY,
+          description: currentRow.revisionToken,
+        },
+        data: {
+          value: nextValue,
+          description: nextToken,
+          group: MEDIA_CLEANUP_MYSQL_GROUP,
+          isPublic: false,
+        },
+      });
+      if (Number(res?.count || 0) <= 0) {
+        throw new Error('Revision token conflict while mutating media_cleanup_state_v1 in transaction.');
+      }
+    }
+
+    this.state = compacted;
+    this.hydrated = true;
+    // Best-effort runtime JSON mirror after DB write prepares (tx commit makes MySQL authoritative)
+    await this.writeDiskStateAtomic(compacted);
+    return result;
   }
 
   public async hydrate(): Promise<DurableMediaStateEnvelope> {

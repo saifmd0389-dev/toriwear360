@@ -61,6 +61,14 @@ export interface StorageConfigStatus {
   error?: string;
 }
 
+export interface DeleteFileOptions {
+  /**
+   * When true, issues the provider's idempotent delete directly without a prior existence check.
+   * Used by crash-reconciliation forward-completion after an atomic deletion fence is acquired.
+   */
+  skipExistenceCheck?: boolean;
+}
+
 export interface StorageAdapter {
   readonly providerName: StorageProviderName;
   uploadFile(
@@ -70,7 +78,7 @@ export interface StorageAdapter {
     options?: UploadFileOptions
   ): Promise<UploadResult>;
   getFile(destinationPath: string): Promise<RetrieveFileResult>;
-  deleteFile(destinationPath: string): Promise<boolean>;
+  deleteFile(destinationPath: string, options?: DeleteFileOptions): Promise<boolean>;
   getFileUrl(destinationPath: string): string;
   fileExists(destinationPath: string): Promise<boolean>;
   getConfigStatus(): StorageConfigStatus;
@@ -278,15 +286,18 @@ export class LocalStorageAdapter implements StorageAdapter {
     }
   }
 
-  public async deleteFile(destinationPath: string): Promise<boolean> {
+  public async deleteFile(destinationPath: string, options?: DeleteFileOptions): Promise<boolean> {
     try {
       const { fullPath } = this.resolveSafeFullPath(destinationPath);
       if (fs.existsSync(fullPath)) {
         fs.unlinkSync(fullPath);
         return true;
       }
-      return false;
-    } catch {
+      return Boolean(options?.skipExistenceCheck);
+    } catch (err: any) {
+      if (options?.skipExistenceCheck && err?.code === 'ENOENT') {
+        return true;
+      }
       return false;
     }
   }
@@ -753,7 +764,7 @@ export class GoogleCloudStorageAdapter implements StorageAdapter {
     }
   }
 
-  public async deleteFile(destinationPath: string): Promise<boolean> {
+  public async deleteFile(destinationPath: string, options?: DeleteFileOptions): Promise<boolean> {
     if (!this.config.valid || !this.bucket) {
       return false;
     }
@@ -761,8 +772,10 @@ export class GoogleCloudStorageAdapter implements StorageAdapter {
     try {
       const cleanPath = sanitizeRelativeStoragePath(destinationPath);
       const file = this.bucket.file(cleanPath);
-      const [exists] = await file.exists();
-      if (!exists) return false;
+      if (!options?.skipExistenceCheck) {
+        const [exists] = await file.exists();
+        if (!exists) return false;
+      }
       await file.delete({ ignoreNotFound: true });
       return true;
     } catch (err: any) {
@@ -1192,15 +1205,17 @@ export class CloudflareR2StorageAdapter implements StorageAdapter {
     }
   }
 
-  public async deleteFile(destinationPath: string): Promise<boolean> {
+  public async deleteFile(destinationPath: string, options?: DeleteFileOptions): Promise<boolean> {
     if (!this.config.valid || !this.s3Client) {
       return false;
     }
 
     try {
       const cleanPath = sanitizeRelativeStoragePath(destinationPath);
-      const exists = await this.fileExists(cleanPath);
-      if (!exists) return false;
+      if (!options?.skipExistenceCheck) {
+        const exists = await this.fileExists(cleanPath);
+        if (!exists) return false;
+      }
 
       await this.s3Client.send(
         new DeleteObjectCommand({

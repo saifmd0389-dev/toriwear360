@@ -4,6 +4,7 @@ import { getPrismaClient } from '../db/prisma';
 import { PRODUCTS } from '../../src/data/products';
 import { MEN_WORLDS, KIDS_WORLDS } from '../../src/data/constants';
 import { resolveSecureStorePath } from '../utils/storageHelper';
+import { mediaWriteCoordinator } from '../services/storage/mediaCoordination';
 
 const PERSIST_FILE = resolveSecureStorePath('custom-products-store.json', 'public/generated-assets/custom-products-store.json');
 const TOMBSTONES_FILE = resolveSecureStorePath('deleted-product-ids.json', 'public/generated-assets/deleted-product-ids.json');
@@ -681,8 +682,159 @@ export class ProductRepository {
 
   async save(product: ProductRecord): Promise<ProductRecord> {
     product.updatedAt = new Date();
-    
-    // If it was previously marked as deleted/tombstone, untombstone it
+
+    const persistProductToDb = async (db: any) => {
+      await db.product.upsert({
+        where: { id: product.id },
+        create: {
+          id: product.id,
+          catalogNumber: product.catalogNumber,
+          name: product.name,
+          slug: product.slug,
+          department: product.department as any,
+          world: product.world,
+          franchise: product.franchise,
+          universe: product.universe,
+          fit: product.fit,
+          price: Number(product.price),
+          originalPrice: Number(product.originalPrice),
+          costPrice: product.costPrice !== undefined ? Number(product.costPrice) : undefined,
+          gsm: Number(product.gsm || 240),
+          fabric: product.fabric,
+          neck: product.neck,
+          sleeves: product.sleeves,
+          print: product.print,
+          description: product.description,
+          storyQuote: product.storyQuote,
+          drop: product.drop,
+          isBestseller: Boolean(product.isBestseller),
+          isNewDrop: Boolean(product.isNewDrop),
+          isTrending: Boolean(product.isTrending),
+          inStock: Boolean(product.inStock),
+          rating: Number(product.rating || 5.0),
+          reviewsCount: Number(product.reviewsCount || 0),
+          licenseType: product.licenseType,
+          publishingStatus: product.status as any,
+          categoryId: product.categoryId || (Array.isArray(product.categoryIds) ? product.categoryIds[0] : null) || null,
+          categoryIdsJson: Array.isArray(product.categoryIds) ? JSON.stringify(product.categoryIds) : null,
+        },
+        update: {
+          catalogNumber: product.catalogNumber,
+          name: product.name,
+          slug: product.slug,
+          department: product.department as any,
+          world: product.world,
+          franchise: product.franchise,
+          universe: product.universe,
+          fit: product.fit,
+          price: Number(product.price),
+          originalPrice: Number(product.originalPrice),
+          costPrice: product.costPrice !== undefined ? Number(product.costPrice) : undefined,
+          gsm: Number(product.gsm || 240),
+          fabric: product.fabric,
+          neck: product.neck,
+          sleeves: product.sleeves,
+          print: product.print,
+          description: product.description,
+          storyQuote: product.storyQuote,
+          drop: product.drop,
+          isBestseller: Boolean(product.isBestseller),
+          isNewDrop: Boolean(product.isNewDrop),
+          isTrending: Boolean(product.isTrending),
+          inStock: Boolean(product.inStock),
+          rating: Number(product.rating || 5.0),
+          reviewsCount: Number(product.reviewsCount || 0),
+          licenseType: product.licenseType,
+          publishingStatus: product.status as any,
+          categoryId: product.categoryId || (Array.isArray(product.categoryIds) ? product.categoryIds[0] : null) || null,
+          categoryIdsJson: Array.isArray(product.categoryIds) ? JSON.stringify(product.categoryIds) : null,
+          updatedAt: new Date(),
+        },
+      });
+
+      // Sync variants to Prisma if present
+      if (Array.isArray(product.variants) && product.variants.length > 0 && db.productVariant) {
+        const defaultWeight = product.department === 'KIDS' ? 200 : 340;
+        for (const v of product.variants) {
+          const variantSku = v.sku || `SKU-${v.id}`;
+          const variantWeight = v.weightGrams !== undefined ? Number(v.weightGrams) : defaultWeight;
+          await db.productVariant.upsert({
+            where: { sku: variantSku },
+            create: {
+              id: v.id,
+              productId: product.id,
+              sku: variantSku,
+              size: v.size,
+              colorName: v.colorName || 'Void Black',
+              colorHex: v.colorHex || '#0a0a0c',
+              price: Number(v.price),
+              originalPrice: Number(v.originalPrice || product.originalPrice),
+              stock: Number(v.stock || 0),
+              reservedStock: Number(v.reservedStock || 0),
+              weightGrams: variantWeight,
+              barcode: v.barcode ?? null,
+              isActive: v.isActive !== false,
+            },
+            update: {
+              sku: v.sku || `SKU-${v.id}`,
+              size: v.size,
+              colorName: v.colorName || 'Void Black',
+              colorHex: v.colorHex || '#0a0a0c',
+              price: Number(v.price),
+              originalPrice: Number(product.originalPrice || v.originalPrice),
+              stock: Number(v.stock || 0),
+              reservedStock: Number(v.reservedStock || 0),
+              weightGrams: variantWeight,
+              barcode: v.barcode ?? null,
+              isActive: v.isActive !== false,
+            },
+          });
+        }
+      }
+
+      // Sync unlimited gallery images to Prisma ProductImage table
+      if (db.productImage && Array.isArray(product.images)) {
+        const validImgs = product.images.filter((url): url is string => typeof url === 'string' && url.trim().length > 0);
+        await db.productImage.deleteMany({ where: { productId: product.id } });
+        if (validImgs.length > 0) {
+          await db.productImage.createMany({
+            data: validImgs.map((url, idx) => ({
+              productId: product.id,
+              url,
+              displayOrder: idx,
+              isPrimary: idx === 0,
+              angle: idx === 0 ? 'FRONT' : 'DETAIL',
+            })),
+          });
+        }
+      }
+    };
+
+    // Execute inside single-transaction InnoDB shared-lock coordination (Tx_W) when product contains managed URLs.
+    // Local cache & disk are mutated ONLY AFTER coordinated persistence commits.
+    await mediaWriteCoordinator.executeCoordinatedWrite({
+      payload: { images: product.images, variants: product.variants },
+      executeInTx: async (tx, verifiedKeys) => {
+        if (tx?.product) {
+          await persistProductToDb(tx);
+          return;
+        }
+        const prisma = getPrismaClient();
+        if (prisma?.product) {
+          if (verifiedKeys.length > 0) {
+            await persistProductToDb(prisma);
+          } else {
+            try {
+              await persistProductToDb(prisma);
+            } catch (err) {
+              console.error('[REPO] Error persisting non-media product update to MySQL Prisma:', err);
+            }
+          }
+        }
+      },
+    });
+
+    // If it was previously marked as deleted/tombstone, untombstone it only after commit
     if (this.deletedProductIds.has(product.id) || this.deletedProductIds.has(product.catalogNumber)) {
       this.deletedProductIds.delete(product.id);
       this.deletedProductIds.delete(product.catalogNumber);
@@ -690,139 +842,6 @@ export class ProductRepository {
     }
 
     this.fallbackProducts.set(product.id, product);
-
-    const prisma = getPrismaClient();
-    if (prisma?.product) {
-      try {
-        await prisma.product.upsert({
-          where: { id: product.id },
-          create: {
-            id: product.id,
-            catalogNumber: product.catalogNumber,
-            name: product.name,
-            slug: product.slug,
-            department: product.department as any,
-            world: product.world,
-            franchise: product.franchise,
-            universe: product.universe,
-            fit: product.fit,
-            price: Number(product.price),
-            originalPrice: Number(product.originalPrice),
-            costPrice: product.costPrice !== undefined ? Number(product.costPrice) : undefined,
-            gsm: Number(product.gsm || 240),
-            fabric: product.fabric,
-            neck: product.neck,
-            sleeves: product.sleeves,
-            print: product.print,
-            description: product.description,
-            storyQuote: product.storyQuote,
-            drop: product.drop,
-            isBestseller: Boolean(product.isBestseller),
-            isNewDrop: Boolean(product.isNewDrop),
-            isTrending: Boolean(product.isTrending),
-            inStock: Boolean(product.inStock),
-            rating: Number(product.rating || 5.0),
-            reviewsCount: Number(product.reviewsCount || 0),
-            licenseType: product.licenseType,
-            publishingStatus: product.status as any,
-            categoryId: product.categoryId || (Array.isArray(product.categoryIds) ? product.categoryIds[0] : null) || null,
-            categoryIdsJson: Array.isArray(product.categoryIds) ? JSON.stringify(product.categoryIds) : null,
-          },
-          update: {
-            catalogNumber: product.catalogNumber,
-            name: product.name,
-            slug: product.slug,
-            department: product.department as any,
-            world: product.world,
-            franchise: product.franchise,
-            universe: product.universe,
-            fit: product.fit,
-            price: Number(product.price),
-            originalPrice: Number(product.originalPrice),
-            costPrice: product.costPrice !== undefined ? Number(product.costPrice) : undefined,
-            gsm: Number(product.gsm || 240),
-            fabric: product.fabric,
-            neck: product.neck,
-            sleeves: product.sleeves,
-            print: product.print,
-            description: product.description,
-            storyQuote: product.storyQuote,
-            drop: product.drop,
-            isBestseller: Boolean(product.isBestseller),
-            isNewDrop: Boolean(product.isNewDrop),
-            isTrending: Boolean(product.isTrending),
-            inStock: Boolean(product.inStock),
-            rating: Number(product.rating || 5.0),
-            reviewsCount: Number(product.reviewsCount || 0),
-            licenseType: product.licenseType,
-            publishingStatus: product.status as any,
-            categoryId: product.categoryId || (Array.isArray(product.categoryIds) ? product.categoryIds[0] : null) || null,
-            categoryIdsJson: Array.isArray(product.categoryIds) ? JSON.stringify(product.categoryIds) : null,
-            updatedAt: new Date(),
-          },
-        });
-
-        // Sync variants to Prisma if present
-        if (Array.isArray(product.variants) && product.variants.length > 0) {
-          const defaultWeight = product.department === 'KIDS' ? 200 : 340;
-          for (const v of product.variants) {
-            const variantSku = v.sku || `SKU-${v.id}`;
-            const variantWeight = v.weightGrams !== undefined ? Number(v.weightGrams) : defaultWeight;
-            await prisma.productVariant.upsert({
-              where: { sku: variantSku },
-              create: {
-                id: v.id,
-                productId: product.id,
-                sku: variantSku,
-                size: v.size,
-                colorName: v.colorName || 'Void Black',
-                colorHex: v.colorHex || '#0a0a0c',
-                price: Number(v.price),
-                originalPrice: Number(v.originalPrice || product.originalPrice),
-                stock: Number(v.stock || 0),
-                reservedStock: Number(v.reservedStock || 0),
-                weightGrams: variantWeight,
-                barcode: v.barcode ?? null,
-                isActive: v.isActive !== false,
-              },
-              update: {
-                sku: v.sku || `SKU-${v.id}`,
-                size: v.size,
-                colorName: v.colorName || 'Void Black',
-                colorHex: v.colorHex || '#0a0a0c',
-                price: Number(v.price),
-                originalPrice: Number(v.originalPrice || product.originalPrice),
-                stock: Number(v.stock || 0),
-                reservedStock: Number(v.reservedStock || 0),
-                weightGrams: variantWeight,
-                barcode: v.barcode ?? null,
-                isActive: v.isActive !== false,
-              },
-            });
-          }
-        }
-
-        // Sync unlimited gallery images to Prisma ProductImage table
-        if (prisma.productImage && Array.isArray(product.images)) {
-          const validImgs = product.images.filter((url): url is string => typeof url === 'string' && url.trim().length > 0);
-          await prisma.productImage.deleteMany({ where: { productId: product.id } });
-          if (validImgs.length > 0) {
-            await prisma.productImage.createMany({
-              data: validImgs.map((url, idx) => ({
-                productId: product.id,
-                url,
-                displayOrder: idx,
-                isPrimary: idx === 0,
-                angle: idx === 0 ? 'FRONT' : 'DETAIL',
-              })),
-            });
-          }
-        }
-      } catch (err) {
-        console.error('[REPO] Error persisting product to MySQL Prisma:', err);
-      }
-    }
-
     this.persistCustomProductsToFile();
 
     // Immediate retrieval verification
@@ -1110,49 +1129,66 @@ export class ProductRepository {
       showInNav: cat.showInNav !== false,
       displayOrder: Number.isFinite(Number(cat.displayOrder)) ? Number(cat.displayOrder) : 99,
     };
+
+    const upsertCategoryToDb = async (db: any) => {
+      await db.category.upsert({
+        where: { id: normalized.id },
+        create: {
+          id: normalized.id,
+          name: normalized.name,
+          slug: normalized.slug,
+          department: normalized.department as any,
+          parentId: normalized.parentId || null,
+          description: normalized.description || null,
+          image: normalized.image || null,
+          bannerImage: normalized.bannerImage || null,
+          seoTitle: normalized.seoTitle || null,
+          seoDescription: normalized.seoDescription || null,
+          displayOrder: normalized.displayOrder,
+          isActive: normalized.isActive,
+          showInNav: normalized.showInNav !== false,
+        },
+        update: {
+          name: normalized.name,
+          slug: normalized.slug,
+          department: normalized.department as any,
+          parentId: normalized.parentId || null,
+          description: normalized.description || null,
+          image: normalized.image || null,
+          bannerImage: normalized.bannerImage || null,
+          seoTitle: normalized.seoTitle || null,
+          seoDescription: normalized.seoDescription || null,
+          displayOrder: normalized.displayOrder,
+          isActive: normalized.isActive,
+          showInNav: normalized.showInNav !== false,
+        },
+      });
+    };
+
+    await mediaWriteCoordinator.executeCoordinatedWrite({
+      payload: { image: normalized.image, bannerImage: normalized.bannerImage },
+      executeInTx: async (tx, verifiedKeys) => {
+        if (tx?.category) {
+          await upsertCategoryToDb(tx);
+          return;
+        }
+        const prisma = getPrismaClient();
+        if (prisma?.category) {
+          if (verifiedKeys.length > 0) {
+            await upsertCategoryToDb(prisma);
+          } else {
+            try {
+              await upsertCategoryToDb(prisma);
+            } catch (err) {
+              console.warn('[REPO] Prisma saveCategory note:', (err as any)?.message || err);
+            }
+          }
+        }
+      },
+    });
+
     this.fallbackCategories.set(normalized.id, normalized);
     this.persistCategoriesToDisk();
-
-    const prisma = getPrismaClient();
-    if (prisma?.category) {
-      try {
-        await prisma.category.upsert({
-          where: { id: normalized.id },
-          create: {
-            id: normalized.id,
-            name: normalized.name,
-            slug: normalized.slug,
-            department: normalized.department as any,
-            parentId: normalized.parentId || null,
-            description: normalized.description || null,
-            image: normalized.image || null,
-            bannerImage: normalized.bannerImage || null,
-            seoTitle: normalized.seoTitle || null,
-            seoDescription: normalized.seoDescription || null,
-            displayOrder: normalized.displayOrder,
-            isActive: normalized.isActive,
-            showInNav: normalized.showInNav !== false,
-          },
-          update: {
-            name: normalized.name,
-            slug: normalized.slug,
-            department: normalized.department as any,
-            parentId: normalized.parentId || null,
-            description: normalized.description || null,
-            image: normalized.image || null,
-            bannerImage: normalized.bannerImage || null,
-            seoTitle: normalized.seoTitle || null,
-            seoDescription: normalized.seoDescription || null,
-            displayOrder: normalized.displayOrder,
-            isActive: normalized.isActive,
-            showInNav: normalized.showInNav !== false,
-          },
-        });
-      } catch (err) {
-        console.warn('[REPO] Prisma saveCategory note:', (err as any)?.message || err);
-      }
-    }
-
     return normalized;
   }
 
