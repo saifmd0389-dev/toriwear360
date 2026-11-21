@@ -657,6 +657,7 @@ async function insertPermanentRetiredTombstoneInTx(
 export interface MediaWriteCoordinatorOptions {
   prismaProvider?: () => any;
   storageAdapterProvider?: () => StorageAdapter;
+  envProvider?: () => NodeJS.ProcessEnv;
   localCoordinationFilePath?: string;
   localRetiredFilePath?: string;
   workerId?: string;
@@ -665,6 +666,117 @@ export interface MediaWriteCoordinatorOptions {
   writerTxMaxWaitMs?: number;
   cleanupGateTxTimeoutMs?: number;
   cleanupGateTxMaxWaitMs?: number;
+}
+
+export interface MySqlCoordinationExpectation {
+  mysqlExpected: boolean;
+  explicitlyDisabled: boolean;
+  reason: string;
+}
+
+export type MediaCoordinationBackend =
+  | { mode: 'mysql'; prisma: any }
+  | { mode: 'local-single-process' }
+  | { mode: 'unavailable'; reason: string };
+
+function cleanEnvFlag(raw: string | undefined): string {
+  let val = String(raw || '').trim();
+  if (
+    (val.startsWith('"') && val.endsWith('"') && val.length >= 2) ||
+    (val.startsWith("'") && val.endsWith("'") && val.length >= 2)
+  ) {
+    val = val.slice(1, -1).trim();
+  }
+  return val;
+}
+
+function isPlaceholderEnvValue(val: string): boolean {
+  const lower = val.toLowerCase();
+  return (
+    !lower ||
+    lower === '<from-hosting>' ||
+    lower.includes('placeholder') ||
+    lower.includes('your_') ||
+    lower === 'localhost:5432'
+  );
+}
+
+/**
+ * Side-effect-free determination of whether MySQL coordination is configured or expected.
+ *
+ * - Explicit `USE_MYSQL=false` (or `0` / `no`): explicitly MySQL-disabled; local single-process
+ *   coordination is allowed.
+ * - Explicit `USE_MYSQL=true` (or any non-empty value other than explicit false): MySQL is required
+ *   and coordination MUST fail closed if Prisma or MySQL is unavailable.
+ * - `USE_MYSQL` unset:
+ *   - If MySQL credentials are configured or partially configured (`DB_HOST`, `DB_NAME`, `DB_USER`,
+ *     or `mysql://`/`mysqls://` `DATABASE_URL`) OR `NODE_ENV === 'production'`: MySQL is expected
+ *     and coordination MUST fail closed if Prisma or MySQL is unavailable.
+ *   - Otherwise (existing Tori-Wear non-production local fallback where no MySQL env vars are set):
+ *     single-process local coordination is permitted.
+ */
+export function evaluateMySqlCoordinationExpectation(
+  env: NodeJS.ProcessEnv = process.env
+): MySqlCoordinationExpectation {
+  const rawUseMysql = cleanEnvFlag(env.USE_MYSQL).toLowerCase();
+
+  if (rawUseMysql === 'false' || rawUseMysql === '0' || rawUseMysql === 'no') {
+    return {
+      mysqlExpected: false,
+      explicitlyDisabled: true,
+      reason: 'USE_MYSQL=false explicitly configured (single-process local coordination)',
+    };
+  }
+
+  if (rawUseMysql !== '') {
+    return {
+      mysqlExpected: true,
+      explicitlyDisabled: false,
+      reason:
+        rawUseMysql === 'true' || rawUseMysql === '1' || rawUseMysql === 'yes'
+          ? 'USE_MYSQL=true explicitly configured'
+          : `Non-false USE_MYSQL="${rawUseMysql}" requires MySQL coordination`,
+    };
+  }
+
+  const dbHost = cleanEnvFlag(env.DB_HOST);
+  const dbName = cleanEnvFlag(env.DB_NAME);
+  const dbUser = cleanEnvFlag(env.DB_USER);
+  if (!isPlaceholderEnvValue(dbHost) || !isPlaceholderEnvValue(dbName) || !isPlaceholderEnvValue(dbUser)) {
+    return {
+      mysqlExpected: true,
+      explicitlyDisabled: false,
+      reason: 'MySQL DB_* environment variables are configured',
+    };
+  }
+
+  const dbUrl = cleanEnvFlag(env.DATABASE_URL);
+  const dbUrlLower = dbUrl.toLowerCase();
+  if (
+    dbUrl &&
+    !isPlaceholderEnvValue(dbUrl) &&
+    (dbUrlLower.startsWith('mysql://') || dbUrlLower.startsWith('mysqls://'))
+  ) {
+    return {
+      mysqlExpected: true,
+      explicitlyDisabled: false,
+      reason: 'MySQL DATABASE_URL is configured',
+    };
+  }
+
+  if (cleanEnvFlag(env.NODE_ENV).toLowerCase() === 'production') {
+    return {
+      mysqlExpected: true,
+      explicitlyDisabled: false,
+      reason: 'NODE_ENV=production requires MySQL coordination',
+    };
+  }
+
+  return {
+    mysqlExpected: false,
+    explicitlyDisabled: true,
+    reason: 'MySQL is not configured in non-production environment (single-process local coordination)',
+  };
 }
 
 export type AcquireDeletionFenceResult =
@@ -676,12 +788,14 @@ export type AcquireDeletionFenceResult =
 
 /**
  * Coordinates media-bearing writes, permanent retired tombstones, and Gate 5 deletion fences
- * across Node.js workers (when MySQL is configured) or within a single local Preview process.
+ * across Node.js workers (when MySQL is configured/expected) or within a single local Preview process
+ * ONLY when MySQL is explicitly disabled (`USE_MYSQL=false`) or unconfigured in non-production dev mode.
  */
 export class MediaWriteCoordinator {
   public readonly workerId: string;
   private readonly getPrisma: () => any;
   private readonly getStorage: () => StorageAdapter;
+  private readonly getEnv: () => NodeJS.ProcessEnv;
   private readonly localCoordinationFilePath: string;
   private readonly localRetiredFilePath: string;
   private readonly now: () => number;
@@ -699,6 +813,7 @@ export class MediaWriteCoordinator {
       options?.workerId || `worker-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
     this.getPrisma = options?.prismaProvider || (() => getRawPrismaClient());
     this.getStorage = options?.storageAdapterProvider || (() => getStorageAdapter());
+    this.getEnv = options?.envProvider || (() => process.env);
     this.localCoordinationFilePath =
       options?.localCoordinationFilePath || resolveSecureStorePath('media_write_coordination.json');
     this.localRetiredFilePath =
@@ -709,16 +824,50 @@ export class MediaWriteCoordinator {
     this.cleanupGateTxMaxWaitMs = options?.cleanupGateTxMaxWaitMs ?? DEFAULT_CLEANUP_GATE_TX_MAX_WAIT_MS;
   }
 
-  private getMySqlClient(): any | null {
-    const client = this.getPrisma();
-    if (client && typeof client.$transaction === 'function') {
-      return client;
+  /**
+   * Resolves the authoritative coordination backend without ever silently falling back
+   * to local JSON when MySQL is configured or expected.
+   */
+  public resolveCoordinationBackend(): MediaCoordinationBackend {
+    const env = this.getEnv();
+    const rawUseMysql = cleanEnvFlag(env.USE_MYSQL).toLowerCase();
+
+    // 1. Explicit USE_MYSQL=false: strictly use local single-process coordination.
+    if (rawUseMysql === 'false' || rawUseMysql === '0' || rawUseMysql === 'no') {
+      return { mode: 'local-single-process' };
     }
-    return null;
+
+    const expectation = evaluateMySqlCoordinationExpectation(env);
+
+    // 2. Obtain Prisma client; catch initialization/provider failures and fail closed.
+    let client: any = null;
+    try {
+      client = this.getPrisma();
+    } catch (err: any) {
+      return {
+        mode: 'unavailable',
+        reason: `MySQL Prisma client initialization failed: ${err?.message || String(err)}`,
+      };
+    }
+
+    if (client && typeof client.$transaction === 'function') {
+      return { mode: 'mysql', prisma: client };
+    }
+
+    // 3. When MySQL is configured or expected, NEVER fall back to local JSON coordination.
+    if (expectation.mysqlExpected) {
+      return {
+        mode: 'unavailable',
+        reason: `MySQL media coordination is unavailable (${expectation.reason}): Prisma client is missing, failed to initialize, or lacks transaction support.`,
+      };
+    }
+
+    // 4. Local single-process coordination only when MySQL is explicitly disabled / unconfigured in non-production.
+    return { mode: 'local-single-process' };
   }
 
   public isMySqlCoordinationActive(): boolean {
-    return this.getMySqlClient() !== null;
+    return this.resolveCoordinationBackend().mode === 'mysql';
   }
 
   // ---- Single-process local JSON persistence (strictly USE_MYSQL === false) ----
@@ -782,9 +931,14 @@ export class MediaWriteCoordinator {
     if (uniqueKeys.length === 0) return;
 
     const retiredCode = options?.codeOnRetired || 'MEDIA_OBJECT_RETIRED';
-    const prisma = this.getMySqlClient();
+    const backend = this.resolveCoordinationBackend();
 
-    if (prisma) {
+    if (backend.mode === 'unavailable') {
+      throw new MediaCoordinationUnavailableError(backend.reason);
+    }
+
+    if (backend.mode === 'mysql') {
+      const prisma = backend.prisma;
       try {
         await ensureCoordinationRowInMySql(prisma);
         await prisma.$transaction(
@@ -814,7 +968,7 @@ export class MediaWriteCoordinator {
       }
     }
 
-    // Single-process local Preview mode
+    // Single-process local mode (explicitly MySQL-disabled)
     await this.localRwLock.withShared(async () => {
       const state = this.readLocalCoordinationState();
       const deletingHits = uniqueKeys.filter((k) => Boolean(state.deletingKeys[k]));
@@ -867,14 +1021,18 @@ export class MediaWriteCoordinator {
       throw new MediaEnumerationIncompleteError(extracted.reason || 'incomplete payload scan');
     }
 
-    const prisma = this.getMySqlClient();
-
     // Fast path: zero managed URLs and no DB-side payload lookup -> non-media write (non-fatal)
     if (extracted.compositeKeys.length === 0 && !params.resolveAdditionalPayloadInTx) {
       return params.executeInTx(null, []);
     }
 
-    if (prisma) {
+    const backend = this.resolveCoordinationBackend();
+    if (backend.mode === 'unavailable') {
+      throw new MediaCoordinationUnavailableError(backend.reason);
+    }
+
+    if (backend.mode === 'mysql') {
+      const prisma = backend.prisma;
       try {
         await ensureCoordinationRowInMySql(prisma);
       } catch (err: any) {
@@ -934,7 +1092,7 @@ export class MediaWriteCoordinator {
       }
     }
 
-    // Single-process Preview / local JSON mode (USE_MYSQL === false)
+    // Single-process local JSON mode (explicitly MySQL-disabled)
     return this.localRwLock.withShared(async () => {
       const state = this.readLocalCoordinationState();
       let allCompositeKeys = [...extracted.compositeKeys];
@@ -978,9 +1136,17 @@ export class MediaWriteCoordinator {
     isReferencedInTx: (tx: any | null) => Promise<boolean>;
   }): Promise<AcquireDeletionFenceResult> {
     const compositeKey = buildMediaCompositeKey(params.provider, params.storageKey);
-    const prisma = this.getMySqlClient();
+    const backend = this.resolveCoordinationBackend();
 
-    if (prisma) {
+    if (backend.mode === 'unavailable') {
+      return {
+        status: 'coordination-unavailable',
+        error: backend.reason,
+      };
+    }
+
+    if (backend.mode === 'mysql') {
+      const prisma = backend.prisma;
       try {
         await ensureCoordinationRowInMySql(prisma);
         return await prisma.$transaction(
@@ -1054,7 +1220,7 @@ export class MediaWriteCoordinator {
       }
     }
 
-    // Single-process Preview / local JSON mode
+    // Single-process local JSON mode (explicitly MySQL-disabled)
     return this.localRwLock.withExclusive(async () => {
       const state = this.readLocalCoordinationState();
       if (state.deletingKeys[compositeKey]) {
@@ -1102,10 +1268,16 @@ export class MediaWriteCoordinator {
    * Keeps the key permanently blocked to writers until forward-completion verifies `fileExists === false`.
    */
   public async markDeletionFenceUncertain(compositeKey: string, errorMessage: string): Promise<void> {
-    const prisma = this.getMySqlClient();
+    const backend = this.resolveCoordinationBackend();
     const nowMs = this.now();
 
-    if (prisma) {
+    if (backend.mode === 'unavailable') {
+      console.warn('[MEDIA-COORD] MySQL coordination unavailable while marking deletion fence UNCERTAIN (fail-closed):', backend.reason);
+      return;
+    }
+
+    if (backend.mode === 'mysql') {
+      const prisma = backend.prisma;
       try {
         await ensureCoordinationRowInMySql(prisma);
         await prisma.$transaction(
@@ -1176,32 +1348,44 @@ export class MediaWriteCoordinator {
       retiredAtMs: this.now(),
       reason: params.reason,
     };
-    const prisma = this.getMySqlClient();
+    const backend = this.resolveCoordinationBackend();
 
-    if (prisma) {
-      await ensureCoordinationRowInMySql(prisma);
-      await prisma.$transaction(
-        async (tx: any) => {
-          // Strict lock order: (1) media_write_coordination_v1 FOR UPDATE -> (2) INSERT IGNORE media_retired_v1:<hash>
-          const { state, description } = await lockAndReadCoordinationRowInTx(tx, 'EXCLUSIVE');
-          await insertPermanentRetiredTombstoneInTx(tx, tombstone);
+    if (backend.mode === 'unavailable') {
+      throw new MediaCoordinationUnavailableError(backend.reason);
+    }
 
-          const nextDeleting = { ...state.deletingKeys };
-          delete nextDeleting[compositeKey];
-          const nextState: MediaWriteCoordinationState = {
-            schemaVersion: 1,
-            version: state.version + 1,
-            deletingKeys: nextDeleting,
-          };
-          await updateCoordinationRowInTx(tx, nextState, description);
-        },
-        {
-          isolationLevel: 'ReadCommitted',
-          maxWait: this.cleanupGateTxMaxWaitMs,
-          timeout: this.cleanupGateTxTimeoutMs,
-        }
-      );
-      return true;
+    if (backend.mode === 'mysql') {
+      const prisma = backend.prisma;
+      try {
+        await ensureCoordinationRowInMySql(prisma);
+        await prisma.$transaction(
+          async (tx: any) => {
+            // Strict lock order: (1) media_write_coordination_v1 FOR UPDATE -> (2) INSERT IGNORE media_retired_v1:<hash>
+            const { state, description } = await lockAndReadCoordinationRowInTx(tx, 'EXCLUSIVE');
+            await insertPermanentRetiredTombstoneInTx(tx, tombstone);
+
+            const nextDeleting = { ...state.deletingKeys };
+            delete nextDeleting[compositeKey];
+            const nextState: MediaWriteCoordinationState = {
+              schemaVersion: 1,
+              version: state.version + 1,
+              deletingKeys: nextDeleting,
+            };
+            await updateCoordinationRowInTx(tx, nextState, description);
+          },
+          {
+            isolationLevel: 'ReadCommitted',
+            maxWait: this.cleanupGateTxMaxWaitMs,
+            timeout: this.cleanupGateTxTimeoutMs,
+          }
+        );
+        return true;
+      } catch (err: any) {
+        if (isMediaCoordinationError(err)) throw err;
+        throw new MediaCoordinationUnavailableError(
+          `Failed to finalize permanent tombstone in MySQL: ${err?.message || String(err)}`
+        );
+      }
     }
 
     await this.localRwLock.withExclusive(async () => {
@@ -1225,8 +1409,13 @@ export class MediaWriteCoordinator {
     provider: StorageProviderName,
     staleThresholdMs: number = DEFAULT_FENCE_HEARTBEAT_STALE_MS
   ): Promise<DeletingKeyFence[]> {
-    const prisma = this.getMySqlClient();
+    const backend = this.resolveCoordinationBackend();
     const nowMs = this.now();
+
+    if (backend.mode === 'unavailable') {
+      console.warn('[MEDIA-COORD] MySQL coordination unavailable; aborting fence reconciliation (fail-closed):', backend.reason);
+      return [];
+    }
 
     const pickAndClaim = (state: MediaWriteCoordinationState): { claimed: DeletingKeyFence[]; changed: boolean } => {
       const claimed: DeletingKeyFence[] = [];
@@ -1252,7 +1441,8 @@ export class MediaWriteCoordinator {
       return { claimed, changed };
     };
 
-    if (prisma) {
+    if (backend.mode === 'mysql') {
+      const prisma = backend.prisma;
       try {
         await ensureCoordinationRowInMySql(prisma);
         return await prisma.$transaction(
@@ -1295,30 +1485,52 @@ export class MediaWriteCoordinator {
     state: MediaWriteCoordinationState;
     mysqlActive: boolean;
   }> {
-    const prisma = this.getMySqlClient();
-    if (prisma) {
-      await ensureCoordinationRowInMySql(prisma);
-      const state = await prisma.$transaction(
-        async (tx: any) => {
-          const res = await lockAndReadCoordinationRowInTx(tx, 'SHARED');
-          return res.state;
-        },
-        { isolationLevel: 'ReadCommitted', maxWait: 5000, timeout: 5000 }
-      );
-      return { state, mysqlActive: true };
+    const backend = this.resolveCoordinationBackend();
+    if (backend.mode === 'unavailable') {
+      throw new MediaCoordinationUnavailableError(backend.reason);
+    }
+    if (backend.mode === 'mysql') {
+      const prisma = backend.prisma;
+      try {
+        await ensureCoordinationRowInMySql(prisma);
+        const state = await prisma.$transaction(
+          async (tx: any) => {
+            const res = await lockAndReadCoordinationRowInTx(tx, 'SHARED');
+            return res.state;
+          },
+          { isolationLevel: 'ReadCommitted', maxWait: 5000, timeout: 5000 }
+        );
+        return { state, mysqlActive: true };
+      } catch (err: any) {
+        if (isMediaCoordinationError(err)) throw err;
+        throw new MediaCoordinationUnavailableError(
+          `MySQL coordination snapshot unavailable: ${err?.message || String(err)}`
+        );
+      }
     }
     const state = await this.localRwLock.withShared(async () => this.readLocalCoordinationState());
     return { state, mysqlActive: false };
   }
 
   public async isKeyPermanentlyRetired(compositeKey: string): Promise<boolean> {
-    const prisma = this.getMySqlClient();
-    if (prisma) {
-      const hits = await prisma.$transaction(
-        async (tx: any) => readPermanentRetiredTombstonesInTx(tx, [compositeKey]),
-        { isolationLevel: 'ReadCommitted', maxWait: 5000, timeout: 5000 }
-      );
-      return hits.length > 0;
+    const backend = this.resolveCoordinationBackend();
+    if (backend.mode === 'unavailable') {
+      throw new MediaCoordinationUnavailableError(backend.reason);
+    }
+    if (backend.mode === 'mysql') {
+      const prisma = backend.prisma;
+      try {
+        const hits = await prisma.$transaction(
+          async (tx: any) => readPermanentRetiredTombstonesInTx(tx, [compositeKey]),
+          { isolationLevel: 'ReadCommitted', maxWait: 5000, timeout: 5000 }
+        );
+        return hits.length > 0;
+      } catch (err: any) {
+        if (isMediaCoordinationError(err)) throw err;
+        throw new MediaCoordinationUnavailableError(
+          `MySQL retired tombstone check unavailable: ${err?.message || String(err)}`
+        );
+      }
     }
     return this.localRwLock.withShared(async () => {
       const retired = this.readLocalRetiredTombstones();

@@ -35,6 +35,7 @@ import {
   MediaCoordinationUnavailableError,
   MediaEnumerationIncompleteError,
   MediaWriteCoordinator,
+  evaluateMySqlCoordinationExpectation,
   extractManagedKeysStrict,
   toRetiredTombstoneKey,
 } from '../server/services/storage/mediaCoordination';
@@ -2339,4 +2340,409 @@ test('Gap 1 TOCTOU Verification: concurrent write beginning during awaited stora
     tmp.cleanup();
   }
 });
+
+test('MySQL coordination policy: explicit USE_MYSQL=false allows local single-process coordination and never uses MySQL', async () => {
+  const r2 = createMockR2Adapter();
+  const tmpState = makeTempFile('explicit-mysql-disabled-state');
+  const tmpCoord = makeTempFile('explicit-mysql-disabled-coord');
+  const tmpRetired = makeTempFile('explicit-mysql-disabled-retired');
+
+  try {
+    let prismaCalled = false;
+    const coordinator = new MediaWriteCoordinator({
+      workerId: 'local-explicit-false',
+      // Even if MySQL env vars or a throwing Prisma provider exist, explicit USE_MYSQL=false stays local
+      envProvider: () => ({
+        USE_MYSQL: 'false',
+        DB_HOST: '10.0.0.5',
+        DATABASE_URL: 'mysql://user:pass@10.0.0.5:3306/toriwear',
+        NODE_ENV: 'production',
+      }),
+      prismaProvider: () => {
+        prismaCalled = true;
+        throw new Error('Prisma must not be invoked when USE_MYSQL=false');
+      },
+      storageAdapterProvider: () => r2.adapter,
+      localCoordinationFilePath: tmpCoord.filePath,
+      localRetiredFilePath: tmpRetired.filePath,
+    });
+
+    const expectation = evaluateMySqlCoordinationExpectation({
+      USE_MYSQL: 'false',
+      DB_HOST: '10.0.0.5',
+      NODE_ENV: 'production',
+    });
+    assert.equal(expectation.mysqlExpected, false);
+    assert.equal(expectation.explicitlyDisabled, true);
+
+    assert.equal(coordinator.resolveCoordinationBackend().mode, 'local-single-process');
+    assert.equal(coordinator.isMySqlCoordinationActive(), false);
+    assert.equal(prismaCalled, false);
+
+    const activeKey = 'local-mode-active.webp';
+    const activeUrl = r2.adapter.getFileUrl(activeKey);
+    const orphanKey = 'local-mode-orphan.webp';
+    const orphanUrl = r2.adapter.getFileUrl(orphanKey);
+    r2.objects.set(activeKey, Buffer.from('active-bytes'));
+    r2.objects.set(orphanKey, Buffer.from('orphan-bytes'));
+
+    const savedUrls = new Set<string>();
+    await coordinator.executeCoordinatedWrite({
+      payload: { images: [activeUrl] },
+      executeInTx: async () => {
+        savedUrls.add(activeUrl);
+      },
+    });
+    assert.equal(savedUrls.has(activeUrl), true);
+
+    const cleanupService = new MediaCleanupService({
+      storageAdapterProvider: () => r2.adapter,
+      stateStore: new DurableMediaStateStore({
+        runtimeFilePath: tmpState.filePath,
+      }),
+      coordinator,
+      cleanupCooldownMs: 0,
+      referenceProviders: createEmptyRefs({
+        getAllProducts: async () => [{ id: 'prod-local-1', images: Array.from(savedUrls) }],
+      }),
+    });
+
+    const report = await cleanupService.cleanupUnreferencedMedia([activeUrl, orphanUrl], {
+      reason: 'explicit-local-mode-test',
+    });
+    assert.equal(report.abortedFailClosed, false);
+    assert.deepEqual(report.preservedReferencedKeys, [activeKey]);
+    assert.deepEqual(report.deletedKeys, [orphanKey]);
+    assert.equal(r2.objects.has(activeKey), true);
+    assert.equal(r2.objects.has(orphanKey), false);
+    assert.equal(await coordinator.isKeyPermanentlyRetired(`r2:${orphanKey}`), true);
+
+    // Retired key remains permanently blocked in local mode
+    await assert.rejects(
+      () =>
+        coordinator.executeCoordinatedWrite({
+          payload: { images: [orphanUrl] },
+          executeInTx: async () => {
+            savedUrls.add(orphanUrl);
+          },
+        }),
+      (err: any) => err instanceof MediaConflictError && err.statusCode === 409 && err.code === 'MEDIA_OBJECT_RETIRED'
+    );
+    assert.equal(prismaCalled, false);
+  } finally {
+    tmpState.cleanup();
+    tmpCoord.cleanup();
+    tmpRetired.cleanup();
+  }
+});
+
+test('MySQL coordination fail-closed: MySQL configured or expected with Prisma unavailable/failing rejects writes, aborts cleanup with zero deletions, and never falls back to local JSON', async () => {
+  const r2 = createMockR2Adapter();
+  const tmpState = makeTempFile('mysql-prisma-unavail-state');
+  const tmpCoord = makeTempFile('mysql-prisma-unavail-coord');
+  const tmpRetired = makeTempFile('mysql-prisma-unavail-retired');
+
+  try {
+    const key = 'fail-closed-prisma-missing.webp';
+    const url = r2.adapter.getFileUrl(key);
+    r2.objects.set(key, Buffer.from('must-never-delete'));
+
+    const scenarios: Array<{
+      name: string;
+      env: NodeJS.ProcessEnv;
+      prismaProvider: () => any;
+    }> = [
+      {
+        name: 'USE_MYSQL=true with null Prisma client',
+        env: { USE_MYSQL: 'true', NODE_ENV: 'development' },
+        prismaProvider: () => null,
+      },
+      {
+        name: 'DB_HOST/DB_NAME/DB_USER configured with Prisma missing $transaction',
+        env: { DB_HOST: '127.0.0.1', DB_NAME: 'toriwear', DB_USER: 'app', NODE_ENV: 'development' },
+        prismaProvider: () => ({}),
+      },
+      {
+        name: 'DATABASE_URL=mysql://... configured with Prisma init throwing',
+        env: { DATABASE_URL: 'mysql://app:secret@127.0.0.1:3306/toriwear', NODE_ENV: 'development' },
+        prismaProvider: () => {
+          throw new Error('PrismaClientInitializationError: engine failed to start');
+        },
+      },
+      {
+        name: 'NODE_ENV=production with null Prisma client',
+        env: { NODE_ENV: 'production' },
+        prismaProvider: () => null,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const expectation = evaluateMySqlCoordinationExpectation(scenario.env);
+      assert.equal(expectation.mysqlExpected, true, `${scenario.name}: expected mysqlExpected=true`);
+      assert.equal(expectation.explicitlyDisabled, false, `${scenario.name}: expected explicitlyDisabled=false`);
+
+      const coordinator = new MediaWriteCoordinator({
+        workerId: `worker-unavail-${scenario.name}`,
+        envProvider: () => scenario.env,
+        prismaProvider: scenario.prismaProvider,
+        storageAdapterProvider: () => r2.adapter,
+        localCoordinationFilePath: tmpCoord.filePath,
+        localRetiredFilePath: tmpRetired.filePath,
+      });
+
+      const backend = coordinator.resolveCoordinationBackend();
+      assert.equal(backend.mode, 'unavailable', `${scenario.name}: backend must be unavailable`);
+      assert.equal(coordinator.isMySqlCoordinationActive(), false);
+
+      // 1. Media-bearing writes must fail closed with 503 and NEVER execute the mutation
+      let mutationExecuted = false;
+      await assert.rejects(
+        () =>
+          coordinator.executeCoordinatedWrite({
+            payload: { images: [url] },
+            executeInTx: async () => {
+              mutationExecuted = true;
+            },
+          }),
+        (err: any) =>
+          err instanceof MediaCoordinationUnavailableError &&
+          err.statusCode === 503 &&
+          err.code === 'MEDIA_COORDINATION_UNAVAILABLE',
+        `${scenario.name}: executeCoordinatedWrite must fail closed with 503`
+      );
+      assert.equal(mutationExecuted, false, `${scenario.name}: write callback must never execute`);
+
+      // 2. Direct key assertion must fail closed with 503
+      await assert.rejects(
+        () => coordinator.assertKeysNotRetiredOrDeleting([`r2:${key}`]),
+        (err: any) => err instanceof MediaCoordinationUnavailableError && err.statusCode === 503,
+        `${scenario.name}: assertKeysNotRetiredOrDeleting must fail closed with 503`
+      );
+
+      // 3. Snapshot, retirement check, and tombstone finalization must fail closed with 503
+      await assert.rejects(
+        () => coordinator.getCoordinationSnapshot(),
+        (err: any) => err instanceof MediaCoordinationUnavailableError && err.statusCode === 503
+      );
+      await assert.rejects(
+        () => coordinator.isKeyPermanentlyRetired(`r2:${key}`),
+        (err: any) => err instanceof MediaCoordinationUnavailableError && err.statusCode === 503
+      );
+      await assert.rejects(
+        () =>
+          coordinator.finalizeDeletionFenceToPermanentTombstone({
+            provider: 'r2',
+            storageKey: key,
+            reason: 'test',
+          }),
+        (err: any) => err instanceof MediaCoordinationUnavailableError && err.statusCode === 503
+      );
+
+      // 4. Reconciler must claim nothing
+      const claimed = await coordinator.claimReconcilableDeletingFences('r2');
+      assert.deepEqual(claimed, [], `${scenario.name}: claimReconcilableDeletingFences must return []`);
+
+      // 5. Cleanup must abort fail-closed and perform ZERO storage deletions
+      const cleanupService = new MediaCleanupService({
+        storageAdapterProvider: () => r2.adapter,
+        stateStore: new DurableMediaStateStore({
+          runtimeFilePath: tmpState.filePath,
+        }),
+        coordinator,
+        cleanupCooldownMs: 0,
+        referenceProviders: createEmptyRefs(),
+      });
+
+      const report = await cleanupService.cleanupUnreferencedMedia([url], {
+        reason: `fail-closed-${scenario.name}`,
+      });
+      assert.equal(report.abortedFailClosed, true, `${scenario.name}: cleanup must abort fail-closed`);
+      assert.deepEqual(report.deletedKeys, []);
+      assert.equal(r2.deleteCalls.length, 0, `${scenario.name}: zero storage deletes permitted`);
+      assert.equal(r2.objects.has(key), true, `${scenario.name}: R2 object must remain intact`);
+
+      // 6. Local JSON coordination/retired files must NEVER be created (zero silent fallback)
+      assert.equal(fs.existsSync(tmpCoord.filePath), false, `${scenario.name}: local coordination JSON must not be written`);
+      assert.equal(fs.existsSync(tmpRetired.filePath), false, `${scenario.name}: local retired JSON must not be written`);
+    }
+  } finally {
+    tmpState.cleanup();
+    tmpCoord.cleanup();
+    tmpRetired.cleanup();
+  }
+});
+
+test('MySQL coordination fail-closed: MySQL configured and Prisma present, but database connection unavailable, rejects writes and aborts cleanup with zero deletions', async () => {
+  const db = createMockInnoDbMySql();
+  const r2 = createMockR2Adapter();
+  const tmpState = makeTempFile('mysql-conn-down-state');
+  const tmpCoord = makeTempFile('mysql-conn-down-coord');
+  const tmpRetired = makeTempFile('mysql-conn-down-retired');
+
+  try {
+    const key = 'db-down-protected.webp';
+    const url = r2.adapter.getFileUrl(key);
+    r2.objects.set(key, Buffer.from('protected-during-outage'));
+
+    const coordinator = new MediaWriteCoordinator({
+      workerId: 'worker-db-down',
+      envProvider: () => ({ USE_MYSQL: 'true', NODE_ENV: 'production' }),
+      prismaProvider: () => db.prisma,
+      storageAdapterProvider: () => r2.adapter,
+      localCoordinationFilePath: tmpCoord.filePath,
+      localRetiredFilePath: tmpRetired.filePath,
+    });
+
+    assert.equal(coordinator.resolveCoordinationBackend().mode, 'mysql');
+
+    // Simulate MySQL database outage / unreachable connection
+    db.setOnline(false);
+
+    // 1. Media-bearing write fails closed with 503; callback never runs
+    let mutationRan = false;
+    await assert.rejects(
+      () =>
+        coordinator.executeCoordinatedWrite({
+          payload: { images: [url] },
+          executeInTx: async (tx) => {
+            mutationRan = true;
+            await tx.productImage.create({ data: { productId: 'prod-should-fail', url } });
+          },
+        }),
+      (err: any) =>
+        err instanceof MediaCoordinationUnavailableError &&
+        err.statusCode === 503 &&
+        err.code === 'MEDIA_COORDINATION_UNAVAILABLE'
+    );
+    assert.equal(mutationRan, false);
+
+    // 2. Direct check / snapshot / retirement / finalize fail closed with 503 (never falling back to local JSON)
+    await assert.rejects(
+      () => coordinator.assertKeysNotRetiredOrDeleting([`r2:${key}`]),
+      (err: any) => err instanceof MediaCoordinationUnavailableError && err.statusCode === 503
+    );
+    await assert.rejects(
+      () => coordinator.getCoordinationSnapshot(),
+      (err: any) => err instanceof MediaCoordinationUnavailableError && err.statusCode === 503
+    );
+    await assert.rejects(
+      () => coordinator.isKeyPermanentlyRetired(`r2:${key}`),
+      (err: any) => err instanceof MediaCoordinationUnavailableError && err.statusCode === 503
+    );
+
+    // 3. Cleanup aborts fail-closed without deleting any media
+    const cleanupService = new MediaCleanupService({
+      storageAdapterProvider: () => r2.adapter,
+      stateStore: new DurableMediaStateStore({
+        runtimeFilePath: tmpState.filePath,
+        mysqlBackend: createPrismaMySqlMediaStateBackend(() => db.prisma),
+      }),
+      coordinator,
+      cleanupCooldownMs: 0,
+      referenceProviders: createEmptyRefs({ getPrismaClient: () => db.prisma }),
+    });
+
+    const report = await cleanupService.cleanupUnreferencedMedia([url], {
+      reason: 'mysql-connection-down-test',
+    });
+    assert.equal(report.abortedFailClosed, true);
+    assert.deepEqual(report.deletedKeys, []);
+    assert.equal(r2.deleteCalls.length, 0);
+    assert.equal(r2.objects.has(key), true);
+
+    // 4. Local JSON fallback files were never touched
+    assert.equal(fs.existsSync(tmpCoord.filePath), false);
+    assert.equal(fs.existsSync(tmpRetired.filePath), false);
+  } finally {
+    tmpState.cleanup();
+    tmpCoord.cleanup();
+    tmpRetired.cleanup();
+  }
+});
+
+test('MySQL coordination healthy path: USE_MYSQL=true with live Prisma transaction coordination continues working end-to-end', async () => {
+  const db = createMockInnoDbMySql();
+  const r2 = createMockR2Adapter();
+  const tmpState = makeTempFile('mysql-healthy-e2e-state');
+  const tmpCoord = makeTempFile('mysql-healthy-e2e-coord');
+  const tmpRetired = makeTempFile('mysql-healthy-e2e-retired');
+
+  try {
+    const referencedKey = 'mysql-e2e-referenced.webp';
+    const referencedUrl = r2.adapter.getFileUrl(referencedKey);
+    const orphanKey = 'mysql-e2e-orphan.webp';
+    const orphanUrl = r2.adapter.getFileUrl(orphanKey);
+    r2.objects.set(referencedKey, Buffer.from('ref-bytes'));
+    r2.objects.set(orphanKey, Buffer.from('orphan-bytes'));
+
+    const coordinator = new MediaWriteCoordinator({
+      workerId: 'worker-mysql-healthy',
+      envProvider: () => ({ USE_MYSQL: 'true', NODE_ENV: 'production' }),
+      prismaProvider: () => db.prisma,
+      storageAdapterProvider: () => r2.adapter,
+      localCoordinationFilePath: tmpCoord.filePath,
+      localRetiredFilePath: tmpRetired.filePath,
+    });
+
+    assert.equal(coordinator.resolveCoordinationBackend().mode, 'mysql');
+    assert.equal(coordinator.isMySqlCoordinationActive(), true);
+
+    // 1. Coordinated write commits reference inside MySQL Tx_W
+    await coordinator.executeCoordinatedWrite({
+      payload: { images: [referencedUrl] },
+      executeInTx: async (tx) => {
+        await tx.productImage.create({ data: { productId: 'prod-e2e-1', url: referencedUrl } });
+      },
+    });
+    assert.equal(db.productImages.size, 1);
+
+    // 2. Cleanup preserves referenced key and deletes + permanently retires orphan key in MySQL
+    const cleanupService = new MediaCleanupService({
+      storageAdapterProvider: () => r2.adapter,
+      stateStore: new DurableMediaStateStore({
+        runtimeFilePath: tmpState.filePath,
+        mysqlBackend: createPrismaMySqlMediaStateBackend(() => db.prisma),
+      }),
+      coordinator,
+      cleanupCooldownMs: 0,
+      referenceProviders: createEmptyRefs({ getPrismaClient: () => db.prisma }),
+    });
+
+    const report = await cleanupService.cleanupUnreferencedMedia([referencedUrl, orphanUrl], {
+      reason: 'mysql-healthy-e2e-test',
+    });
+    assert.equal(report.abortedFailClosed, false);
+    assert.deepEqual(report.preservedReferencedKeys, [referencedKey]);
+    assert.deepEqual(report.deletedKeys, [orphanKey]);
+    assert.equal(r2.objects.has(referencedKey), true);
+    assert.equal(r2.objects.has(orphanKey), false);
+
+    // 3. Permanent tombstone row exists in MySQL WebsiteSetting and blocks future reuse
+    const tombstoneKey = toRetiredTombstoneKey(`r2:${orphanKey}`);
+    const tombstoneRow = db.websiteSettings.get(tombstoneKey);
+    assert.ok(tombstoneRow);
+    assert.equal(tombstoneRow!.group, MEDIA_TOMBSTONE_MYSQL_GROUP);
+    assert.equal(await coordinator.isKeyPermanentlyRetired(`r2:${orphanKey}`), true);
+
+    await assert.rejects(
+      () =>
+        coordinator.executeCoordinatedWrite({
+          payload: { images: [orphanUrl] },
+          executeInTx: async (tx) => {
+            await tx.productImage.create({ data: { productId: 'prod-reuse-fail', url: orphanUrl } });
+          },
+        }),
+      (err: any) => err instanceof MediaConflictError && err.statusCode === 409 && err.code === 'MEDIA_OBJECT_RETIRED'
+    );
+
+    // 4. Local JSON files were never used in MySQL mode
+    assert.equal(fs.existsSync(tmpCoord.filePath), false);
+    assert.equal(fs.existsSync(tmpRetired.filePath), false);
+  } finally {
+    tmpState.cleanup();
+    tmpCoord.cleanup();
+    tmpRetired.cleanup();
+  }
+});
+
 
