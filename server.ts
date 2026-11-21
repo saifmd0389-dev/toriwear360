@@ -21,6 +21,7 @@ import { authStore } from './server/authStore';
 import { userStore } from './server/userStore';
 import { paymentConfigService } from './server/services/paymentConfigService';
 import { requireAuth } from './server/middleware/authMiddleware';
+import { mediaCleanupService } from './server/services/storage/mediaCleanupService';
 
 const app = express();
 const port = Number(process.env.PORT) || 3000;
@@ -1220,10 +1221,12 @@ async function startServer() {
 
   httpServer.listen(port, '0.0.0.0', () => {
     console.log(`[TORIWEAR] Enterprise Platform server & WebSocket running on http://0.0.0.0:${port}`);
+    mediaCleanupService.startBackgroundSweeper();
   });
 
   const shutdown = async (signal: string) => {
     console.log(`[SERVER] Received ${signal}. Draining connections and shutting down gracefully...`);
+    mediaCleanupService.stopBackgroundSweeper();
     httpServer.close(async () => {
       console.log('[SERVER] Closed HTTP & WebSocket connections.');
       try {

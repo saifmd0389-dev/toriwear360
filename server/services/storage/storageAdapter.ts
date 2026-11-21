@@ -74,6 +74,12 @@ export interface StorageAdapter {
   getFileUrl(destinationPath: string): string;
   fileExists(destinationPath: string): Promise<boolean>;
   getConfigStatus(): StorageConfigStatus;
+  /**
+   * Resolves a public image URL strictly belonging to THIS storage adapter into its
+   * normalized relative storage key. Returns null for external URLs, static assets,
+   * invalid/traversal paths, or URLs belonging to any other storage provider.
+   */
+  resolveManagedStorageKey(url: string): string | null;
 }
 
 function sanitizeRelativeStoragePath(destinationPath: string): string {
@@ -85,6 +91,76 @@ function sanitizeRelativeStoragePath(destinationPath: string): string {
     throw new Error('Invalid destination storage path.');
   }
   return segments.join('/');
+}
+
+/**
+ * Safely extracts and validates a relative storage key from a URL matching an exact
+ * configured HTTPS public base URL (origin + path prefix). Rejects traversal,
+ * encoded traversal, backslashes, control characters, and non-matching origins/prefixes.
+ */
+function extractKeyFromHttpBaseUrl(candidateUrl: string, publicBaseUrl: string): string | null {
+  const raw = String(candidateUrl || '').trim();
+  const baseRaw = String(publicBaseUrl || '').trim().replace(/\/+$/, '');
+  if (!raw || !baseRaw) return null;
+  if (/^(data|blob|javascript|file):/i.test(raw)) return null;
+
+  // Reject raw literal or percent-encoded path traversal BEFORE WHATWG URL normalization collapses /../
+  const rawNoQuery = raw.split(/[?#]/, 1)[0] || '';
+  if (/(?:^|[\\/])(?:\.|%2e){2}(?:$|[\\/])/i.test(rawNoQuery) || rawNoQuery.includes('\\')) {
+    return null;
+  }
+
+  let parsedCandidate: URL;
+  let parsedBase: URL;
+  try {
+    parsedCandidate = new URL(raw);
+    parsedBase = new URL(baseRaw);
+  } catch {
+    return null;
+  }
+
+  if (parsedCandidate.protocol !== parsedBase.protocol) return null;
+  if (parsedCandidate.origin.toLowerCase() !== parsedBase.origin.toLowerCase()) return null;
+
+  const basePath = parsedBase.pathname.replace(/\/+$/, '');
+  const requiredPrefix = basePath ? `${basePath}/` : '/';
+  const candidatePath = parsedCandidate.pathname;
+  if (!candidatePath.startsWith(requiredPrefix)) return null;
+
+  const rawRelative = candidatePath.slice(requiredPrefix.length);
+  return decodeAndValidateManagedRelativeKey(rawRelative);
+}
+
+function decodeAndValidateManagedRelativeKey(rawRelative: string): string | null {
+  if (!rawRelative || rawRelative.includes('\\')) return null;
+
+  const rawSegments = rawRelative.split('/');
+  const decodedSegments: string[] = [];
+
+  for (const rawSeg of rawSegments) {
+    if (!rawSeg) return null; // Reject empty segments / double slashes / trailing slash
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rawSeg);
+    } catch {
+      return null;
+    }
+    if (
+      !decoded ||
+      decoded === '.' ||
+      decoded === '..' ||
+      decoded.includes('/') ||
+      decoded.includes('\\') ||
+      decoded.includes('\0') ||
+      /[\x00-\x1f\x7f]/.test(decoded)
+    ) {
+      return null;
+    }
+    decodedSegments.push(decoded);
+  }
+
+  if (decodedSegments.length === 0) return null;
+  return decodedSegments.join('/');
 }
 
 function guessContentTypeFromPath(filePath: string): string {
@@ -227,6 +303,63 @@ export class LocalStorageAdapter implements StorageAdapter {
       return fs.existsSync(fullPath);
     } catch {
       return false;
+    }
+  }
+
+  public resolveManagedStorageKey(url: string): string | null {
+    const raw = String(url || '').trim();
+    if (!raw || /^(data|blob|javascript|file):/i.test(raw)) return null;
+
+    const prefixWithSlash = `${this.publicPrefix}/`;
+    let pathname = '';
+
+    if (raw.startsWith('/')) {
+      // Reject protocol-relative URLs like //evil.com/generated-assets/foo.webp
+      if (raw.startsWith('//')) return null;
+      const hashIdx = raw.indexOf('#');
+      const noHash = hashIdx >= 0 ? raw.slice(0, hashIdx) : raw;
+      const queryIdx = noHash.indexOf('?');
+      pathname = queryIdx >= 0 ? noHash.slice(0, queryIdx) : noHash;
+    } else if (/^https?:\/\//i.test(raw)) {
+      let parsed: URL;
+      try {
+        parsed = new URL(raw);
+      } catch {
+        return null;
+      }
+      const allowedOrigins = new Set<string>();
+      for (const envUrl of [process.env.SITE_URL, process.env.APP_URL]) {
+        if (envUrl && /^https?:\/\//i.test(envUrl.trim())) {
+          try {
+            allowedOrigins.add(new URL(envUrl.trim()).origin.toLowerCase());
+          } catch {
+            // ignore invalid env URL
+          }
+        }
+      }
+      const hostLower = parsed.hostname.toLowerCase();
+      const isLocalOrigin = hostLower === 'localhost' || hostLower === '127.0.0.1';
+      if (!isLocalOrigin && !allowedOrigins.has(parsed.origin.toLowerCase())) {
+        return null;
+      }
+      pathname = parsed.pathname;
+    } else {
+      return null;
+    }
+
+    if (!pathname.startsWith(prefixWithSlash)) {
+      return null;
+    }
+
+    const rawRelative = pathname.slice(prefixWithSlash.length);
+    const key = decodeAndValidateManagedRelativeKey(rawRelative);
+    if (!key) return null;
+
+    try {
+      const { cleanRelative } = this.resolveSafeFullPath(key);
+      return cleanRelative;
+    } catch {
+      return null;
     }
   }
 }
@@ -657,6 +790,13 @@ export class GoogleCloudStorageAdapter implements StorageAdapter {
       console.error('[STORAGE:GCS] Existence check failed:', err?.code || '', err?.message || err);
       return false;
     }
+  }
+
+  public resolveManagedStorageKey(url: string): string | null {
+    if (!this.config.valid || !this.config.publicBaseUrl) {
+      return null;
+    }
+    return extractKeyFromHttpBaseUrl(url, this.config.publicBaseUrl);
   }
 }
 
@@ -1103,6 +1243,13 @@ export class CloudflareR2StorageAdapter implements StorageAdapter {
       }
       return false;
     }
+  }
+
+  public resolveManagedStorageKey(url: string): string | null {
+    if (!this.config.valid || !this.config.publicBaseUrl) {
+      return null;
+    }
+    return extractKeyFromHttpBaseUrl(url, this.config.publicBaseUrl);
   }
 }
 

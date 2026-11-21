@@ -21,6 +21,10 @@ import {
   ChunkUploadError,
   chunkUploadSessionManager,
 } from '../services/storage/chunkUploadSessionManager';
+import {
+  extractAllMediaUrlsFromValue,
+  mediaCleanupService,
+} from '../services/storage/mediaCleanupService';
 
 export const cmsRouter = Router();
 
@@ -357,7 +361,14 @@ cmsRouter.post(['/v1/store/meta/event', '/store/meta/event'], async (req: Reques
 cmsRouter.post(['/admin/frontpage', '/frontpage', '/cms/frontpage', '/admin/cms/frontpage', '/cms/admin/frontpage'], requireAdminAuth(), async (req: Request, res: Response) => {
   try {
     const actorId = req.user?.id || req.user?.name || 'ADMIN';
-    const saved = await cmsRepository.saveFrontPageData(req.body, actorId);
+    const saved = await mediaCleanupService.withMediaReferenceWrite(() =>
+      cmsRepository.saveFrontPageData(req.body, actorId)
+    );
+    const savedUrls = new Set<string>();
+    extractAllMediaUrlsFromValue(saved, savedUrls);
+    if (savedUrls.size > 0) {
+      mediaCleanupService.markUrlsCommitted(Array.from(savedUrls)).catch(() => {});
+    }
     res.json({
       success: true,
       message: 'Frontpage CMS successfully published and persisted to backend.',
@@ -374,7 +385,14 @@ cmsRouter.put(['/admin/sections', '/sections', '/cms/sections', '/admin/cms/sect
       return res.status(400).json({ success: false, error: 'Expected "sections" array in request body.' });
     }
     const actorId = req.user?.id || req.user?.name || 'ADMIN';
-    const updated = await cmsRepository.updateSections(req.body.sections, actorId);
+    const updated = await mediaCleanupService.withMediaReferenceWrite(() =>
+      cmsRepository.updateSections(req.body.sections, actorId)
+    );
+    const savedUrls = new Set<string>();
+    extractAllMediaUrlsFromValue(updated, savedUrls);
+    if (savedUrls.size > 0) {
+      mediaCleanupService.markUrlsCommitted(Array.from(savedUrls)).catch(() => {});
+    }
     return res.json({
       success: true,
       message: 'Homepage sections order and visibility updated.',
@@ -388,7 +406,14 @@ cmsRouter.put(['/admin/sections', '/sections', '/cms/sections', '/admin/cms/sect
 cmsRouter.put(['/admin/hero', '/hero', '/cms/hero', '/admin/cms/hero', '/cms/admin/hero'], requireAdminAuth(), async (req: Request, res: Response) => {
   try {
     const actorId = req.user?.id || req.user?.name || 'ADMIN';
-    const updated = await cmsRepository.updateHero(req.body, actorId);
+    const updated = await mediaCleanupService.withMediaReferenceWrite(() =>
+      cmsRepository.updateHero(req.body, actorId)
+    );
+    const savedUrls = new Set<string>();
+    extractAllMediaUrlsFromValue(updated, savedUrls);
+    if (savedUrls.size > 0) {
+      mediaCleanupService.markUrlsCommitted(Array.from(savedUrls)).catch(() => {});
+    }
     res.json({
       success: true,
       message: 'Hero billboard configuration updated.',
@@ -402,7 +427,9 @@ cmsRouter.put(['/admin/hero', '/hero', '/cms/hero', '/admin/cms/hero', '/cms/adm
 cmsRouter.post(['/admin/reset', '/reset', '/cms/reset', '/admin/cms/reset', '/cms/admin/reset'], requireAdminAuth(), async (req: Request, res: Response) => {
   try {
     const actorId = req.user?.id || req.user?.name || 'ADMIN';
-    const reset = await cmsRepository.resetToDefaults(actorId);
+    const reset = await mediaCleanupService.withMediaReferenceWrite(() =>
+      cmsRepository.resetToDefaults(actorId)
+    );
     res.json({
       success: true,
       message: 'CMS configurations reset to baseline factory defaults.',
@@ -416,7 +443,14 @@ cmsRouter.post(['/admin/reset', '/reset', '/cms/reset', '/admin/cms/reset', '/cm
 cmsRouter.put(['/admin/settings', '/settings', '/cms/settings', '/admin/cms/settings', '/cms/admin/settings'], requireAdminAuth(), async (req: Request, res: Response) => {
   try {
     const actorId = req.user?.id || req.user?.name || 'ADMIN';
-    const updated = await cmsRepository.updateStoreSettings(req.body, actorId);
+    const updated = await mediaCleanupService.withMediaReferenceWrite(() =>
+      cmsRepository.updateStoreSettings(req.body, actorId)
+    );
+    const savedUrls = new Set<string>();
+    extractAllMediaUrlsFromValue(updated, savedUrls);
+    if (savedUrls.size > 0) {
+      mediaCleanupService.markUrlsCommitted(Array.from(savedUrls)).catch(() => {});
+    }
     res.json({
       success: true,
       message: 'Store settings successfully updated.',
@@ -469,6 +503,18 @@ cmsRouter.post(['/upload-asset', '/cms/upload-asset', '/admin/upload-asset', '/a
         error: uploadRes.error || 'Failed to persist uploaded image asset.',
       });
     }
+
+    const ownerId = String(req.user?.id || req.user?.email || 'ADMIN').trim();
+    const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : undefined;
+    await mediaCleanupService
+      .registerPendingUpload({
+        url: uploadRes.url,
+        ownerId,
+        sessionId: sessionId || undefined,
+        storageKey: uploadRes.destinationPath,
+        provider: storage.providerName,
+      })
+      .catch(() => {});
 
     return res.json({
       success: true,
@@ -590,6 +636,17 @@ cmsRouter.post(
         });
       }
 
+      const editorSessionId = String(req.query.sessionId || '').trim() || undefined;
+      await mediaCleanupService
+        .registerPendingUpload({
+          url: uploadRes.url,
+          ownerId,
+          sessionId: editorSessionId,
+          storageKey: uploadRes.destinationPath,
+          provider: storage.providerName,
+        })
+        .catch(() => {});
+
       return res.json({
         success: true,
         completed: true,
@@ -619,6 +676,93 @@ cmsRouter.post(
       }
       console.error('[CMS] Chunked asset upload error:', err?.message || err);
       return res.status(500).json({ success: false, error: 'Failed to process uploaded image chunk.' });
+    }
+  }
+);
+
+// Protected admin endpoint to safely discard unsaved images uploaded during a cancelled editor session.
+// Verifies ownership against the durable pending-upload registry and enforces full cross-entity reference checks.
+cmsRouter.post(
+  ['/discard-uploads', '/cms/discard-uploads', '/admin/discard-uploads', '/admin/cms/discard-uploads'],
+  requireAdminAuth(),
+  async (req: Request, res: Response) => {
+    try {
+      const ownerId = String(req.user?.id || req.user?.email || '').trim();
+      if (!ownerId) {
+        return res.status(401).json({ success: false, error: 'Authenticated admin identity required.' });
+      }
+      const rawUrls = Array.isArray(req.body?.urls) ? req.body.urls : [];
+      const urls = rawUrls
+        .filter((u: unknown): u is string => typeof u === 'string' && u.trim().length > 0)
+        .slice(0, 100);
+      const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : undefined;
+      const role = String(req.user?.role || '').toUpperCase();
+      const isSuperAdmin = role === 'SUPER_ADMIN' || role === 'FOUNDER';
+
+      const result = await mediaCleanupService.discardPendingUploads({
+        urls,
+        ownerId,
+        sessionId: sessionId || undefined,
+        isSuperAdmin,
+      });
+
+      return res.json({
+        success: true,
+        acceptedCount: result.acceptedUrls.length,
+        rejectedCount: result.rejectedUrls.length,
+        deletedCount: result.report.deletedKeys.length,
+        preservedCount: result.report.preservedReferencedKeys.length,
+      });
+    } catch (err: any) {
+      console.warn('[CMS] Discard uploads error (non-fatal):', err?.message || err);
+      return res.json({ success: true, acceptedCount: 0, deletedCount: 0 });
+    }
+  }
+);
+
+// Protected admin endpoint for active Product Editor media leases (heartbeat & release).
+// Prevents another admin's deletion/cleanup from removing images currently open in an active editor.
+cmsRouter.post(
+  ['/media-lease', '/cms/media-lease', '/admin/media-lease', '/admin/cms/media-lease'],
+  requireAdminAuth(),
+  async (req: Request, res: Response) => {
+    try {
+      const ownerId = String(req.user?.id || req.user?.email || '').trim();
+      if (!ownerId) {
+        return res.status(401).json({ success: false, error: 'Authenticated admin identity required.' });
+      }
+      const action = String(req.body?.action || 'heartbeat').trim().toLowerCase();
+      const sessionId = String(req.body?.sessionId || '').trim();
+      if (!sessionId || sessionId.length > 128) {
+        return res.status(400).json({ success: false, error: 'Valid editor sessionId is required.' });
+      }
+
+      if (action === 'release') {
+        const released = await mediaCleanupService.releaseEditorMediaLease({ sessionId, ownerId });
+        return res.json({ success: true, released });
+      }
+
+      const rawUrls = Array.isArray(req.body?.urls) ? req.body.urls : [];
+      const urls = rawUrls
+        .filter((u: unknown): u is string => typeof u === 'string' && u.trim().length > 0)
+        .slice(0, 200);
+      const entityId = typeof req.body?.entityId === 'string' ? req.body.entityId.trim().slice(0, 128) : undefined;
+
+      const lease = await mediaCleanupService.upsertEditorMediaLease({
+        sessionId,
+        ownerId,
+        entityId,
+        urls,
+      });
+
+      return res.json({
+        success: true,
+        leasedKeysCount: lease?.storageKeys.length ?? 0,
+        expiresAt: lease?.expiresAt ?? null,
+      });
+    } catch (err: any) {
+      console.warn('[CMS] Media lease error (non-fatal):', err?.message || err);
+      return res.json({ success: true, leasedKeysCount: 0 });
     }
   }
 );

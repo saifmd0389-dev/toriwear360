@@ -968,7 +968,8 @@ export const fetchStoreSettingsFromServer = async (force = false): Promise<Recor
 
 export const uploadCmsImageAsset = async (
   file: File,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  options?: { sessionId?: string }
 ): Promise<string> => {
   const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB raw binary chunks (bypasses Base64 overhead & request limits)
   const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
@@ -998,6 +999,9 @@ export const uploadCmsImageAsset = async (
       filename: file.name || 'image.png',
       mimeType: file.type || '',
     });
+    if (options?.sessionId) {
+      params.set('sessionId', options.sessionId);
+    }
 
     const res = await fetch(`/api/v1/admin/cms/upload-asset-chunk?${params.toString()}`, {
       method: 'POST',
@@ -1027,6 +1031,75 @@ export const uploadCmsImageAsset = async (
     throw new Error('Upload completed without a server asset URL.');
   }
   return finalUrl;
+};
+
+/**
+ * Best-effort discard of unsaved images uploaded during a cancelled editor session.
+ * Never throws; server enforces ownership & full cross-entity reference verification.
+ */
+export const discardPendingCmsUploads = async (
+  urls: string[],
+  sessionId?: string,
+  options?: { keepalive?: boolean }
+): Promise<void> => {
+  const cleanUrls = Array.from(
+    new Set(
+      (Array.isArray(urls) ? urls : [])
+        .filter((u): u is string => typeof u === 'string' && u.trim().length > 0 && !u.trim().startsWith('data:'))
+        .map((u) => u.trim())
+    )
+  );
+  if (cleanUrls.length === 0) return;
+
+  try {
+    await fetch('/api/v1/admin/cms/discard-uploads', {
+      method: 'POST',
+      headers: getAdminAuthHeaders(),
+      body: JSON.stringify({
+        urls: cleanUrls,
+        sessionId: sessionId || undefined,
+      }),
+      keepalive: Boolean(options?.keepalive),
+    });
+  } catch {
+    // Non-fatal: server-side durable pending-upload TTL sweep will recover if network fails
+  }
+};
+
+/**
+ * Best-effort active editor media lease heartbeat / release so concurrent admin edits
+ * never have open-editor images deleted out from under them.
+ */
+export const syncEditorMediaLease = async (params: {
+  action: 'heartbeat' | 'release';
+  sessionId: string;
+  entityId?: string;
+  urls?: string[];
+  keepalive?: boolean;
+}): Promise<void> => {
+  if (!params.sessionId) return;
+  try {
+    const cleanUrls = Array.from(
+      new Set(
+        (Array.isArray(params.urls) ? params.urls : [])
+          .filter((u): u is string => typeof u === 'string' && u.trim().length > 0 && !u.trim().startsWith('data:'))
+          .map((u) => u.trim())
+      )
+    );
+    await fetch('/api/v1/admin/cms/media-lease', {
+      method: 'POST',
+      headers: getAdminAuthHeaders(),
+      body: JSON.stringify({
+        action: params.action,
+        sessionId: params.sessionId,
+        entityId: params.entityId || undefined,
+        urls: cleanUrls,
+      }),
+      keepalive: Boolean(params.keepalive),
+    });
+  } catch {
+    // Non-fatal background concurrency safeguard
+  }
 };
 
 export const saveFrontPageCmsDataToServer = async (

@@ -37,6 +37,7 @@ import {
   validatePaymentIntentInput,
   validatePaymentVerificationInput,
 } from '../validation/schemas';
+import { mediaCleanupService } from '../services/storage/mediaCleanupService';
 
 export const apiRouter = Router();
 
@@ -906,7 +907,12 @@ apiRouter.post('/v1/admin/products', requireStaffPermission('products.create'), 
       updatedAt: new Date(),
     };
 
-    const saved = await productRepository.save(newProduct);
+    const saved = await mediaCleanupService.withMediaReferenceWrite(() =>
+      productRepository.save(newProduct)
+    );
+    if (Array.isArray(saved.images) && saved.images.length > 0) {
+      mediaCleanupService.markUrlsCommitted(saved.images).catch(() => {});
+    }
     if (Array.isArray(saved.variants) && saved.variants.length > 0) {
       await inventoryRepository.syncProductVariants(saved.variants);
     }
@@ -980,7 +986,31 @@ apiRouter.put('/v1/admin/products/:id', requireStaffPermission('products.edit'),
       updatedAt: new Date(),
     };
 
-    const saved = await productRepository.save(merged);
+    const previousImages = Array.isArray(existing.images) ? [...existing.images] : [];
+    const saved = await mediaCleanupService.withMediaReferenceWrite(() =>
+      productRepository.save(merged)
+    );
+    if (Array.isArray(saved.images) && saved.images.length > 0) {
+      mediaCleanupService.markUrlsCommitted(saved.images).catch(() => {});
+    }
+    const retainedSet = new Set(
+      (Array.isArray(saved.images) ? saved.images : [])
+        .filter((u): u is string => typeof u === 'string' && u.trim().length > 0)
+        .map((u) => u.trim())
+    );
+    const removedOrReplacedImages = previousImages
+      .filter((u): u is string => typeof u === 'string' && u.trim().length > 0)
+      .map((u) => u.trim())
+      .filter((u) => !retainedSet.has(u));
+    if (removedOrReplacedImages.length > 0) {
+      mediaCleanupService
+        .enqueueDeferredMediaCleanup(removedOrReplacedImages, {
+          reason: `product-image-replaced-or-removed:${saved.id}`,
+        })
+        .catch((cleanupErr) => {
+          console.warn('[API] Post-commit product image cleanup enqueue note (non-fatal):', cleanupErr?.message || cleanupErr);
+        });
+    }
     if (saved.status === 'REVIEW' || existing.status === 'REVIEW') {
       approvalStore.syncProductReviewRequest({
         product: saved,
@@ -1022,10 +1052,22 @@ apiRouter.delete('/v1/admin/products/:id', requireStaffPermission('products.dele
     const productId = String(req.params.id || '');
     console.log(`[API] 🗑️ DELETE request for Product ID: ${productId}`);
     const existing = await productRepository.findById(productId);
+    const candidateImages = Array.isArray(existing?.images) ? [...existing.images] : [];
     const variantIds = existing?.variants?.map((v) => v.id) || [];
-    const deleted = await productRepository.delete(productId);
+    const deleted = await mediaCleanupService.withMediaReferenceWrite(() =>
+      productRepository.delete(productId)
+    );
     if (variantIds.length > 0) {
       await inventoryRepository.deleteByVariantIds(variantIds);
+    }
+    if (deleted && candidateImages.length > 0) {
+      mediaCleanupService
+        .enqueueDeferredMediaCleanup(candidateImages, {
+          reason: `product-deleted:${productId}`,
+        })
+        .catch((cleanupErr) => {
+          console.warn('[API] Post-commit product delete media cleanup enqueue note (non-fatal):', cleanupErr?.message || cleanupErr);
+        });
     }
     console.log(`[API] ✅ Product permanently deleted: ${productId} (success=${deleted})`);
     res.json({ success: true, message: 'Product permanently deleted.', data: { id: productId, deleted } });
@@ -1038,8 +1080,28 @@ apiRouter.delete('/v1/admin/products/:id', requireStaffPermission('products.dele
 apiRouter.post('/v1/admin/products/clear-all', requireStaffPermission('products.delete'), async (_req: Request, res: Response) => {
   try {
     console.log('[API] 🗑️ CLEAR-ALL request for all products');
-    await productRepository.clearAll();
-    await inventoryRepository.clearAll();
+    const existingProducts = await productRepository.getAll();
+    const allCandidateImages: string[] = [];
+    for (const p of existingProducts || []) {
+      for (const img of p.images || []) {
+        if (typeof img === 'string' && img.trim()) {
+          allCandidateImages.push(img.trim());
+        }
+      }
+    }
+    await mediaCleanupService.withMediaReferenceWrite(async () => {
+      await productRepository.clearAll();
+      await inventoryRepository.clearAll();
+    });
+    if (allCandidateImages.length > 0) {
+      mediaCleanupService
+        .enqueueDeferredMediaCleanup(allCandidateImages, {
+          reason: 'products-clear-all',
+        })
+        .catch((cleanupErr) => {
+          console.warn('[API] Post-commit clear-all media cleanup enqueue note (non-fatal):', cleanupErr?.message || cleanupErr);
+        });
+    }
     res.json({ success: true, message: 'All products and inventory permanently cleared from catalog.' });
   } catch (err: any) {
     console.error('[API] Error clearing products:', err);
@@ -1129,7 +1191,13 @@ apiRouter.post('/v1/admin/categories', requireStaffPermission('catalog.edit'), a
     isEnabled: enabledFlag,
   };
 
-  const saved = await productRepository.saveCategory(cat);
+  const saved = await mediaCleanupService.withMediaReferenceWrite(() =>
+    productRepository.saveCategory(cat)
+  );
+  const catUrls = [saved.image, (saved as any).bannerImage].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
+  if (catUrls.length > 0) {
+    mediaCleanupService.markUrlsCommitted(catUrls).catch(() => {});
+  }
   return res.status(201).json({ success: true, data: saved });
 });
 
@@ -1157,7 +1225,13 @@ apiRouter.put('/v1/admin/categories/:id', requireStaffPermission('catalog.edit')
       : existing.slug,
   };
 
-  const saved = await productRepository.saveCategory(updated);
+  const saved = await mediaCleanupService.withMediaReferenceWrite(() =>
+    productRepository.saveCategory(updated)
+  );
+  const catUrls = [saved.image, (saved as any).bannerImage].filter((u): u is string => typeof u === 'string' && u.trim().length > 0);
+  if (catUrls.length > 0) {
+    mediaCleanupService.markUrlsCommitted(catUrls).catch(() => {});
+  }
   return res.json({ success: true, data: saved });
 });
 
@@ -1260,17 +1334,42 @@ apiRouter.post('/v1/inventory/bulk-delete', requireStaffPermission('inventory.de
       }
     }
 
+    const preDeleteProducts = await productRepository.getAll();
+    const productImageSnapshot = new Map<string, string[]>();
+    for (const p of preDeleteProducts || []) {
+      productImageSnapshot.set(p.id, Array.isArray(p.images) ? [...p.images] : []);
+    }
+
     const invResult = await inventoryRepository.bulkDelete(
       Array.from(expandedIds),
       operatorId,
       reason || 'Bulk product/SKU removal in Admin'
     );
 
-    const prodResult = await productRepository.removeVariants([
-      ...Array.from(expandedIds),
-      ...invResult.deletedVariantIds,
-      ...invResult.deletedSkus,
-    ]);
+    const prodResult = await mediaCleanupService.withMediaReferenceWrite(() =>
+      productRepository.removeVariants([
+        ...Array.from(expandedIds),
+        ...invResult.deletedVariantIds,
+        ...invResult.deletedSkus,
+      ])
+    );
+
+    if (prodResult.removedProductIds.length > 0) {
+      const removedProductImages: string[] = [];
+      for (const removedId of prodResult.removedProductIds) {
+        const imgs = productImageSnapshot.get(removedId) || [];
+        removedProductImages.push(...imgs);
+      }
+      if (removedProductImages.length > 0) {
+        mediaCleanupService
+          .enqueueDeferredMediaCleanup(removedProductImages, {
+            reason: `variant-bulk-delete-product-removed:${prodResult.removedProductIds.join(',')}`,
+          })
+          .catch((cleanupErr) => {
+            console.warn('[API] Post-commit bulk variant-delete media cleanup enqueue note (non-fatal):', cleanupErr?.message || cleanupErr);
+          });
+      }
+    }
 
     const totalDeleted = Math.max(invResult.deletedCount, prodResult.removedProductIds.length);
     console.log(`[API] 🗑️ BULK DELETE completed by ${operatorId}: ${invResult.deletedCount} inventory records, ${prodResult.removedProductIds.length} products removed.`);
@@ -1314,11 +1413,34 @@ apiRouter.delete('/v1/inventory/:variantId', requireStaffPermission('inventory.d
   const operatorId = req.user?.id || 'OPERATOR';
   const variantId = String(req.params.variantId || '');
   const current = await inventoryRepository.getByVariantId(variantId);
+  const preDeleteProducts = await productRepository.getAll();
+  const productImageSnapshot = new Map<string, string[]>();
+  for (const p of preDeleteProducts || []) {
+    productImageSnapshot.set(p.id, Array.isArray(p.images) ? [...p.images] : []);
+  }
   const success = await inventoryRepository.deleteItem(variantId, operatorId, reason);
   if (!success) {
     return res.status(404).json({ success: false, error: 'Inventory record not found.' });
   }
-  await productRepository.removeVariants([variantId, current?.variantId || '', current?.sku || ''].filter(Boolean));
+  const prodResult = await mediaCleanupService.withMediaReferenceWrite(() =>
+    productRepository.removeVariants([variantId, current?.variantId || '', current?.sku || ''].filter(Boolean))
+  );
+  if (prodResult.removedProductIds.length > 0) {
+    const removedProductImages: string[] = [];
+    for (const removedId of prodResult.removedProductIds) {
+      const imgs = productImageSnapshot.get(removedId) || [];
+      removedProductImages.push(...imgs);
+    }
+    if (removedProductImages.length > 0) {
+      mediaCleanupService
+        .enqueueDeferredMediaCleanup(removedProductImages, {
+          reason: `variant-delete-product-removed:${prodResult.removedProductIds.join(',')}`,
+        })
+        .catch((cleanupErr) => {
+          console.warn('[API] Post-commit variant-delete media cleanup enqueue note (non-fatal):', cleanupErr?.message || cleanupErr);
+        });
+    }
+  }
   return res.json({ success: true, message: 'Inventory item removed successfully' });
 });
 
@@ -1381,11 +1503,13 @@ apiRouter.post('/v1/orders', async (req: Request, res: Response) => {
   const authCustomer = await resolveAuthenticatedCustomer(req);
   const idempotencyKey = (req.headers['idempotency-key'] || req.body.idempotencyKey) as string | undefined;
   const ip = (req.ip || req.socket.remoteAddress || '127.0.0.1').replace('::ffff:', '');
-  const result = await orderService.createOrder({
-    ...req.body,
-    customerId: authCustomer ? authCustomer.id : undefined,
-    idempotencyKey: idempotencyKey || req.body.idempotencyKey,
-  }, ip);
+  const result = await mediaCleanupService.withMediaReferenceWrite(() =>
+    orderService.createOrder({
+      ...req.body,
+      customerId: authCustomer ? authCustomer.id : undefined,
+      idempotencyKey: idempotencyKey || req.body.idempotencyKey,
+    }, ip)
+  );
 
   if (!result.success) {
     return res.status(400).json(result);

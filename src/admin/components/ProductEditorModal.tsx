@@ -1,11 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAdmin } from '../AdminDataContext';
 import { AdminProduct, AdminProductVariant, LicenseRightsStatus, PublishingStatus } from '../types';
 import { AnimeFranchise, PopUniverse, FitType, StoreCategory } from '../../types';
 import { apiClient } from '../../services/apiClient';
 import { isValidProductImageUrl } from '../../utils/productFilters';
 import { MEN_WORLDS, KIDS_WORLDS } from '../../data/constants';
-import { uploadCmsImageAsset } from '../data/frontPageCmsData';
+import {
+  uploadCmsImageAsset,
+  discardPendingCmsUploads,
+  syncEditorMediaLease,
+} from '../data/frontPageCmsData';
 import {
   X,
   Package,
@@ -97,10 +101,86 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
   const [availableCategories, setAvailableCategories] = useState<StoreCategory[]>([]);
   const [categoryIds, setCategoryIds] = useState<string[]>([]);
 
+  // Silent media safety tracking (per-session newly uploaded URLs & concurrent-edit media lease)
+  const editorSessionIdRef = useRef<string>('');
+  const sessionUploadedUrlsRef = useRef<Set<string>>(new Set());
+  const savedInSessionRef = useRef<boolean>(false);
+  const latestImageUrlsRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    latestImageUrlsRef.current = imageUrls;
+  }, [imageUrls]);
+
   useEffect(() => {
     if (!isOpen) return;
     apiClient.getCategories('ALL', true).then((list) => setAvailableCategories(list)).catch(() => {});
   }, [isOpen]);
+
+  // Initialize per-modal session ID, heartbeat active editor media leases, and clean up on close/unmount
+  useEffect(() => {
+    if (!isOpen) return;
+    const sessionId = `pe_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    editorSessionIdRef.current = sessionId;
+    sessionUploadedUrlsRef.current = new Set();
+    savedInSessionRef.current = false;
+
+    const sendHeartbeat = () => {
+      const leased = Array.from(
+        new Set([
+          ...latestImageUrlsRef.current.map((u) => u.trim()).filter(Boolean),
+          ...Array.from(sessionUploadedUrlsRef.current),
+        ])
+      );
+      if (leased.length > 0) {
+        syncEditorMediaLease({
+          action: 'heartbeat',
+          sessionId,
+          entityId: product?.id,
+          urls: leased,
+        }).catch(() => {});
+      }
+    };
+
+    const initialTimer = setTimeout(sendHeartbeat, 250);
+    const interval = setInterval(sendHeartbeat, 2 * 60 * 1000);
+
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+      if (!savedInSessionRef.current && sessionUploadedUrlsRef.current.size > 0) {
+        const toDiscard = Array.from(sessionUploadedUrlsRef.current);
+        sessionUploadedUrlsRef.current.clear();
+        discardPendingCmsUploads(toDiscard, sessionId, { keepalive: true }).catch(() => {});
+      }
+      syncEditorMediaLease({
+        action: 'release',
+        sessionId,
+        keepalive: true,
+      }).catch(() => {});
+    };
+  }, [isOpen, product?.id]);
+
+  // Refresh active editor lease whenever image list changes while modal is open
+  useEffect(() => {
+    if (!isOpen || !editorSessionIdRef.current) return;
+    const sessionId = editorSessionIdRef.current;
+    const leased = Array.from(
+      new Set([
+        ...imageUrls.map((u) => u.trim()).filter(Boolean),
+        ...Array.from(sessionUploadedUrlsRef.current),
+      ])
+    );
+    if (leased.length === 0) return;
+    const timer = setTimeout(() => {
+      syncEditorMediaLease({
+        action: 'heartbeat',
+        sessionId,
+        entityId: product?.id,
+        urls: leased,
+      }).catch(() => {});
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [isOpen, imageUrls, product?.id]);
 
   useEffect(() => {
     if (product) {
@@ -334,6 +414,20 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
       sizes: derivedSizes,
     };
 
+    const finalizeAfterSave = () => {
+      const sessionId = editorSessionIdRef.current;
+      const savedSet = new Set(finalImages.map((u) => u.trim()));
+      const abandonedMidSession = Array.from(sessionUploadedUrlsRef.current).filter((u) => !savedSet.has(u));
+      savedInSessionRef.current = true;
+      sessionUploadedUrlsRef.current.clear();
+      if (abandonedMidSession.length > 0) {
+        discardPendingCmsUploads(abandonedMidSession, sessionId, { keepalive: true }).catch(() => {});
+      }
+      if (sessionId) {
+        syncEditorMediaLease({ action: 'release', sessionId, keepalive: true }).catch(() => {});
+      }
+    };
+
     setIsSaving(true);
     try {
       if (product) {
@@ -343,6 +437,7 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
           setIsSaving(false);
           return;
         }
+        finalizeAfterSave();
         setIsSaving(false);
         onClose();
       } else {
@@ -352,6 +447,7 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
           setIsSaving(false);
           return;
         }
+        finalizeAfterSave();
         setIsSaving(false);
         onClose();
       }
@@ -359,6 +455,19 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
       setFormError(err.message || 'An unexpected error occurred while saving the product to the database.');
       setIsSaving(false);
     }
+  };
+
+  const handleCancelClose = () => {
+    const sessionId = editorSessionIdRef.current;
+    if (!savedInSessionRef.current && sessionUploadedUrlsRef.current.size > 0) {
+      const toDiscard = Array.from(sessionUploadedUrlsRef.current);
+      sessionUploadedUrlsRef.current.clear();
+      discardPendingCmsUploads(toDiscard, sessionId, { keepalive: true }).catch(() => {});
+    }
+    if (sessionId) {
+      syncEditorMediaLease({ action: 'release', sessionId, keepalive: true }).catch(() => {});
+    }
+    onClose();
   };
 
   const handleUpdateVariantField = <K extends keyof AdminProductVariant>(
@@ -462,7 +571,13 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
     onProgress?: (percent: number) => void
   ): Promise<string> => {
     try {
-      return await uploadCmsImageAsset(file, onProgress);
+      const uploadedUrl = await uploadCmsImageAsset(file, onProgress, {
+        sessionId: editorSessionIdRef.current || undefined,
+      });
+      if (uploadedUrl && !uploadedUrl.startsWith('data:')) {
+        sessionUploadedUrlsRef.current.add(uploadedUrl.trim());
+      }
+      return uploadedUrl;
     } catch (err: any) {
       // Only fall back to inline Data URL for small files (<= 4 MB) if offline; large files require server chunk upload
       if (file.size <= 4 * 1024 * 1024) {
@@ -605,7 +720,7 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleCancelClose}
             className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
@@ -1538,7 +1653,7 @@ export const ProductEditorModal: React.FC<ProductEditorModalProps> = ({ product,
           <div className="pt-4 border-t border-neutral-800 flex items-center justify-between">
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleCancelClose}
               className="px-4 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs font-medium cursor-pointer"
             >
               Cancel

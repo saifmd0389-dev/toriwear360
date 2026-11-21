@@ -3857,9 +3857,9 @@ var metaCapiService_exports = {};
 __export(metaCapiService_exports, {
   dispatchMetaCapiEvent: () => dispatchMetaCapiEvent
 });
-import crypto15 from "crypto";
+import crypto16 from "crypto";
 function sha256Normalized(value) {
-  return crypto15.createHash("sha256").update(value.trim().toLowerCase()).digest("hex");
+  return crypto16.createHash("sha256").update(value.trim().toLowerCase()).digest("hex");
 }
 async function dispatchMetaCapiEvent(input) {
   try {
@@ -3932,8 +3932,8 @@ var init_metaCapiService = __esm({
 import "dotenv/config";
 import express2 from "express";
 import http from "http";
-import path21 from "path";
-import fs23 from "fs";
+import path22 from "path";
+import fs24 from "fs";
 
 // server/geminiImageService.ts
 import { GoogleGenAI } from "@google/genai";
@@ -10394,9 +10394,9 @@ platformRouter.put("/communication/meetings/:id/status", (req, res) => {
 // server/routes/apiRouter.ts
 init_prisma();
 import { Router as Router2 } from "express";
-import crypto13 from "crypto";
-import path16 from "path";
-import fs18 from "fs";
+import crypto14 from "crypto";
+import path18 from "path";
+import fs20 from "fs";
 
 // server/services/orderService.ts
 import crypto7 from "crypto";
@@ -20970,6 +20970,2565 @@ function validatePaymentVerificationInput(body) {
   return { valid: errors.length === 0, errors };
 }
 
+// server/services/storage/mediaCleanupService.ts
+init_prisma();
+init_cmsRepository();
+
+// server/services/storage/storageAdapter.ts
+import fs18 from "fs";
+import path16 from "path";
+import { Storage } from "@google-cloud/storage";
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+  HeadObjectCommand,
+  HeadBucketCommand
+} from "@aws-sdk/client-s3";
+var IMMUTABLE_IMAGE_CACHE_CONTROL = "public, max-age=31536000, immutable";
+function sanitizeRelativeStoragePath(destinationPath) {
+  const normalized = String(destinationPath || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const segments = normalized.split("/").filter((seg) => seg && seg !== "." && seg !== "..");
+  if (segments.length === 0) {
+    throw new Error("Invalid destination storage path.");
+  }
+  return segments.join("/");
+}
+function extractKeyFromHttpBaseUrl(candidateUrl, publicBaseUrl) {
+  const raw = String(candidateUrl || "").trim();
+  const baseRaw = String(publicBaseUrl || "").trim().replace(/\/+$/, "");
+  if (!raw || !baseRaw) return null;
+  if (/^(data|blob|javascript|file):/i.test(raw)) return null;
+  const rawNoQuery = raw.split(/[?#]/, 1)[0] || "";
+  if (/(?:^|[\\/])(?:\.|%2e){2}(?:$|[\\/])/i.test(rawNoQuery) || rawNoQuery.includes("\\")) {
+    return null;
+  }
+  let parsedCandidate;
+  let parsedBase;
+  try {
+    parsedCandidate = new URL(raw);
+    parsedBase = new URL(baseRaw);
+  } catch {
+    return null;
+  }
+  if (parsedCandidate.protocol !== parsedBase.protocol) return null;
+  if (parsedCandidate.origin.toLowerCase() !== parsedBase.origin.toLowerCase()) return null;
+  const basePath = parsedBase.pathname.replace(/\/+$/, "");
+  const requiredPrefix = basePath ? `${basePath}/` : "/";
+  const candidatePath = parsedCandidate.pathname;
+  if (!candidatePath.startsWith(requiredPrefix)) return null;
+  const rawRelative = candidatePath.slice(requiredPrefix.length);
+  return decodeAndValidateManagedRelativeKey(rawRelative);
+}
+function decodeAndValidateManagedRelativeKey(rawRelative) {
+  if (!rawRelative || rawRelative.includes("\\")) return null;
+  const rawSegments = rawRelative.split("/");
+  const decodedSegments = [];
+  for (const rawSeg of rawSegments) {
+    if (!rawSeg) return null;
+    let decoded;
+    try {
+      decoded = decodeURIComponent(rawSeg);
+    } catch {
+      return null;
+    }
+    if (!decoded || decoded === "." || decoded === ".." || decoded.includes("/") || decoded.includes("\\") || decoded.includes("\0") || /[\x00-\x1f\x7f]/.test(decoded)) {
+      return null;
+    }
+    decodedSegments.push(decoded);
+  }
+  if (decodedSegments.length === 0) return null;
+  return decodedSegments.join("/");
+}
+function guessContentTypeFromPath(filePath) {
+  const ext = path16.extname(filePath).toLowerCase();
+  switch (ext) {
+    case ".webp":
+      return "image/webp";
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".svg":
+      return "image/svg+xml";
+    case ".avif":
+      return "image/avif";
+    default:
+      return "application/octet-stream";
+  }
+}
+var LocalStorageAdapter = class {
+  constructor(baseDir, publicPrefix = "/generated-assets") {
+    this.providerName = "local";
+    this.baseDir = path16.resolve(baseDir || path16.resolve(process.cwd(), "public", "generated-assets"));
+    this.publicPrefix = publicPrefix.replace(/\/+$/, "");
+    if (!fs18.existsSync(this.baseDir)) {
+      fs18.mkdirSync(this.baseDir, { recursive: true });
+    }
+  }
+  resolveSafeFullPath(destinationPath) {
+    const cleanRelative = sanitizeRelativeStoragePath(destinationPath);
+    const fullPath = path16.resolve(this.baseDir, cleanRelative);
+    if (fullPath !== this.baseDir && !fullPath.startsWith(`${this.baseDir}${path16.sep}`)) {
+      throw new Error("Path traversal rejected by local storage adapter.");
+    }
+    return { cleanRelative, fullPath };
+  }
+  getConfigStatus() {
+    return {
+      provider: "local",
+      configured: true,
+      publicBaseUrl: this.publicPrefix
+    };
+  }
+  async uploadFile(buffer, destinationPath, contentType, _options) {
+    try {
+      const { cleanRelative, fullPath } = this.resolveSafeFullPath(destinationPath);
+      const parentDir = path16.dirname(fullPath);
+      if (!fs18.existsSync(parentDir)) {
+        fs18.mkdirSync(parentDir, { recursive: true });
+      }
+      const tmpPath = `${fullPath}.tmp-${process.pid}-${Date.now()}`;
+      fs18.writeFileSync(tmpPath, buffer);
+      fs18.renameSync(tmpPath, fullPath);
+      const url = this.getFileUrl(cleanRelative);
+      return {
+        success: true,
+        url,
+        destinationPath: cleanRelative,
+        sizeBytes: buffer.length,
+        contentType: contentType || guessContentTypeFromPath(cleanRelative),
+        provider: "local"
+      };
+    } catch (err) {
+      console.error("[STORAGE:LOCAL] Failed to write uploaded file:", err?.message || err);
+      return {
+        success: false,
+        url: "",
+        destinationPath,
+        provider: "local",
+        statusCode: 500,
+        error: "Failed to save uploaded image to local storage."
+      };
+    }
+  }
+  async getFile(destinationPath) {
+    try {
+      const { cleanRelative, fullPath } = this.resolveSafeFullPath(destinationPath);
+      if (!fs18.existsSync(fullPath)) {
+        return { success: false, error: "File not found in local storage." };
+      }
+      const buffer = fs18.readFileSync(fullPath);
+      return {
+        success: true,
+        buffer,
+        contentType: guessContentTypeFromPath(cleanRelative),
+        sizeBytes: buffer.length
+      };
+    } catch (err) {
+      return {
+        success: false,
+        error: err?.message || "Failed to read file from local storage."
+      };
+    }
+  }
+  async deleteFile(destinationPath) {
+    try {
+      const { fullPath } = this.resolveSafeFullPath(destinationPath);
+      if (fs18.existsSync(fullPath)) {
+        fs18.unlinkSync(fullPath);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+  getFileUrl(destinationPath) {
+    const cleanRelative = sanitizeRelativeStoragePath(destinationPath);
+    const encoded = cleanRelative.split("/").map(encodeURIComponent).join("/");
+    return `${this.publicPrefix}/${encoded}`;
+  }
+  async fileExists(destinationPath) {
+    try {
+      const { fullPath } = this.resolveSafeFullPath(destinationPath);
+      return fs18.existsSync(fullPath);
+    } catch {
+      return false;
+    }
+  }
+  resolveManagedStorageKey(url) {
+    const raw = String(url || "").trim();
+    if (!raw || /^(data|blob|javascript|file):/i.test(raw)) return null;
+    const prefixWithSlash = `${this.publicPrefix}/`;
+    let pathname = "";
+    if (raw.startsWith("/")) {
+      if (raw.startsWith("//")) return null;
+      const hashIdx = raw.indexOf("#");
+      const noHash = hashIdx >= 0 ? raw.slice(0, hashIdx) : raw;
+      const queryIdx = noHash.indexOf("?");
+      pathname = queryIdx >= 0 ? noHash.slice(0, queryIdx) : noHash;
+    } else if (/^https?:\/\//i.test(raw)) {
+      let parsed;
+      try {
+        parsed = new URL(raw);
+      } catch {
+        return null;
+      }
+      const allowedOrigins = /* @__PURE__ */ new Set();
+      for (const envUrl of [process.env.SITE_URL, process.env.APP_URL]) {
+        if (envUrl && /^https?:\/\//i.test(envUrl.trim())) {
+          try {
+            allowedOrigins.add(new URL(envUrl.trim()).origin.toLowerCase());
+          } catch {
+          }
+        }
+      }
+      const hostLower = parsed.hostname.toLowerCase();
+      const isLocalOrigin = hostLower === "localhost" || hostLower === "127.0.0.1";
+      if (!isLocalOrigin && !allowedOrigins.has(parsed.origin.toLowerCase())) {
+        return null;
+      }
+      pathname = parsed.pathname;
+    } else {
+      return null;
+    }
+    if (!pathname.startsWith(prefixWithSlash)) {
+      return null;
+    }
+    const rawRelative = pathname.slice(prefixWithSlash.length);
+    const key = decodeAndValidateManagedRelativeKey(rawRelative);
+    if (!key) return null;
+    try {
+      const { cleanRelative } = this.resolveSafeFullPath(key);
+      return cleanRelative;
+    } catch {
+      return null;
+    }
+  }
+};
+function isPlaceholderValue(value) {
+  const lower = value.trim().toLowerCase();
+  return !lower || lower.includes("your_") || lower.includes("your-") || lower.includes("<from-") || lower.includes("placeholder") || lower === "changeme";
+}
+function parseServiceAccountJson(raw) {
+  const trimmed = raw.trim();
+  const tryParse = (input) => JSON.parse(input);
+  try {
+    return tryParse(trimmed);
+  } catch {
+    const decoded = Buffer.from(trimmed, "base64").toString("utf8").trim();
+    return tryParse(decoded);
+  }
+}
+function resolveGcsConfiguration(overrideBucketName) {
+  const bucketName = String(overrideBucketName || process.env.GCS_BUCKET_NAME || "").trim();
+  const envProjectId = String(process.env.GCS_PROJECT_ID || "").trim();
+  const rawJson = String(process.env.GCS_SERVICE_ACCOUNT_JSON || "").trim();
+  const clientEmail = String(process.env.GCS_CLIENT_EMAIL || "").trim();
+  const privateKeyRaw = String(process.env.GCS_PRIVATE_KEY || "").trim();
+  const keyFilename = String(process.env.GOOGLE_APPLICATION_CREDENTIALS || "").trim();
+  const rawPublicPrefix = String(process.env.GCS_PUBLIC_URL_PREFIX || "").trim().replace(/\/+$/, "");
+  const defaultPublicBase = bucketName ? `https://storage.googleapis.com/${bucketName}` : "";
+  const publicBaseUrl = rawPublicPrefix && !isPlaceholderValue(rawPublicPrefix) ? rawPublicPrefix : defaultPublicBase;
+  if (!bucketName || isPlaceholderValue(bucketName)) {
+    return {
+      valid: false,
+      bucketName: "",
+      publicBaseUrl: "",
+      error: "Cloud storage is not properly configured: GCS_BUCKET_NAME is missing."
+    };
+  }
+  if (!/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
+    return {
+      valid: false,
+      bucketName,
+      publicBaseUrl,
+      error: "Cloud storage is not properly configured: GCS_BUCKET_NAME format is invalid."
+    };
+  }
+  if (rawPublicPrefix && !isPlaceholderValue(rawPublicPrefix) && !/^https:\/\/.+/i.test(rawPublicPrefix)) {
+    return {
+      valid: false,
+      bucketName,
+      publicBaseUrl,
+      error: "Cloud storage is not properly configured: GCS_PUBLIC_URL_PREFIX must use HTTPS."
+    };
+  }
+  if (rawJson && !isPlaceholderValue(rawJson)) {
+    try {
+      const parsed = parseServiceAccountJson(rawJson);
+      const parsedEmail = String(parsed.client_email || "").trim();
+      const parsedKey = String(parsed.private_key || "").replace(/\\n/g, "\n").trim();
+      const projectId = (!isPlaceholderValue(envProjectId) ? envProjectId : "") || String(parsed.project_id || "").trim();
+      if (!parsedEmail || !parsedKey || !parsedKey.includes("BEGIN")) {
+        return {
+          valid: false,
+          bucketName,
+          publicBaseUrl,
+          error: "Cloud storage is not properly configured: GCS_SERVICE_ACCOUNT_JSON is missing valid service account credentials."
+        };
+      }
+      return {
+        valid: true,
+        bucketName,
+        projectId: projectId || void 0,
+        publicBaseUrl,
+        credentials: {
+          client_email: parsedEmail,
+          private_key: parsedKey
+        }
+      };
+    } catch {
+      return {
+        valid: false,
+        bucketName,
+        publicBaseUrl,
+        error: "Cloud storage is not properly configured: GCS_SERVICE_ACCOUNT_JSON could not be parsed as valid JSON."
+      };
+    }
+  }
+  if (clientEmail && privateKeyRaw && !isPlaceholderValue(clientEmail) && !isPlaceholderValue(privateKeyRaw)) {
+    const normalizedKey = privateKeyRaw.replace(/\\n/g, "\n").trim();
+    if (!normalizedKey.includes("BEGIN")) {
+      return {
+        valid: false,
+        bucketName,
+        publicBaseUrl,
+        error: "Cloud storage is not properly configured: GCS_PRIVATE_KEY is invalid."
+      };
+    }
+    return {
+      valid: true,
+      bucketName,
+      projectId: !isPlaceholderValue(envProjectId) ? envProjectId : void 0,
+      publicBaseUrl,
+      credentials: {
+        client_email: clientEmail,
+        private_key: normalizedKey
+      }
+    };
+  }
+  if (keyFilename && !isPlaceholderValue(keyFilename)) {
+    if (!fs18.existsSync(keyFilename)) {
+      return {
+        valid: false,
+        bucketName,
+        publicBaseUrl,
+        error: "Cloud storage is not properly configured: credentials file referenced by GOOGLE_APPLICATION_CREDENTIALS was not found."
+      };
+    }
+    return {
+      valid: true,
+      bucketName,
+      projectId: !isPlaceholderValue(envProjectId) ? envProjectId : void 0,
+      publicBaseUrl,
+      keyFilename
+    };
+  }
+  return {
+    valid: false,
+    bucketName,
+    publicBaseUrl,
+    error: "Cloud storage is not properly configured: provide GCS_SERVICE_ACCOUNT_JSON (or GCS_CLIENT_EMAIL and GCS_PRIVATE_KEY)."
+  };
+}
+var warnedDeprecatedGcsMakePublic = false;
+var GoogleCloudStorageAdapter = class {
+  constructor(bucketNameOrOptions) {
+    this.providerName = "gcs";
+    this.storageClient = null;
+    this.bucket = null;
+    if (String(process.env.GCS_MAKE_PUBLIC || "").trim() && !warnedDeprecatedGcsMakePublic) {
+      warnedDeprecatedGcsMakePublic = true;
+      console.warn(
+        "[STORAGE:GCS] Ignoring deprecated GCS_MAKE_PUBLIC setting. Configure Uniform Bucket-Level Access and bucket-level IAM on your storefront media bucket instead."
+      );
+    }
+    const opts = typeof bucketNameOrOptions === "string" ? { bucketName: bucketNameOrOptions } : bucketNameOrOptions || {};
+    if (opts.storageClient) {
+      const bucketName = String(opts.bucketName || process.env.GCS_BUCKET_NAME || "").trim();
+      const publicBaseUrl = (opts.publicBaseUrl || (bucketName ? `https://storage.googleapis.com/${bucketName}` : "")).replace(/\/+$/, "");
+      if (!bucketName || !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
+        this.config = {
+          valid: false,
+          bucketName,
+          publicBaseUrl,
+          error: "Cloud storage is not properly configured: GCS_BUCKET_NAME is missing or invalid."
+        };
+      } else {
+        this.config = {
+          valid: true,
+          bucketName,
+          publicBaseUrl
+        };
+        this.storageClient = opts.storageClient;
+        this.bucket = this.storageClient.bucket(bucketName);
+      }
+      return;
+    }
+    this.config = resolveGcsConfiguration(opts.bucketName);
+    if (this.config.valid) {
+      const storageOpts = {};
+      if (this.config.projectId) storageOpts.projectId = this.config.projectId;
+      if (this.config.credentials) storageOpts.credentials = this.config.credentials;
+      if (this.config.keyFilename) storageOpts.keyFilename = this.config.keyFilename;
+      this.storageClient = new Storage(storageOpts);
+      this.bucket = this.storageClient.bucket(this.config.bucketName);
+    }
+  }
+  getConfigStatus() {
+    return {
+      provider: "gcs",
+      configured: this.config.valid,
+      bucketName: this.config.bucketName || void 0,
+      publicBaseUrl: this.config.publicBaseUrl || void 0,
+      error: this.config.error
+    };
+  }
+  async verifyBucketAccess() {
+    if (!this.config.valid || !this.bucket) {
+      return { ok: false, error: this.config.error || "Google Cloud Storage is not configured." };
+    }
+    try {
+      const [exists] = await this.bucket.exists();
+      if (!exists) {
+        return { ok: false, error: "Configured Google Cloud Storage bucket does not exist or is unreachable." };
+      }
+      return { ok: true };
+    } catch (err) {
+      console.error("[STORAGE:GCS] Bucket verification failed:", err?.message || err);
+      return {
+        ok: false,
+        error: "Unable to verify Google Cloud Storage bucket access. Check credentials and bucket IAM permissions."
+      };
+    }
+  }
+  async uploadFile(buffer, destinationPath, contentType = "application/octet-stream", options) {
+    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+    if (!this.config.valid || !this.bucket) {
+      return {
+        success: false,
+        url: "",
+        destinationPath: cleanPath,
+        provider: "gcs",
+        statusCode: 503,
+        error: this.config.error || "Cloud storage is not properly configured."
+      };
+    }
+    try {
+      const file = this.bucket.file(cleanPath);
+      const cacheControl = options?.cacheControl || IMMUTABLE_IMAGE_CACHE_CONTROL;
+      await file.save(buffer, {
+        resumable: false,
+        validation: "crc32c",
+        contentType,
+        metadata: {
+          contentType,
+          cacheControl
+        }
+      });
+      const [exists] = await file.exists();
+      if (!exists) {
+        throw new Error("Uploaded object could not be verified in Google Cloud Storage.");
+      }
+      return {
+        success: true,
+        url: this.getFileUrl(cleanPath),
+        destinationPath: cleanPath,
+        sizeBytes: buffer.length,
+        contentType,
+        provider: "gcs"
+      };
+    } catch (err) {
+      const errCode = Number(err?.code);
+      console.error("[STORAGE:GCS] Upload failed:", err?.code || "", err?.message || err);
+      if (errCode === 403 || errCode === 401) {
+        return {
+          success: false,
+          url: "",
+          destinationPath: cleanPath,
+          provider: "gcs",
+          statusCode: 403,
+          error: "Cloud storage permission denied. Verify service-account IAM roles on the configured Google Cloud Storage bucket."
+        };
+      }
+      return {
+        success: false,
+        url: "",
+        destinationPath: cleanPath,
+        provider: "gcs",
+        statusCode: 502,
+        error: "Cloud storage upload failed. Verify Google Cloud Storage credentials, bucket permissions, and network availability."
+      };
+    }
+  }
+  async getFile(destinationPath) {
+    if (!this.config.valid || !this.bucket) {
+      return {
+        success: false,
+        statusCode: 503,
+        error: this.config.error || "Cloud storage is not properly configured."
+      };
+    }
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      const file = this.bucket.file(cleanPath);
+      const [[buffer], [metadata]] = await Promise.all([file.download(), file.getMetadata()]);
+      return {
+        success: true,
+        buffer,
+        contentType: metadata?.contentType || guessContentTypeFromPath(cleanPath),
+        sizeBytes: buffer.length,
+        statusCode: 200
+      };
+    } catch (err) {
+      const errCode = Number(err?.code);
+      console.error("[STORAGE:GCS] File retrieval failed:", err?.code || "", err?.message || err);
+      if (errCode === 404) {
+        return {
+          success: false,
+          statusCode: 404,
+          error: "File not found in cloud storage."
+        };
+      }
+      if (errCode === 403 || errCode === 401) {
+        return {
+          success: false,
+          statusCode: 403,
+          error: "Cloud storage permission denied while retrieving file."
+        };
+      }
+      return {
+        success: false,
+        statusCode: 502,
+        error: "Failed to retrieve file from cloud storage."
+      };
+    }
+  }
+  async deleteFile(destinationPath) {
+    if (!this.config.valid || !this.bucket) {
+      return false;
+    }
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      const file = this.bucket.file(cleanPath);
+      const [exists] = await file.exists();
+      if (!exists) return false;
+      await file.delete({ ignoreNotFound: true });
+      return true;
+    } catch (err) {
+      console.error("[STORAGE:GCS] File deletion failed:", err?.code || "", err?.message || err);
+      return false;
+    }
+  }
+  getFileUrl(destinationPath) {
+    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+    const encoded = cleanPath.split("/").map(encodeURIComponent).join("/");
+    return `${this.config.publicBaseUrl}/${encoded}`;
+  }
+  async fileExists(destinationPath) {
+    if (!this.config.valid || !this.bucket) {
+      return false;
+    }
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      const [exists] = await this.bucket.file(cleanPath).exists();
+      return Boolean(exists);
+    } catch (err) {
+      console.error("[STORAGE:GCS] Existence check failed:", err?.code || "", err?.message || err);
+      return false;
+    }
+  }
+  resolveManagedStorageKey(url) {
+    if (!this.config.valid || !this.config.publicBaseUrl) {
+      return null;
+    }
+    return extractKeyFromHttpBaseUrl(url, this.config.publicBaseUrl);
+  }
+};
+function resolveR2Configuration(overrides) {
+  const accountId = String(overrides?.accountId ?? process.env.R2_ACCOUNT_ID ?? "").trim();
+  const bucketName = String(overrides?.bucketName ?? process.env.R2_BUCKET_NAME ?? "").trim();
+  const accessKeyId = String(process.env.R2_ACCESS_KEY_ID || "").trim();
+  const secretAccessKey = String(process.env.R2_SECRET_ACCESS_KEY || "").trim();
+  const rawEndpoint = String(overrides?.endpoint ?? process.env.R2_ENDPOINT ?? "").trim().replace(/\/+$/, "");
+  const rawPublicUrl = String(overrides?.publicBaseUrl ?? process.env.R2_PUBLIC_URL ?? "").trim().replace(/\/+$/, "");
+  const derivedEndpoint = rawEndpoint && !isPlaceholderValue(rawEndpoint) ? rawEndpoint : accountId && !isPlaceholderValue(accountId) ? `https://${accountId}.r2.cloudflarestorage.com` : "";
+  const publicBaseUrl = rawPublicUrl && !isPlaceholderValue(rawPublicUrl) ? rawPublicUrl : "";
+  if (!bucketName || isPlaceholderValue(bucketName)) {
+    return {
+      valid: false,
+      accountId,
+      bucketName: "",
+      endpoint: derivedEndpoint,
+      publicBaseUrl,
+      error: "Cloudflare R2 storage is not properly configured: R2_BUCKET_NAME is missing."
+    };
+  }
+  if (!/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: derivedEndpoint,
+      publicBaseUrl,
+      error: "Cloudflare R2 storage is not properly configured: R2_BUCKET_NAME format is invalid."
+    };
+  }
+  if (!derivedEndpoint) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: "",
+      publicBaseUrl,
+      error: "Cloudflare R2 storage is not properly configured: provide R2_ENDPOINT or R2_ACCOUNT_ID."
+    };
+  }
+  if (!/^https:\/\/.+/i.test(derivedEndpoint)) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: derivedEndpoint,
+      publicBaseUrl,
+      error: "Cloudflare R2 storage is not properly configured: R2_ENDPOINT must use HTTPS."
+    };
+  }
+  if (!publicBaseUrl) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: derivedEndpoint,
+      publicBaseUrl: "",
+      error: "Cloudflare R2 storage is not properly configured: R2_PUBLIC_URL is missing."
+    };
+  }
+  if (!/^https:\/\/.+/i.test(publicBaseUrl)) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: derivedEndpoint,
+      publicBaseUrl,
+      error: "Cloudflare R2 storage is not properly configured: R2_PUBLIC_URL must use HTTPS."
+    };
+  }
+  if (!accessKeyId || isPlaceholderValue(accessKeyId) || !secretAccessKey || isPlaceholderValue(secretAccessKey)) {
+    return {
+      valid: false,
+      accountId,
+      bucketName,
+      endpoint: derivedEndpoint,
+      publicBaseUrl,
+      error: "Cloudflare R2 storage is not properly configured: provide R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY."
+    };
+  }
+  return {
+    valid: true,
+    accountId,
+    bucketName,
+    endpoint: derivedEndpoint,
+    publicBaseUrl,
+    accessKeyId,
+    secretAccessKey
+  };
+}
+function getAwsErrorStatusCode(err) {
+  const metaStatus = Number(err?.$metadata?.httpStatusCode);
+  if (Number.isFinite(metaStatus) && metaStatus > 0) return metaStatus;
+  const codeNum = Number(err?.code ?? err?.statusCode);
+  if (Number.isFinite(codeNum) && codeNum > 0) return codeNum;
+  const name = String(err?.name || err?.Code || "");
+  if (name === "NotFound" || name === "NoSuchKey") return 404;
+  if (name === "AccessDenied" || name === "Forbidden" || name === "InvalidAccessKeyId" || name === "SignatureDoesNotMatch") {
+    return 403;
+  }
+  return void 0;
+}
+async function s3BodyToBuffer(body) {
+  if (!body) return Buffer.alloc(0);
+  if (Buffer.isBuffer(body)) return body;
+  if (body instanceof Uint8Array) return Buffer.from(body);
+  if (typeof body.transformToByteArray === "function") {
+    const bytes = await body.transformToByteArray();
+    return Buffer.from(bytes);
+  }
+  if (typeof body[Symbol.asyncIterator] === "function") {
+    const chunks = [];
+    for await (const chunk of body) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+  throw new Error("Unsupported S3 response body stream format.");
+}
+var CloudflareR2StorageAdapter = class {
+  constructor(options) {
+    this.providerName = "r2";
+    this.s3Client = null;
+    if (options?.s3Client) {
+      const accountId = String(options.accountId ?? process.env.R2_ACCOUNT_ID ?? "").trim();
+      const bucketName = String(options.bucketName ?? process.env.R2_BUCKET_NAME ?? "").trim();
+      const rawEndpoint = String(options.endpoint ?? process.env.R2_ENDPOINT ?? "").trim().replace(/\/+$/, "");
+      const endpoint = rawEndpoint || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : "");
+      const publicBaseUrl = String(options.publicBaseUrl ?? process.env.R2_PUBLIC_URL ?? "").trim().replace(/\/+$/, "");
+      if (!bucketName || !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
+        this.config = {
+          valid: false,
+          accountId,
+          bucketName,
+          endpoint,
+          publicBaseUrl,
+          error: "Cloudflare R2 storage is not properly configured: R2_BUCKET_NAME is missing or invalid."
+        };
+      } else if (!endpoint || !/^https:\/\/.+/i.test(endpoint)) {
+        this.config = {
+          valid: false,
+          accountId,
+          bucketName,
+          endpoint,
+          publicBaseUrl,
+          error: "Cloudflare R2 storage is not properly configured: R2_ENDPOINT must use HTTPS."
+        };
+      } else if (!publicBaseUrl || !/^https:\/\/.+/i.test(publicBaseUrl)) {
+        this.config = {
+          valid: false,
+          accountId,
+          bucketName,
+          endpoint,
+          publicBaseUrl,
+          error: "Cloudflare R2 storage is not properly configured: R2_PUBLIC_URL must use HTTPS."
+        };
+      } else {
+        this.config = {
+          valid: true,
+          accountId,
+          bucketName,
+          endpoint,
+          publicBaseUrl
+        };
+        this.s3Client = options.s3Client;
+      }
+      return;
+    }
+    this.config = resolveR2Configuration(options);
+    if (this.config.valid && this.config.accessKeyId && this.config.secretAccessKey) {
+      this.s3Client = new S3Client({
+        region: "auto",
+        endpoint: this.config.endpoint,
+        credentials: {
+          accessKeyId: this.config.accessKeyId,
+          secretAccessKey: this.config.secretAccessKey
+        }
+      });
+    }
+  }
+  getConfigStatus() {
+    return {
+      provider: "r2",
+      configured: this.config.valid,
+      bucketName: this.config.bucketName || void 0,
+      publicBaseUrl: this.config.publicBaseUrl || void 0,
+      error: this.config.error
+    };
+  }
+  async verifyBucketAccess() {
+    if (!this.config.valid || !this.s3Client) {
+      return { ok: false, error: this.config.error || "Cloudflare R2 storage is not configured." };
+    }
+    try {
+      await this.s3Client.send(
+        new HeadBucketCommand({
+          Bucket: this.config.bucketName
+        })
+      );
+      return { ok: true };
+    } catch (err) {
+      const status = getAwsErrorStatusCode(err);
+      console.error("[STORAGE:R2] Bucket verification failed:", status || err?.name || "", err?.message || err);
+      if (status === 403 || status === 401) {
+        return {
+          ok: false,
+          error: "Cloudflare R2 permission denied. Verify R2 API token permissions on the configured bucket."
+        };
+      }
+      return {
+        ok: false,
+        error: "Unable to verify Cloudflare R2 bucket access. Check endpoint, bucket name, and credentials."
+      };
+    }
+  }
+  async uploadFile(buffer, destinationPath, contentType = "application/octet-stream", options) {
+    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+    if (!this.config.valid || !this.s3Client) {
+      return {
+        success: false,
+        url: "",
+        destinationPath: cleanPath,
+        provider: "r2",
+        statusCode: 503,
+        error: this.config.error || "Cloudflare R2 storage is not properly configured."
+      };
+    }
+    try {
+      const cacheControl = options?.cacheControl || IMMUTABLE_IMAGE_CACHE_CONTROL;
+      await this.s3Client.send(
+        new PutObjectCommand({
+          Bucket: this.config.bucketName,
+          Key: cleanPath,
+          Body: buffer,
+          ContentType: contentType,
+          CacheControl: cacheControl
+        })
+      );
+      const exists = await this.fileExists(cleanPath);
+      if (!exists) {
+        throw new Error("Uploaded object could not be verified in Cloudflare R2 storage.");
+      }
+      return {
+        success: true,
+        url: this.getFileUrl(cleanPath),
+        destinationPath: cleanPath,
+        sizeBytes: buffer.length,
+        contentType,
+        provider: "r2"
+      };
+    } catch (err) {
+      const status = getAwsErrorStatusCode(err);
+      console.error("[STORAGE:R2] Upload failed:", status || err?.name || "", err?.message || err);
+      if (status === 403 || status === 401) {
+        return {
+          success: false,
+          url: "",
+          destinationPath: cleanPath,
+          provider: "r2",
+          statusCode: 403,
+          error: "Cloudflare R2 permission denied. Verify R2 API token write permissions on the configured bucket."
+        };
+      }
+      return {
+        success: false,
+        url: "",
+        destinationPath: cleanPath,
+        provider: "r2",
+        statusCode: 502,
+        error: "Cloudflare R2 upload failed. Verify R2 credentials, endpoint, bucket permissions, and network availability."
+      };
+    }
+  }
+  async getFile(destinationPath) {
+    if (!this.config.valid || !this.s3Client) {
+      return {
+        success: false,
+        statusCode: 503,
+        error: this.config.error || "Cloudflare R2 storage is not properly configured."
+      };
+    }
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      const response = await this.s3Client.send(
+        new GetObjectCommand({
+          Bucket: this.config.bucketName,
+          Key: cleanPath
+        })
+      );
+      const buffer = await s3BodyToBuffer(response.Body);
+      return {
+        success: true,
+        buffer,
+        contentType: response.ContentType || guessContentTypeFromPath(cleanPath),
+        sizeBytes: buffer.length,
+        statusCode: 200
+      };
+    } catch (err) {
+      const status = getAwsErrorStatusCode(err);
+      console.error("[STORAGE:R2] File retrieval failed:", status || err?.name || "", err?.message || err);
+      if (status === 404) {
+        return {
+          success: false,
+          statusCode: 404,
+          error: "File not found in Cloudflare R2 storage."
+        };
+      }
+      if (status === 403 || status === 401) {
+        return {
+          success: false,
+          statusCode: 403,
+          error: "Cloudflare R2 permission denied while retrieving file."
+        };
+      }
+      return {
+        success: false,
+        statusCode: 502,
+        error: "Failed to retrieve file from Cloudflare R2 storage."
+      };
+    }
+  }
+  async deleteFile(destinationPath) {
+    if (!this.config.valid || !this.s3Client) {
+      return false;
+    }
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      const exists = await this.fileExists(cleanPath);
+      if (!exists) return false;
+      await this.s3Client.send(
+        new DeleteObjectCommand({
+          Bucket: this.config.bucketName,
+          Key: cleanPath
+        })
+      );
+      return true;
+    } catch (err) {
+      const status = getAwsErrorStatusCode(err);
+      console.error("[STORAGE:R2] File deletion failed:", status || err?.name || "", err?.message || err);
+      return false;
+    }
+  }
+  getFileUrl(destinationPath) {
+    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+    const encoded = cleanPath.split("/").map(encodeURIComponent).join("/");
+    return `${this.config.publicBaseUrl}/${encoded}`;
+  }
+  async fileExists(destinationPath) {
+    if (!this.config.valid || !this.s3Client) {
+      return false;
+    }
+    try {
+      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
+      await this.s3Client.send(
+        new HeadObjectCommand({
+          Bucket: this.config.bucketName,
+          Key: cleanPath
+        })
+      );
+      return true;
+    } catch (err) {
+      const status = getAwsErrorStatusCode(err);
+      if (status !== 404) {
+        console.error("[STORAGE:R2] Existence check failed:", status || err?.name || "", err?.message || err);
+      }
+      return false;
+    }
+  }
+  resolveManagedStorageKey(url) {
+    if (!this.config.valid || !this.config.publicBaseUrl) {
+      return null;
+    }
+    return extractKeyFromHttpBaseUrl(url, this.config.publicBaseUrl);
+  }
+};
+var activeStorageAdapter = null;
+var activeProviderKey = null;
+function getConfiguredStorageProvider() {
+  const provider = String(process.env.STORAGE_PROVIDER || "local").toLowerCase().trim();
+  if (provider === "gcs" || provider === "google" || provider === "google-cloud-storage") {
+    return "gcs";
+  }
+  if (provider === "r2" || provider === "cloudflare-r2") {
+    return "r2";
+  }
+  return "local";
+}
+function getStorageAdapter() {
+  const provider = getConfiguredStorageProvider();
+  if (activeStorageAdapter && activeProviderKey === provider) {
+    return activeStorageAdapter;
+  }
+  activeProviderKey = provider;
+  if (provider === "gcs") {
+    const gcsAdapter = new GoogleCloudStorageAdapter();
+    activeStorageAdapter = gcsAdapter;
+    const status = gcsAdapter.getConfigStatus();
+    if (status.configured) {
+      console.log(`[STORAGE] Initialized GoogleCloudStorageAdapter (bucket=${status.bucketName}).`);
+    } else {
+      console.warn(`[STORAGE] GoogleCloudStorageAdapter selected via STORAGE_PROVIDER=gcs, but configuration is incomplete: ${status.error}`);
+    }
+  } else if (provider === "r2") {
+    const r2Adapter = new CloudflareR2StorageAdapter();
+    activeStorageAdapter = r2Adapter;
+    const status = r2Adapter.getConfigStatus();
+    if (status.configured) {
+      console.log(`[STORAGE] Initialized CloudflareR2StorageAdapter (bucket=${status.bucketName}).`);
+    } else {
+      console.warn(`[STORAGE] CloudflareR2StorageAdapter selected via STORAGE_PROVIDER=r2, but configuration is incomplete: ${status.error}`);
+    }
+  } else {
+    activeStorageAdapter = new LocalStorageAdapter();
+    console.log("[STORAGE] Initialized LocalStorageAdapter (Provider: Local).");
+  }
+  return activeStorageAdapter;
+}
+
+// server/services/storage/durableMediaStateStore.ts
+init_prisma();
+init_storageHelper();
+import fs19 from "fs";
+import path17 from "path";
+import crypto13 from "crypto";
+var MEDIA_CLEANUP_MYSQL_KEY = "media_cleanup_state_v1";
+var MEDIA_CLEANUP_MYSQL_GROUP = "INTERNAL_MEDIA";
+var MEDIA_TOMBSTONE_RETENTION_MS = 24 * 60 * 60 * 1e3;
+var DEFAULT_MAX_CAS_RETRIES = 5;
+function buildMediaCompositeKey(provider, storageKey) {
+  return `${provider}:${storageKey}`;
+}
+function buildPendingTombstoneKey(compositeKey) {
+  return `pending:${compositeKey}`;
+}
+function buildDeferredTombstoneKey(compositeKey) {
+  return `deferred:${compositeKey}`;
+}
+function buildLeaseKey(ownerId, sessionId) {
+  return `${ownerId}:${sessionId}`;
+}
+function buildLeaseTombstoneKey(leaseKey) {
+  return `lease:${leaseKey}`;
+}
+function createEmptyDurableMediaState(instanceId, nowMs = Date.now()) {
+  return {
+    schemaVersion: 1,
+    stateVersion: 0,
+    updatedAt: nowMs,
+    instanceId,
+    pendingMySqlSync: false,
+    lastSyncedMySqlVersion: 0,
+    pendingUploads: {},
+    deferredQueue: {},
+    editorLeases: {},
+    tombstones: {}
+  };
+}
+function cloneEnvelope(state) {
+  return JSON.parse(JSON.stringify(state));
+}
+function parseEnvelopeJson(raw, fallbackInstanceId, nowMs) {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const base = createEmptyDurableMediaState(
+      typeof parsed.instanceId === "string" && parsed.instanceId ? parsed.instanceId : fallbackInstanceId,
+      typeof parsed.updatedAt === "number" && Number.isFinite(parsed.updatedAt) ? parsed.updatedAt : nowMs
+    );
+    base.stateVersion = typeof parsed.stateVersion === "number" && Number.isFinite(parsed.stateVersion) ? parsed.stateVersion : 0;
+    base.pendingMySqlSync = Boolean(parsed.pendingMySqlSync);
+    base.lastSyncedMySqlVersion = typeof parsed.lastSyncedMySqlVersion === "number" && Number.isFinite(parsed.lastSyncedMySqlVersion) ? parsed.lastSyncedMySqlVersion : 0;
+    if (parsed.pendingUploads && typeof parsed.pendingUploads === "object") {
+      base.pendingUploads = parsed.pendingUploads;
+    }
+    if (parsed.deferredQueue && typeof parsed.deferredQueue === "object") {
+      base.deferredQueue = parsed.deferredQueue;
+    }
+    if (parsed.editorLeases && typeof parsed.editorLeases === "object") {
+      base.editorLeases = parsed.editorLeases;
+    }
+    if (parsed.tombstones && typeof parsed.tombstones === "object") {
+      base.tombstones = parsed.tombstones;
+    }
+    return base;
+  } catch {
+    return null;
+  }
+}
+function isRecordSupersededByTombstone(record, tombstone) {
+  if (!tombstone) return false;
+  if (record.createdAt > tombstone.deletedAt) {
+    return false;
+  }
+  if (tombstone.revision > record.revision) {
+    return true;
+  }
+  if (tombstone.deletedAt > record.updatedAt) {
+    return true;
+  }
+  return tombstone.deletedAt === record.updatedAt && tombstone.revision >= record.revision;
+}
+function mergeProcessingClaim(a, b, nowMs = Date.now()) {
+  const activeA = a && a.claimExpiresAt > nowMs ? a : null;
+  const activeB = b && b.claimExpiresAt > nowMs ? b : null;
+  if (!activeA) return activeB;
+  if (!activeB) return activeA;
+  if (activeA.claimedAt !== activeB.claimedAt) {
+    return activeA.claimedAt > activeB.claimedAt ? activeA : activeB;
+  }
+  if (activeA.claimExpiresAt !== activeB.claimExpiresAt) {
+    return activeA.claimExpiresAt > activeB.claimExpiresAt ? activeA : activeB;
+  }
+  return activeA.ownerInstanceId >= activeB.ownerInstanceId ? activeA : activeB;
+}
+function mergeDurableMediaState(stateA, stateB, nowMs = Date.now(), tombstoneRetentionMs = MEDIA_TOMBSTONE_RETENTION_MS) {
+  const mergedTombstones = {};
+  const allTombstoneKeys = /* @__PURE__ */ new Set([
+    ...Object.keys(stateA.tombstones || {}),
+    ...Object.keys(stateB.tombstones || {})
+  ]);
+  for (const tKey of allTombstoneKeys) {
+    const tA = stateA.tombstones?.[tKey];
+    const tB = stateB.tombstones?.[tKey];
+    let chosen;
+    if (tA && tB) {
+      if (tA.revision !== tB.revision) {
+        chosen = tA.revision > tB.revision ? tA : tB;
+      } else {
+        chosen = tA.deletedAt >= tB.deletedAt ? tA : tB;
+      }
+    } else {
+      chosen = tA || tB;
+    }
+    if (chosen && nowMs - chosen.deletedAt <= tombstoneRetentionMs) {
+      mergedTombstones[tKey] = { ...chosen };
+    }
+  }
+  const mergedPending = {};
+  const allPendingKeys = /* @__PURE__ */ new Set([
+    ...Object.keys(stateA.pendingUploads || {}),
+    ...Object.keys(stateB.pendingUploads || {})
+  ]);
+  for (const key of allPendingKeys) {
+    const recA = stateA.pendingUploads?.[key];
+    const recB = stateB.pendingUploads?.[key];
+    let merged;
+    if (recA && recB) {
+      const newer = recA.revision !== recB.revision ? recA.revision > recB.revision ? recA : recB : recA.updatedAt >= recB.updatedAt ? recA : recB;
+      merged = {
+        ...newer,
+        uploadedAt: Math.min(recA.uploadedAt, recB.uploadedAt),
+        createdAt: Math.min(recA.createdAt, recB.createdAt),
+        updatedAt: Math.max(recA.updatedAt, recB.updatedAt),
+        revision: Math.max(recA.revision, recB.revision),
+        ownerId: newer.ownerId || recA.ownerId || recB.ownerId,
+        sessionId: newer.sessionId || recA.sessionId || recB.sessionId
+      };
+    } else {
+      merged = { ...recA || recB };
+    }
+    const tombstone = mergedTombstones[buildPendingTombstoneKey(key)];
+    if (!isRecordSupersededByTombstone(merged, tombstone)) {
+      mergedPending[key] = merged;
+    }
+  }
+  const mergedDeferred = {};
+  const allDeferredKeys = /* @__PURE__ */ new Set([
+    ...Object.keys(stateA.deferredQueue || {}),
+    ...Object.keys(stateB.deferredQueue || {})
+  ]);
+  for (const key of allDeferredKeys) {
+    const recA = stateA.deferredQueue?.[key];
+    const recB = stateB.deferredQueue?.[key];
+    let merged;
+    if (recA && recB) {
+      const newer = recA.revision !== recB.revision ? recA.revision > recB.revision ? recA : recB : recA.updatedAt >= recB.updatedAt ? recA : recB;
+      merged = {
+        ...newer,
+        enqueuedAt: Math.min(recA.enqueuedAt, recB.enqueuedAt),
+        eligibleAt: Math.max(recA.eligibleAt, recB.eligibleAt),
+        attempts: Math.max(recA.attempts, recB.attempts),
+        lastAttemptAt: recA.lastAttemptAt !== void 0 || recB.lastAttemptAt !== void 0 ? Math.max(recA.lastAttemptAt || 0, recB.lastAttemptAt || 0) : void 0,
+        processingClaim: mergeProcessingClaim(recA.processingClaim, recB.processingClaim, nowMs),
+        createdAt: Math.min(recA.createdAt, recB.createdAt),
+        updatedAt: Math.max(recA.updatedAt, recB.updatedAt),
+        revision: Math.max(recA.revision, recB.revision)
+      };
+    } else {
+      const single = recA || recB;
+      merged = {
+        ...single,
+        processingClaim: mergeProcessingClaim(single.processingClaim, null, nowMs)
+      };
+    }
+    const tombstone = mergedTombstones[buildDeferredTombstoneKey(key)];
+    if (!isRecordSupersededByTombstone(merged, tombstone)) {
+      mergedDeferred[key] = merged;
+    }
+  }
+  const mergedLeases = {};
+  const allLeaseKeys = /* @__PURE__ */ new Set([
+    ...Object.keys(stateA.editorLeases || {}),
+    ...Object.keys(stateB.editorLeases || {})
+  ]);
+  for (const key of allLeaseKeys) {
+    const recA = stateA.editorLeases?.[key];
+    const recB = stateB.editorLeases?.[key];
+    let merged;
+    if (recA && recB) {
+      const newer = recA.revision !== recB.revision ? recA.revision > recB.revision ? recA : recB : recA.updatedAt >= recB.updatedAt ? recA : recB;
+      merged = {
+        ...newer,
+        storageKeys: Array.from(/* @__PURE__ */ new Set([...recA.storageKeys || [], ...recB.storageKeys || []])),
+        urls: Array.from(/* @__PURE__ */ new Set([...recA.urls || [], ...recB.urls || []])),
+        expiresAt: Math.max(recA.expiresAt, recB.expiresAt),
+        createdAt: Math.min(recA.createdAt, recB.createdAt),
+        updatedAt: Math.max(recA.updatedAt, recB.updatedAt),
+        revision: Math.max(recA.revision, recB.revision)
+      };
+    } else {
+      merged = { ...recA || recB };
+    }
+    const tombstone = mergedTombstones[buildLeaseTombstoneKey(key)];
+    if (merged.expiresAt > nowMs && !isRecordSupersededByTombstone(merged, tombstone)) {
+      mergedLeases[key] = merged;
+    }
+  }
+  return {
+    schemaVersion: 1,
+    stateVersion: Math.max(stateA.stateVersion || 0, stateB.stateVersion || 0),
+    updatedAt: Math.max(stateA.updatedAt || 0, stateB.updatedAt || 0, nowMs),
+    instanceId: stateA.updatedAt >= stateB.updatedAt ? stateA.instanceId : stateB.instanceId,
+    pendingMySqlSync: Boolean(stateA.pendingMySqlSync || stateB.pendingMySqlSync),
+    lastSyncedMySqlVersion: Math.max(stateA.lastSyncedMySqlVersion || 0, stateB.lastSyncedMySqlVersion || 0),
+    pendingUploads: mergedPending,
+    deferredQueue: mergedDeferred,
+    editorLeases: mergedLeases,
+    tombstones: mergedTombstones
+  };
+}
+function createPrismaMySqlMediaStateBackend() {
+  return {
+    isAvailable() {
+      const client = getPrismaClient();
+      return Boolean(client && client.websiteSetting && typeof client.websiteSetting.findUnique === "function");
+    },
+    async readRow() {
+      const client = getPrismaClient();
+      if (!client?.websiteSetting) return null;
+      const row = await client.websiteSetting.findUnique({
+        where: { key: MEDIA_CLEANUP_MYSQL_KEY }
+      });
+      if (!row || typeof row.value !== "string") return null;
+      return {
+        key: row.key,
+        value: row.value,
+        updatedAt: row.updatedAt instanceof Date ? row.updatedAt : new Date(row.updatedAt)
+      };
+    },
+    async createRow(value) {
+      const client = getPrismaClient();
+      if (!client?.websiteSetting) return { created: false };
+      try {
+        await client.websiteSetting.create({
+          data: {
+            key: MEDIA_CLEANUP_MYSQL_KEY,
+            value,
+            group: MEDIA_CLEANUP_MYSQL_GROUP,
+            description: "Internal restart-safe media cleanup state (pending uploads, leases, deferred queue).",
+            isPublic: false
+          }
+        });
+        return { created: true };
+      } catch (err) {
+        if (err?.code === "P2002") {
+          return { created: false, conflict: true };
+        }
+        throw err;
+      }
+    },
+    async compareAndSwapRow(expectedUpdatedAt, nextValue) {
+      const client = getPrismaClient();
+      if (!client?.websiteSetting) return { updated: false };
+      const res = await client.websiteSetting.updateMany({
+        where: {
+          key: MEDIA_CLEANUP_MYSQL_KEY,
+          updatedAt: expectedUpdatedAt
+        },
+        data: {
+          value: nextValue,
+          group: MEDIA_CLEANUP_MYSQL_GROUP,
+          isPublic: false
+        }
+      });
+      return { updated: Number(res?.count || 0) > 0 };
+    }
+  };
+}
+var DurableMediaStateStore = class {
+  constructor(options) {
+    this.hydrated = false;
+    this.mutationChain = Promise.resolve();
+    this.now = options?.now || (() => Date.now());
+    this.instanceId = options?.instanceId || `node-${process.pid}-${crypto13.randomBytes(4).toString("hex")}`;
+    this.runtimeFilePath = options?.runtimeFilePath || resolveSecureStorePath("media_cleanup_state.json");
+    this.mysqlBackend = options?.mysqlBackend === void 0 ? createPrismaMySqlMediaStateBackend() : options.mysqlBackend;
+    this.maxCasRetries = Math.max(1, options?.maxCasRetries ?? DEFAULT_MAX_CAS_RETRIES);
+    this.tombstoneRetentionMs = options?.tombstoneRetentionMs ?? MEDIA_TOMBSTONE_RETENTION_MS;
+    this.state = createEmptyDurableMediaState(this.instanceId, this.now());
+  }
+  async runSerialized(fn) {
+    const previous = this.mutationChain;
+    let release;
+    this.mutationChain = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+  async readDiskState(nowMs) {
+    try {
+      if (!fs19.existsSync(this.runtimeFilePath)) return null;
+      const raw = await fs19.promises.readFile(this.runtimeFilePath, "utf8");
+      if (!raw.trim()) return null;
+      return parseEnvelopeJson(raw, this.instanceId, nowMs);
+    } catch (err) {
+      console.warn("[MEDIA-STATE] Could not read runtime JSON state:", err?.message || err);
+      return null;
+    }
+  }
+  async writeDiskStateAtomic(envelope) {
+    const dir = path17.dirname(this.runtimeFilePath);
+    const tmpPath = `${this.runtimeFilePath}.${process.pid}.${crypto13.randomBytes(6).toString("hex")}.tmp`;
+    try {
+      await fs19.promises.mkdir(dir, { recursive: true });
+      await fs19.promises.writeFile(tmpPath, JSON.stringify(envelope, null, 2), "utf8");
+      await fs19.promises.rename(tmpPath, this.runtimeFilePath);
+      return true;
+    } catch (err) {
+      console.warn("[MEDIA-STATE] Failed atomic runtime JSON write:", err?.message || err);
+      try {
+        if (fs19.existsSync(tmpPath)) {
+          await fs19.promises.unlink(tmpPath);
+        }
+      } catch {
+      }
+      return false;
+    }
+  }
+  async readMySqlState(nowMs) {
+    if (!this.mysqlBackend || !this.mysqlBackend.isAvailable()) {
+      return { available: false, reachable: false, row: null, envelope: null };
+    }
+    try {
+      const row = await this.mysqlBackend.readRow();
+      const envelope = row ? parseEnvelopeJson(row.value, this.instanceId, nowMs) : null;
+      return { available: true, reachable: true, row, envelope };
+    } catch (err) {
+      console.warn("[MEDIA-STATE] MySQL read unavailable during state sync:", err?.message || err);
+      return { available: true, reachable: false, row: null, envelope: null };
+    }
+  }
+  compactEnvelope(envelope, nowMs) {
+    return mergeDurableMediaState(envelope, createEmptyDurableMediaState(this.instanceId, nowMs), nowMs, this.tombstoneRetentionMs);
+  }
+  async hydrateUnlocked() {
+    const nowMs = this.now();
+    const diskState = await this.readDiskState(nowMs);
+    const mysqlRes = await this.readMySqlState(nowMs);
+    let reconciled = cloneEnvelope(this.state);
+    if (diskState) {
+      reconciled = mergeDurableMediaState(reconciled, diskState, nowMs, this.tombstoneRetentionMs);
+    }
+    if (mysqlRes.envelope) {
+      reconciled = mergeDurableMediaState(reconciled, mysqlRes.envelope, nowMs, this.tombstoneRetentionMs);
+    }
+    const mysqlVersion = mysqlRes.envelope?.stateVersion ?? 0;
+    if (mysqlRes.available && !mysqlRes.reachable) {
+      reconciled.pendingMySqlSync = true;
+    } else if (mysqlRes.available && mysqlRes.reachable) {
+      const needsBackfillToMySql = reconciled.pendingMySqlSync || reconciled.stateVersion > mysqlVersion || diskState !== null && mysqlRes.row === null && (Object.keys(reconciled.pendingUploads).length > 0 || Object.keys(reconciled.deferredQueue).length > 0 || Object.keys(reconciled.editorLeases).length > 0);
+      if (needsBackfillToMySql) {
+        reconciled = await this.persistToMySqlWithCasUnlocked(reconciled, mysqlRes.row, nowMs);
+      } else if (mysqlRes.envelope) {
+        reconciled.pendingMySqlSync = false;
+        reconciled.lastSyncedMySqlVersion = Math.max(reconciled.lastSyncedMySqlVersion, mysqlVersion);
+      }
+    }
+    if (mysqlRes.envelope && (!diskState || mysqlRes.envelope.stateVersion > diskState.stateVersion) || !diskState && reconciled.stateVersion > 0) {
+      await this.writeDiskStateAtomic(reconciled);
+    }
+    this.state = reconciled;
+    this.hydrated = true;
+    return cloneEnvelope(this.state);
+  }
+  /**
+   * Optimistic concurrency (CAS) read-merge-write into MySQL WebsiteSetting.
+   * Never lets an older JSON snapshot overwrite newer MySQL state.
+   */
+  async persistToMySqlWithCasUnlocked(candidate, initialRow, nowMs) {
+    if (!this.mysqlBackend || !this.mysqlBackend.isAvailable()) {
+      return candidate;
+    }
+    let working = cloneEnvelope(candidate);
+    let currentRow = initialRow;
+    for (let attempt = 0; attempt < this.maxCasRetries; attempt++) {
+      try {
+        if (attempt > 0) {
+          currentRow = await this.mysqlBackend.readRow();
+          if (currentRow) {
+            const remote = parseEnvelopeJson(currentRow.value, this.instanceId, nowMs);
+            if (remote) {
+              working = mergeDurableMediaState(remote, working, nowMs, this.tombstoneRetentionMs);
+              working.stateVersion = Math.max(working.stateVersion, remote.stateVersion) + 1;
+              working.updatedAt = Math.max(working.updatedAt, nowMs);
+              working.instanceId = this.instanceId;
+            }
+          }
+        }
+        const payloadToStore = {
+          ...working,
+          pendingMySqlSync: false,
+          lastSyncedMySqlVersion: working.stateVersion
+        };
+        const serialized = JSON.stringify(payloadToStore);
+        if (!currentRow) {
+          const createRes = await this.mysqlBackend.createRow(serialized);
+          if (createRes.created) {
+            return payloadToStore;
+          }
+          if (createRes.conflict) {
+            continue;
+          }
+          return { ...working, pendingMySqlSync: true };
+        }
+        const casRes = await this.mysqlBackend.compareAndSwapRow(currentRow.updatedAt, serialized);
+        if (casRes.updated) {
+          return payloadToStore;
+        }
+      } catch (err) {
+        console.warn("[MEDIA-STATE] MySQL persistence temporarily unavailable; retaining state on runtime disk:", err?.message || err);
+        return { ...working, pendingMySqlSync: true };
+      }
+    }
+    console.warn("[MEDIA-STATE] Exhausted MySQL CAS retries under high contention; retaining dirty sync flag for next sweep.");
+    return { ...working, pendingMySqlSync: true };
+  }
+  async hydrate() {
+    return this.runSerialized(async () => this.hydrateUnlocked());
+  }
+  async getSnapshot() {
+    return this.runSerialized(async () => {
+      if (!this.hydrated) {
+        return this.hydrateUnlocked();
+      }
+      return cloneEnvelope(this.state);
+    });
+  }
+  /**
+   * Reconciles any outage-buffered runtime JSON changes into MySQL (and pulls any
+   * newer records written by another worker into local state) without losing any entry.
+   */
+  async syncBackends() {
+    return this.runSerialized(async () => {
+      const nowMs = this.now();
+      if (!this.hydrated) {
+        return this.hydrateUnlocked();
+      }
+      const diskState = await this.readDiskState(nowMs);
+      const mysqlRes = await this.readMySqlState(nowMs);
+      let merged = cloneEnvelope(this.state);
+      if (diskState) {
+        merged = mergeDurableMediaState(merged, diskState, nowMs, this.tombstoneRetentionMs);
+      }
+      if (mysqlRes.envelope) {
+        merged = mergeDurableMediaState(merged, mysqlRes.envelope, nowMs, this.tombstoneRetentionMs);
+      }
+      if (mysqlRes.available && !mysqlRes.reachable) {
+        merged.pendingMySqlSync = true;
+        await this.writeDiskStateAtomic(merged);
+        this.state = merged;
+        return cloneEnvelope(this.state);
+      }
+      if (mysqlRes.available && mysqlRes.reachable) {
+        const remoteVer = mysqlRes.envelope?.stateVersion ?? 0;
+        const needsPush = merged.pendingMySqlSync || merged.stateVersion > remoteVer || mysqlRes.row === null && merged.stateVersion > 0;
+        if (needsPush) {
+          merged.stateVersion = Math.max(merged.stateVersion, remoteVer) + 1;
+          merged.updatedAt = nowMs;
+          merged.instanceId = this.instanceId;
+          merged = await this.persistToMySqlWithCasUnlocked(merged, mysqlRes.row, nowMs);
+        } else if (mysqlRes.envelope) {
+          merged.pendingMySqlSync = false;
+          merged.lastSyncedMySqlVersion = Math.max(merged.lastSyncedMySqlVersion, remoteVer);
+        }
+      }
+      await this.writeDiskStateAtomic(merged);
+      this.state = merged;
+      return cloneEnvelope(this.state);
+    });
+  }
+  /**
+   * Runs a serialized read -> merge -> mutate -> atomic disk + MySQL CAS persistence cycle.
+   * Never drops mutations if MySQL is temporarily down (falls back to runtime disk + pendingMySqlSync).
+   */
+  async mutate(mutator) {
+    return this.runSerialized(async () => {
+      const nowMs = this.now();
+      if (!this.hydrated) {
+        await this.hydrateUnlocked();
+      }
+      const mysqlRes = await this.readMySqlState(nowMs);
+      let base = cloneEnvelope(this.state);
+      if (mysqlRes.envelope) {
+        base = mergeDurableMediaState(base, mysqlRes.envelope, nowMs, this.tombstoneRetentionMs);
+      }
+      const { result, changed = true } = mutator(base, nowMs);
+      if (!changed && !base.pendingMySqlSync) {
+        this.state = base;
+        return result;
+      }
+      const compacted = this.compactEnvelope(base, nowMs);
+      if (changed) {
+        compacted.stateVersion = Math.max(compacted.stateVersion, mysqlRes.envelope?.stateVersion ?? 0) + 1;
+        compacted.updatedAt = nowMs;
+        compacted.instanceId = this.instanceId;
+      }
+      if (mysqlRes.available && !mysqlRes.reachable) {
+        compacted.pendingMySqlSync = true;
+      }
+      await this.writeDiskStateAtomic(compacted);
+      let finalEnvelope = compacted;
+      if (mysqlRes.available && mysqlRes.reachable) {
+        finalEnvelope = await this.persistToMySqlWithCasUnlocked(compacted, mysqlRes.row, nowMs);
+        await this.writeDiskStateAtomic(finalEnvelope);
+      }
+      this.state = finalEnvelope;
+      return result;
+    });
+  }
+};
+
+// server/services/storage/mediaCleanupService.ts
+var DEFAULT_PENDING_UPLOAD_TTL_MS = 60 * 60 * 1e3;
+var DEFAULT_CLEANUP_COOLDOWN_MS = 2 * 60 * 1e3;
+var DEFAULT_CLEANUP_CLAIM_TTL_MS = 2 * 60 * 1e3;
+var DEFAULT_EDITOR_LEASE_TTL_MS = 5 * 60 * 1e3;
+var DEFAULT_SWEEP_INTERVAL_MS = 60 * 1e3;
+var DEFAULT_STARTUP_SWEEP_DELAY_MS = 30 * 1e3;
+var DEFAULT_WRITE_SETTLE_TIMEOUT_MS = 3e3;
+function parseEnvPositiveMs(envKey, fallback, allowZero = false) {
+  const raw = process.env[envKey];
+  if (raw === void 0 || raw === null || String(raw).trim() === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (allowZero && parsed >= 0) return parsed;
+  if (parsed > 0) return parsed;
+  return fallback;
+}
+function parseEnvBool(envKey, fallback) {
+  const raw = String(process.env[envKey] || "").trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === "true" || raw === "1" || raw === "yes";
+}
+function extractAllMediaUrlsFromValue(value, out, depth = 0) {
+  if (depth > 16 || value === null || value === void 0) return;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("/generated-assets/") || trimmed.startsWith("/assets/")) {
+      out.add(trimmed);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      extractAllMediaUrlsFromValue(item, out, depth + 1);
+    }
+    return;
+  }
+  if (typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) {
+      if (k === MEDIA_CLEANUP_MYSQL_KEY || k === MEDIA_CLEANUP_MYSQL_GROUP) {
+        continue;
+      }
+      extractAllMediaUrlsFromValue(v, out, depth + 1);
+    }
+  }
+}
+var MediaCleanupService = class {
+  constructor(options) {
+    // Write-Epoch Barrier & TOCTOU coordination
+    this.inFlightWriteCount = 0;
+    this.mediaReferenceEpoch = 0;
+    this.writeSettleWaiters = [];
+    // In-process concurrency guards
+    this.activeKeyLocks = /* @__PURE__ */ new Map();
+    this.sweepInProgress = false;
+    this.startupTimer = null;
+    this.sweepIntervalTimer = null;
+    this.now = options?.now || (() => Date.now());
+    this.getStorage = options?.storageAdapterProvider || (() => getStorageAdapter());
+    this.stateStore = options?.stateStore || new DurableMediaStateStore({ now: this.now });
+    this.pendingUploadTtlMsOverride = options?.pendingUploadTtlMs;
+    this.cleanupCooldownMsOverride = options?.cleanupCooldownMs;
+    this.claimTtlMsOverride = options?.claimTtlMs;
+    this.editorLeaseTtlMsOverride = options?.editorLeaseTtlMs;
+    this.sweepIntervalMs = options?.sweepIntervalMs ?? parseEnvPositiveMs("MEDIA_CLEANUP_SWEEP_INTERVAL_MS", DEFAULT_SWEEP_INTERVAL_MS);
+    this.startupSweepDelayMs = options?.startupSweepDelayMs ?? parseEnvPositiveMs("MEDIA_CLEANUP_STARTUP_DELAY_MS", DEFAULT_STARTUP_SWEEP_DELAY_MS, true);
+    this.dryRunOverride = options?.dryRun;
+    this.refs = {
+      getAllProducts: options?.referenceProviders?.getAllProducts || (() => productRepository.getAll()),
+      getAllCategories: options?.referenceProviders?.getAllCategories || (() => productRepository.getCategories(void 0, true)),
+      getAllCollections: options?.referenceProviders?.getAllCollections || (() => productRepository.getCollections()),
+      getFrontPageCms: options?.referenceProviders?.getFrontPageCms || (() => cmsRepository.getFrontPageData()),
+      getStoreSettings: options?.referenceProviders?.getStoreSettings || (() => cmsRepository.getStoreSettings()),
+      getAllOrders: options?.referenceProviders?.getAllOrders || (() => orderRepository.getAll()),
+      getPrismaClient: options?.referenceProviders?.getPrismaClient !== void 0 ? options.referenceProviders.getPrismaClient : () => getPrismaClient()
+    };
+  }
+  getStateStore() {
+    return this.stateStore;
+  }
+  getPendingUploadTtlMs() {
+    return this.pendingUploadTtlMsOverride ?? parseEnvPositiveMs("MEDIA_PENDING_UPLOAD_TTL_MS", DEFAULT_PENDING_UPLOAD_TTL_MS);
+  }
+  getCleanupCooldownMs() {
+    return this.cleanupCooldownMsOverride ?? parseEnvPositiveMs("MEDIA_CLEANUP_COOLDOWN_MS", DEFAULT_CLEANUP_COOLDOWN_MS, true);
+  }
+  getClaimTtlMs() {
+    return this.claimTtlMsOverride ?? parseEnvPositiveMs("MEDIA_CLEANUP_CLAIM_TTL_MS", DEFAULT_CLEANUP_CLAIM_TTL_MS);
+  }
+  getEditorLeaseTtlMs() {
+    return this.editorLeaseTtlMsOverride ?? parseEnvPositiveMs("MEDIA_EDITOR_LEASE_TTL_MS", DEFAULT_EDITOR_LEASE_TTL_MS);
+  }
+  isDryRun() {
+    return this.dryRunOverride ?? parseEnvBool("MEDIA_CLEANUP_DRY_RUN", false);
+  }
+  // ==========================================================================
+  // 1. WRITE-EPOCH BARRIER (CONCURRENT EDITING / TOCTOU PROTECTION)
+  // ==========================================================================
+  beginMediaReferenceWrite() {
+    this.inFlightWriteCount += 1;
+    this.mediaReferenceEpoch += 1;
+  }
+  endMediaReferenceWrite() {
+    this.inFlightWriteCount = Math.max(0, this.inFlightWriteCount - 1);
+    this.mediaReferenceEpoch += 1;
+    if (this.inFlightWriteCount === 0 && this.writeSettleWaiters.length > 0) {
+      const waiters = this.writeSettleWaiters.splice(0, this.writeSettleWaiters.length);
+      for (const resolve of waiters) {
+        resolve();
+      }
+    }
+  }
+  async withMediaReferenceWrite(fn) {
+    this.beginMediaReferenceWrite();
+    try {
+      return await fn();
+    } finally {
+      this.endMediaReferenceWrite();
+    }
+  }
+  getWriteEpochSnapshot() {
+    return {
+      inFlightWriteCount: this.inFlightWriteCount,
+      mediaReferenceEpoch: this.mediaReferenceEpoch
+    };
+  }
+  async waitForWritesToSettle(timeoutMs = DEFAULT_WRITE_SETTLE_TIMEOUT_MS) {
+    if (this.inFlightWriteCount === 0) return true;
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const waiter = () => done(true);
+      this.writeSettleWaiters.push(waiter);
+      const timer = setTimeout(() => {
+        const idx = this.writeSettleWaiters.indexOf(waiter);
+        if (idx >= 0) this.writeSettleWaiters.splice(idx, 1);
+        done(this.inFlightWriteCount === 0);
+      }, Math.max(10, timeoutMs));
+      if (typeof timer.unref === "function") timer.unref();
+    });
+  }
+  async withPerKeyLock(compositeKey, fn) {
+    const previous = this.activeKeyLocks.get(compositeKey) || Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => {
+      release = resolve;
+    });
+    const chained = previous.then(() => current);
+    this.activeKeyLocks.set(compositeKey, chained);
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.activeKeyLocks.get(compositeKey) === chained) {
+        this.activeKeyLocks.delete(compositeKey);
+      }
+    }
+  }
+  // ==========================================================================
+  // 2. PENDING UPLOAD REGISTRY & EDITOR MEDIA LEASES
+  // ==========================================================================
+  async registerPendingUpload(params) {
+    try {
+      const storage = this.getStorage();
+      const resolvedKey = params.storageKey || storage.resolveManagedStorageKey(params.url);
+      if (!resolvedKey) return null;
+      const provider = params.provider || storage.providerName;
+      const compositeKey = buildMediaCompositeKey(provider, resolvedKey);
+      return await this.stateStore.mutate((draft, nowMs) => {
+        const existing = draft.pendingUploads[compositeKey];
+        const prevTombstone = draft.tombstones[buildPendingTombstoneKey(compositeKey)];
+        const nextRev = Math.max(existing?.revision ?? 0, prevTombstone?.revision ?? 0) + 1;
+        const createdAt = existing ? Math.min(existing.createdAt, nowMs) : nowMs;
+        const record = {
+          compositeKey,
+          provider,
+          storageKey: resolvedKey,
+          url: params.url.trim(),
+          ownerId: String(params.ownerId || "ADMIN").trim(),
+          sessionId: params.sessionId ? String(params.sessionId).trim() : existing?.sessionId,
+          uploadedAt: existing ? Math.min(existing.uploadedAt, nowMs) : nowMs,
+          createdAt,
+          updatedAt: nowMs,
+          revision: nextRev
+        };
+        draft.pendingUploads[compositeKey] = record;
+        return { result: record, changed: true };
+      });
+    } catch (err) {
+      console.warn("[MEDIA-CLEANUP] Failed to register pending upload (non-fatal):", err?.message || err);
+      return null;
+    }
+  }
+  /**
+   * Marks URLs as committed (saved to a product, CMS, category, collection, or order).
+   * Writes tombstones for any matching pending uploads or deferred cleanup entries
+   * so they are neither resurrected by stale snapshots nor deleted by sweeps.
+   */
+  async markUrlsCommitted(urls) {
+    if (!Array.isArray(urls) || urls.length === 0) return;
+    try {
+      const storage = this.getStorage();
+      const keys = /* @__PURE__ */ new Set();
+      for (const url of urls) {
+        if (typeof url !== "string" || !url.trim()) continue;
+        const resolved = storage.resolveManagedStorageKey(url);
+        if (resolved) {
+          keys.add(buildMediaCompositeKey(storage.providerName, resolved));
+        }
+      }
+      if (keys.size === 0) return;
+      await this.stateStore.mutate((draft, nowMs) => {
+        let changed = false;
+        for (const compositeKey of keys) {
+          const pending = draft.pendingUploads[compositeKey];
+          if (pending) {
+            const tKey = buildPendingTombstoneKey(compositeKey);
+            const nextRev = Math.max(pending.revision, draft.tombstones[tKey]?.revision ?? 0) + 1;
+            draft.tombstones[tKey] = {
+              key: tKey,
+              deletedAt: nowMs,
+              revision: nextRev,
+              reason: "committed"
+            };
+            delete draft.pendingUploads[compositeKey];
+            changed = true;
+          }
+          const deferred = draft.deferredQueue[compositeKey];
+          if (deferred) {
+            const tKey = buildDeferredTombstoneKey(compositeKey);
+            const nextRev = Math.max(deferred.revision, draft.tombstones[tKey]?.revision ?? 0) + 1;
+            draft.tombstones[tKey] = {
+              key: tKey,
+              deletedAt: nowMs,
+              revision: nextRev,
+              reason: "re-committed"
+            };
+            delete draft.deferredQueue[compositeKey];
+            changed = true;
+          }
+        }
+        return { result: void 0, changed };
+      });
+    } catch (err) {
+      console.warn("[MEDIA-CLEANUP] Failed to mark URLs committed (non-fatal):", err?.message || err);
+    }
+  }
+  async upsertEditorMediaLease(params) {
+    const cleanSessionId = String(params.sessionId || "").trim();
+    const cleanOwnerId = String(params.ownerId || "").trim();
+    if (!cleanSessionId || !cleanOwnerId) return null;
+    try {
+      const storage = this.getStorage();
+      const managedKeys = /* @__PURE__ */ new Set();
+      const cleanUrls = /* @__PURE__ */ new Set();
+      for (const rawUrl of Array.isArray(params.urls) ? params.urls : []) {
+        if (typeof rawUrl !== "string" || !rawUrl.trim()) continue;
+        const resolved = storage.resolveManagedStorageKey(rawUrl);
+        if (resolved) {
+          managedKeys.add(resolved);
+          cleanUrls.add(rawUrl.trim());
+        }
+      }
+      const ttlMs = Math.max(1e4, params.ttlMs ?? this.getEditorLeaseTtlMs());
+      const leaseKey = buildLeaseKey(cleanOwnerId, cleanSessionId);
+      return await this.stateStore.mutate((draft, nowMs) => {
+        const existing = draft.editorLeases[leaseKey];
+        const prevTombstone = draft.tombstones[buildLeaseTombstoneKey(leaseKey)];
+        const nextRev = Math.max(existing?.revision ?? 0, prevTombstone?.revision ?? 0) + 1;
+        const record = {
+          leaseKey,
+          ownerId: cleanOwnerId,
+          sessionId: cleanSessionId,
+          entityId: params.entityId ? String(params.entityId).trim() : existing?.entityId,
+          storageKeys: Array.from(managedKeys),
+          urls: Array.from(cleanUrls),
+          expiresAt: nowMs + ttlMs,
+          createdAt: existing ? Math.min(existing.createdAt, nowMs) : nowMs,
+          updatedAt: nowMs,
+          revision: nextRev
+        };
+        draft.editorLeases[leaseKey] = record;
+        return { result: record, changed: true };
+      });
+    } catch (err) {
+      console.warn("[MEDIA-CLEANUP] Failed to upsert editor media lease (non-fatal):", err?.message || err);
+      return null;
+    }
+  }
+  async releaseEditorMediaLease(params) {
+    const cleanSessionId = String(params.sessionId || "").trim();
+    const cleanOwnerId = String(params.ownerId || "").trim();
+    if (!cleanSessionId || !cleanOwnerId) return false;
+    try {
+      const leaseKey = buildLeaseKey(cleanOwnerId, cleanSessionId);
+      return await this.stateStore.mutate((draft, nowMs) => {
+        const existing = draft.editorLeases[leaseKey];
+        if (!existing) return { result: false, changed: false };
+        const tKey = buildLeaseTombstoneKey(leaseKey);
+        const nextRev = Math.max(existing.revision, draft.tombstones[tKey]?.revision ?? 0) + 1;
+        draft.tombstones[tKey] = {
+          key: tKey,
+          deletedAt: nowMs,
+          revision: nextRev,
+          reason: "lease-released"
+        };
+        delete draft.editorLeases[leaseKey];
+        return { result: true, changed: true };
+      });
+    } catch (err) {
+      console.warn("[MEDIA-CLEANUP] Failed to release editor media lease (non-fatal):", err?.message || err);
+      return false;
+    }
+  }
+  async getActiveLeasedKeys(storage, excludeLeaseSessionId) {
+    const snapshot = await this.stateStore.getSnapshot();
+    const nowMs = this.now();
+    const protectedKeys = /* @__PURE__ */ new Set();
+    for (const lease of Object.values(snapshot.editorLeases || {})) {
+      if (!lease || lease.expiresAt <= nowMs) continue;
+      if (excludeLeaseSessionId && lease.sessionId === excludeLeaseSessionId) continue;
+      for (const key of lease.storageKeys || []) {
+        if (key) protectedKeys.add(key);
+      }
+      for (const url of lease.urls || []) {
+        const resolved = storage.resolveManagedStorageKey(url);
+        if (resolved) protectedKeys.add(resolved);
+      }
+    }
+    return protectedKeys;
+  }
+  // ==========================================================================
+  // 3. FAIL-CLOSED CROSS-ENTITY REFERENCE AUDIT
+  // ==========================================================================
+  /**
+   * Collects every active storage key referenced anywhere in Tori-Wear:
+   * - Products (all statuses: PUBLISHED, DRAFT, REVIEW, ARCHIVED, duplicates) + Prisma ProductImage
+   * - Categories & Subcategories (including disabled) + Prisma Category / Subcategory
+   * - Collections + Prisma Collection
+   * - CMS front-page data & store settings (deep recursive scan, excluding INTERNAL_MEDIA)
+   *   + Prisma Banner / WebsiteBanner / HomepageSection / WebsiteSetting
+   * - Historical Order snapshots (OrderItem.image) + Prisma OrderItem
+   * - Non-expired Active Editor Media Leases (excluding excludeLeaseSessionId if supplied)
+   *
+   * FAIL-CLOSED: Throws if ANY reference source fails to load so cleanup never deletes on partial data.
+   */
+  async collectActiveReferencedStorageKeys(storage, options) {
+    const rawUrls = /* @__PURE__ */ new Set();
+    const [products, categories, collections, frontPageCms, storeSettings, orders, leasedKeys] = await Promise.all([
+      this.refs.getAllProducts(),
+      this.refs.getAllCategories(),
+      this.refs.getAllCollections(),
+      this.refs.getFrontPageCms(),
+      this.refs.getStoreSettings(),
+      this.refs.getAllOrders(),
+      this.getActiveLeasedKeys(storage, options?.excludeLeaseSessionId)
+    ]);
+    for (const p of products || []) {
+      for (const img of p?.images || []) {
+        if (typeof img === "string" && img.trim()) rawUrls.add(img.trim());
+      }
+      for (const v of p?.variants || []) {
+        if (typeof v?.image === "string" && v.image.trim()) rawUrls.add(v.image.trim());
+      }
+    }
+    for (const cat of categories || []) {
+      if (typeof cat?.image === "string" && cat.image.trim()) rawUrls.add(cat.image.trim());
+      if (typeof cat?.bannerImage === "string" && cat.bannerImage.trim()) rawUrls.add(cat.bannerImage.trim());
+      for (const sub of cat?.subcategories || []) {
+        if (typeof sub?.image === "string" && sub.image.trim()) rawUrls.add(sub.image.trim());
+      }
+    }
+    for (const col of collections || []) {
+      if (typeof col?.bannerImage === "string" && col.bannerImage.trim()) rawUrls.add(col.bannerImage.trim());
+      if (typeof col?.heroImage === "string" && col.heroImage.trim()) rawUrls.add(col.heroImage.trim());
+      if (typeof col?.image === "string" && col.image.trim()) rawUrls.add(col.image.trim());
+    }
+    extractAllMediaUrlsFromValue(frontPageCms, rawUrls);
+    extractAllMediaUrlsFromValue(storeSettings, rawUrls);
+    for (const order of orders || []) {
+      for (const item of order?.items || []) {
+        if (typeof item?.image === "string" && item.image.trim()) rawUrls.add(item.image.trim());
+      }
+    }
+    const prismaClient = this.refs.getPrismaClient ? this.refs.getPrismaClient() : null;
+    if (prismaClient) {
+      const queries = [];
+      if (prismaClient.productImage?.findMany) {
+        queries.push(
+          prismaClient.productImage.findMany({ select: { url: true } }).then((rows) => {
+            for (const row of rows || []) {
+              if (row?.url) rawUrls.add(row.url);
+            }
+          })
+        );
+      }
+      if (prismaClient.category?.findMany) {
+        queries.push(
+          prismaClient.category.findMany({ select: { image: true, bannerImage: true } }).then((rows) => {
+            for (const row of rows || []) {
+              if (row?.image) rawUrls.add(row.image);
+              if (row?.bannerImage) rawUrls.add(row.bannerImage);
+            }
+          })
+        );
+      }
+      if (prismaClient.subcategory?.findMany) {
+        queries.push(
+          prismaClient.subcategory.findMany({ select: { image: true } }).then((rows) => {
+            for (const row of rows || []) {
+              if (row?.image) rawUrls.add(row.image);
+            }
+          })
+        );
+      }
+      if (prismaClient.collection?.findMany) {
+        queries.push(
+          prismaClient.collection.findMany({ select: { bannerImage: true, heroImage: true } }).then((rows) => {
+            for (const row of rows || []) {
+              if (row?.bannerImage) rawUrls.add(row.bannerImage);
+              if (row?.heroImage) rawUrls.add(row.heroImage);
+            }
+          })
+        );
+      }
+      if (prismaClient.orderItem?.findMany) {
+        queries.push(
+          prismaClient.orderItem.findMany({ select: { image: true } }).then((rows) => {
+            for (const row of rows || []) {
+              if (row?.image) rawUrls.add(row.image);
+            }
+          })
+        );
+      }
+      if (prismaClient.banner?.findMany) {
+        queries.push(
+          prismaClient.banner.findMany({ select: { imageUrl: true, mobileImageUrl: true } }).then((rows) => {
+            for (const row of rows || []) {
+              if (row?.imageUrl) rawUrls.add(row.imageUrl);
+              if (row?.mobileImageUrl) rawUrls.add(row.mobileImageUrl);
+            }
+          })
+        );
+      }
+      if (prismaClient.websiteBanner?.findMany) {
+        queries.push(
+          prismaClient.websiteBanner.findMany({ select: { bgImageUrl: true } }).then((rows) => {
+            for (const row of rows || []) {
+              if (row?.bgImageUrl) rawUrls.add(row.bgImageUrl);
+            }
+          })
+        );
+      }
+      if (prismaClient.homepageSection?.findMany) {
+        queries.push(
+          prismaClient.homepageSection.findMany({ select: { configJson: true } }).then((rows) => {
+            for (const row of rows || []) {
+              if (!row?.configJson) continue;
+              try {
+                extractAllMediaUrlsFromValue(JSON.parse(row.configJson), rawUrls);
+              } catch {
+              }
+            }
+          })
+        );
+      }
+      if (prismaClient.websiteSetting?.findMany) {
+        queries.push(
+          prismaClient.websiteSetting.findMany({
+            where: {
+              key: { not: MEDIA_CLEANUP_MYSQL_KEY },
+              group: { not: MEDIA_CLEANUP_MYSQL_GROUP }
+            },
+            select: { key: true, group: true, value: true }
+          }).then((rows) => {
+            for (const row of rows || []) {
+              if (!row || row.key === MEDIA_CLEANUP_MYSQL_KEY || row.group === MEDIA_CLEANUP_MYSQL_GROUP) {
+                continue;
+              }
+              if (!row.value) continue;
+              try {
+                extractAllMediaUrlsFromValue(JSON.parse(row.value), rawUrls);
+              } catch {
+                extractAllMediaUrlsFromValue(row.value, rawUrls);
+              }
+            }
+          })
+        );
+      }
+      if (queries.length > 0) {
+        await Promise.all(queries);
+      }
+    }
+    const referencedKeys = new Set(leasedKeys);
+    for (const url of rawUrls) {
+      const managedKey = storage.resolveManagedStorageKey(url);
+      if (managedKey) {
+        referencedKeys.add(managedKey);
+      }
+    }
+    return referencedKeys;
+  }
+  // ==========================================================================
+  // 4. DURABLE DEFERRED CLEANUP QUEUE & JOB CLAIM DISCIPLINE
+  // ==========================================================================
+  /**
+   * Enqueues candidate image URLs into the restart-safe deferred cleanup queue
+   * with a configurable safety cooldown. If cooldownMs === 0 and processImmediatelyIfZeroCooldown
+   * is true (used in tests or explicit immediate mode), processes eligible entries immediately.
+   */
+  async enqueueDeferredMediaCleanup(candidateUrls, options) {
+    const storage = this.getStorage();
+    const skippedUnmanagedUrls = [];
+    const managedMap = /* @__PURE__ */ new Map();
+    for (const rawUrl of Array.isArray(candidateUrls) ? candidateUrls : []) {
+      const trimmed = String(rawUrl || "").trim();
+      if (!trimmed) continue;
+      const key = storage.resolveManagedStorageKey(trimmed);
+      if (!key) {
+        skippedUnmanagedUrls.push(trimmed);
+        continue;
+      }
+      if (!managedMap.has(key)) {
+        managedMap.set(key, trimmed);
+      }
+    }
+    if (managedMap.size === 0) {
+      return { enqueuedKeys: [], skippedUnmanagedUrls };
+    }
+    const cooldownMs = Math.max(0, options.cooldownMs ?? this.getCleanupCooldownMs());
+    const enqueuedKeys = Array.from(managedMap.keys());
+    try {
+      await this.stateStore.mutate((draft, nowMs) => {
+        const eligibleAt = nowMs + cooldownMs;
+        for (const [storageKey, url] of managedMap.entries()) {
+          const compositeKey = buildMediaCompositeKey(storage.providerName, storageKey);
+          const existing = draft.deferredQueue[compositeKey];
+          const prevTombstone = draft.tombstones[buildDeferredTombstoneKey(compositeKey)];
+          const nextRev = Math.max(existing?.revision ?? 0, prevTombstone?.revision ?? 0) + 1;
+          draft.deferredQueue[compositeKey] = {
+            compositeKey,
+            provider: storage.providerName,
+            storageKey,
+            url,
+            reason: options.reason,
+            enqueuedAt: existing ? Math.min(existing.enqueuedAt, nowMs) : nowMs,
+            eligibleAt: existing ? Math.max(existing.eligibleAt, eligibleAt) : eligibleAt,
+            attempts: existing?.attempts ?? 0,
+            lastAttemptAt: existing?.lastAttemptAt,
+            lastError: existing?.lastError,
+            processingClaim: existing?.processingClaim ?? null,
+            createdAt: existing ? Math.min(existing.createdAt, nowMs) : nowMs,
+            updatedAt: nowMs,
+            revision: nextRev
+          };
+        }
+        return { result: void 0, changed: true };
+      });
+    } catch (err) {
+      console.warn("[MEDIA-CLEANUP] Failed to persist deferred cleanup queue (non-fatal):", err?.message || err);
+    }
+    if (cooldownMs === 0 && options.processImmediatelyIfZeroCooldown) {
+      const immediateReport = await this.processDeferredCleanupQueue();
+      return { enqueuedKeys, skippedUnmanagedUrls, immediateReport };
+    }
+    return { enqueuedKeys, skippedUnmanagedUrls };
+  }
+  async tryClaimDeferredKey(compositeKey) {
+    const claimTtlMs = this.getClaimTtlMs();
+    return this.stateStore.mutate((draft, nowMs) => {
+      const rec = draft.deferredQueue[compositeKey];
+      if (!rec) return { result: "missing", changed: false };
+      if (rec.processingClaim && rec.processingClaim.claimExpiresAt > nowMs && rec.processingClaim.ownerInstanceId !== this.stateStore.instanceId) {
+        return { result: "already-claimed", changed: false };
+      }
+      rec.processingClaim = {
+        ownerInstanceId: this.stateStore.instanceId,
+        claimedAt: nowMs,
+        claimExpiresAt: nowMs + claimTtlMs
+      };
+      rec.updatedAt = nowMs;
+      rec.revision += 1;
+      return { result: "claimed", changed: true };
+    });
+  }
+  async completeKeyWithTombstone(compositeKey, reason, options) {
+    const clearDeferred = options?.clearDeferred ?? true;
+    const clearPending = options?.clearPending ?? true;
+    await this.stateStore.mutate((draft, nowMs) => {
+      let changed = false;
+      if (clearDeferred && draft.deferredQueue[compositeKey]) {
+        const rec = draft.deferredQueue[compositeKey];
+        const tKey = buildDeferredTombstoneKey(compositeKey);
+        const nextRev = Math.max(rec.revision, draft.tombstones[tKey]?.revision ?? 0) + 1;
+        draft.tombstones[tKey] = {
+          key: tKey,
+          deletedAt: nowMs,
+          revision: nextRev,
+          reason
+        };
+        delete draft.deferredQueue[compositeKey];
+        changed = true;
+      }
+      if (clearPending && draft.pendingUploads[compositeKey]) {
+        const rec = draft.pendingUploads[compositeKey];
+        const tKey = buildPendingTombstoneKey(compositeKey);
+        const nextRev = Math.max(rec.revision, draft.tombstones[tKey]?.revision ?? 0) + 1;
+        draft.tombstones[tKey] = {
+          key: tKey,
+          deletedAt: nowMs,
+          revision: nextRev,
+          reason
+        };
+        delete draft.pendingUploads[compositeKey];
+        changed = true;
+      }
+      return { result: void 0, changed };
+    });
+  }
+  async releaseClaimAndRecordAttempt(compositeKey, params) {
+    await this.stateStore.mutate((draft, nowMs) => {
+      const rec = draft.deferredQueue[compositeKey];
+      if (!rec) return { result: void 0, changed: false };
+      rec.processingClaim = null;
+      rec.attempts = (rec.attempts || 0) + 1;
+      rec.lastAttemptAt = nowMs;
+      if (params.error !== void 0) {
+        rec.lastError = params.error;
+      }
+      if (params.bumpEligibleAtMs && params.bumpEligibleAtMs > 0) {
+        rec.eligibleAt = Math.max(rec.eligibleAt, nowMs + params.bumpEligibleAtMs);
+      }
+      rec.updatedAt = nowMs;
+      rec.revision += 1;
+      return { result: void 0, changed: true };
+    });
+  }
+  // ==========================================================================
+  // 5. CORE FIVE-GATE CLEANUP EXECUTION ENGINE
+  // ==========================================================================
+  /**
+   * Executes Gates 1-5 on candidate URLs strictly post-commit:
+   *  Gate 1: Active-provider key resolution (resolveManagedStorageKey)
+   *  Gate 2: Per-key async lock + durable claim (when queue-backed) + Write-Epoch settle
+   *  Gate 3: Fail-closed cross-entity reference & active lease audit
+   *  Gate 4: TOCTOU Double-Check Gate right before deleteFile()
+   *  Gate 5: Dry-run OR idempotent storage.deleteFile() with tombstone completion
+   *
+   * Never throws to callers.
+   */
+  async cleanupUnreferencedMedia(candidateUrls, options) {
+    const storage = this.getStorage();
+    const dryRun = this.isDryRun();
+    const report = {
+      provider: storage.providerName,
+      dryRun,
+      abortedFailClosed: false,
+      deletedKeys: [],
+      alreadyAbsentKeys: [],
+      preservedReferencedKeys: [],
+      skippedUnmanagedUrls: [],
+      deferredConflictKeys: [],
+      skippedClaimedKeys: [],
+      failedKeys: []
+    };
+    try {
+      const keyToUrl = /* @__PURE__ */ new Map();
+      for (const rawUrl of Array.isArray(candidateUrls) ? candidateUrls : []) {
+        const trimmed = String(rawUrl || "").trim();
+        if (!trimmed) continue;
+        const resolvedKey = storage.resolveManagedStorageKey(trimmed);
+        if (!resolvedKey) {
+          report.skippedUnmanagedUrls.push(trimmed);
+          continue;
+        }
+        if (!keyToUrl.has(resolvedKey)) {
+          keyToUrl.set(resolvedKey, trimmed);
+        }
+      }
+      if (keyToUrl.size === 0) {
+        return report;
+      }
+      const configStatus = storage.getConfigStatus();
+      if (!configStatus.configured) {
+        report.abortedFailClosed = true;
+        report.abortReason = configStatus.error || `Storage provider "${storage.providerName}" is not configured.`;
+        return report;
+      }
+      for (const [storageKey, url] of keyToUrl.entries()) {
+        const compositeKey = buildMediaCompositeKey(storage.providerName, storageKey);
+        await this.withPerKeyLock(compositeKey, async () => {
+          let acquiredDeferredClaim = false;
+          if (options?.requireDeferredClaim) {
+            const claimStatus = await this.tryClaimDeferredKey(compositeKey);
+            if (claimStatus === "already-claimed") {
+              report.skippedClaimedKeys.push(storageKey);
+              return;
+            }
+            if (claimStatus === "missing") {
+              return;
+            }
+            acquiredDeferredClaim = true;
+          }
+          try {
+            const settled = await this.waitForWritesToSettle();
+            if (!settled) {
+              report.deferredConflictKeys.push(storageKey);
+              if (acquiredDeferredClaim) {
+                await this.releaseClaimAndRecordAttempt(compositeKey, {
+                  error: "Concurrent catalog/CMS write in flight; deferred for retry.",
+                  bumpEligibleAtMs: 5e3
+                });
+              } else if (options?.requeueOnConflict) {
+                await this.enqueueDeferredMediaCleanup([url], {
+                  reason: `${options.reason || "cleanup"}-concurrent-write-retry`
+                });
+              }
+              return;
+            }
+            const epochBefore = this.mediaReferenceEpoch;
+            let referencedKeys;
+            try {
+              referencedKeys = await this.collectActiveReferencedStorageKeys(storage, {
+                excludeLeaseSessionId: options?.excludeLeaseSessionId
+              });
+            } catch (auditErr) {
+              report.abortedFailClosed = true;
+              report.abortReason = auditErr?.message || "Reference audit failed; aborted fail-closed.";
+              console.warn(
+                `[MEDIA-CLEANUP] Fail-closed abort for ${compositeKey} (zero deletions performed):`,
+                report.abortReason
+              );
+              if (acquiredDeferredClaim) {
+                await this.releaseClaimAndRecordAttempt(compositeKey, {
+                  error: report.abortReason,
+                  bumpEligibleAtMs: 15e3
+                });
+              }
+              return;
+            }
+            if (referencedKeys.has(storageKey)) {
+              report.preservedReferencedKeys.push(storageKey);
+              const activeLeasedKeys = await this.getActiveLeasedKeys(storage, options?.excludeLeaseSessionId);
+              if (activeLeasedKeys.has(storageKey)) {
+                if (acquiredDeferredClaim) {
+                  await this.releaseClaimAndRecordAttempt(compositeKey, {
+                    error: "Protected by active editor media lease.",
+                    bumpEligibleAtMs: 3e4
+                  });
+                }
+              } else {
+                await this.completeKeyWithTombstone(compositeKey, "preserved-referenced", {
+                  clearDeferred: options?.clearDeferredOnComplete ?? true,
+                  clearPending: options?.clearPendingOnComplete ?? true
+                });
+              }
+              return;
+            }
+            const postAuditLeased = await this.getActiveLeasedKeys(storage, options?.excludeLeaseSessionId);
+            if (this.inFlightWriteCount > 0 || this.mediaReferenceEpoch !== epochBefore || postAuditLeased.has(storageKey)) {
+              report.deferredConflictKeys.push(storageKey);
+              console.warn(
+                `[MEDIA-CLEANUP] TOCTOU barrier triggered for ${compositeKey}; aborting delete and deferring re-verification.`
+              );
+              if (acquiredDeferredClaim) {
+                await this.releaseClaimAndRecordAttempt(compositeKey, {
+                  error: "Concurrent edit detected at TOCTOU double-check gate.",
+                  bumpEligibleAtMs: 1e4
+                });
+              } else if (options?.requeueOnConflict) {
+                await this.enqueueDeferredMediaCleanup([url], {
+                  reason: `${options.reason || "cleanup"}-toctou-retry`
+                });
+              }
+              return;
+            }
+            if (dryRun) {
+              console.log(
+                `[MEDIA-CLEANUP][DRY-RUN] Would delete unreferenced ${storage.providerName} object: ${storageKey} (reason=${options?.reason || "cleanup"})`
+              );
+              report.deletedKeys.push(storageKey);
+              if (acquiredDeferredClaim) {
+                await this.releaseClaimAndRecordAttempt(compositeKey, {
+                  error: "dry-run mode active",
+                  bumpEligibleAtMs: 6e4
+                });
+              }
+              return;
+            }
+            try {
+              const exists = await storage.fileExists(storageKey);
+              if (!exists) {
+                report.alreadyAbsentKeys.push(storageKey);
+                await this.completeKeyWithTombstone(compositeKey, "already-absent", {
+                  clearDeferred: options?.clearDeferredOnComplete ?? true,
+                  clearPending: options?.clearPendingOnComplete ?? true
+                });
+                return;
+              }
+              const deleted = await storage.deleteFile(storageKey);
+              if (deleted) {
+                report.deletedKeys.push(storageKey);
+                await this.completeKeyWithTombstone(compositeKey, options?.reason || "deleted", {
+                  clearDeferred: options?.clearDeferredOnComplete ?? true,
+                  clearPending: options?.clearPendingOnComplete ?? true
+                });
+                console.log(
+                  `[MEDIA-CLEANUP] Safely deleted unreferenced ${storage.providerName} object: ${storageKey} (reason=${options?.reason || "cleanup"})`
+                );
+              } else {
+                const stillExists = await storage.fileExists(storageKey);
+                if (!stillExists) {
+                  report.alreadyAbsentKeys.push(storageKey);
+                  await this.completeKeyWithTombstone(compositeKey, "already-absent", {
+                    clearDeferred: options?.clearDeferredOnComplete ?? true,
+                    clearPending: options?.clearPendingOnComplete ?? true
+                  });
+                } else {
+                  const errMsg = `Storage adapter returned false deleting ${storageKey}.`;
+                  report.failedKeys.push({ storageKey, error: errMsg });
+                  if (acquiredDeferredClaim) {
+                    await this.releaseClaimAndRecordAttempt(compositeKey, {
+                      error: errMsg,
+                      bumpEligibleAtMs: 3e4
+                    });
+                  }
+                }
+              }
+            } catch (deleteErr) {
+              const errMsg = deleteErr?.message || "Storage deletion error";
+              console.error(`[MEDIA-CLEANUP] Storage delete failed for ${compositeKey} (non-fatal):`, errMsg);
+              report.failedKeys.push({ storageKey, error: errMsg });
+              if (acquiredDeferredClaim) {
+                await this.releaseClaimAndRecordAttempt(compositeKey, {
+                  error: errMsg,
+                  bumpEligibleAtMs: 3e4
+                });
+              }
+            }
+          } catch (innerErr) {
+            const errMsg = innerErr?.message || "Unexpected per-key cleanup failure";
+            report.failedKeys.push({ storageKey, error: errMsg });
+            if (acquiredDeferredClaim) {
+              await this.releaseClaimAndRecordAttempt(compositeKey, {
+                error: errMsg,
+                bumpEligibleAtMs: 3e4
+              });
+            }
+          }
+        });
+        if (report.abortedFailClosed) {
+          break;
+        }
+      }
+    } catch (outerErr) {
+      console.error("[MEDIA-CLEANUP] Unexpected cleanup error (non-fatal):", outerErr?.message || outerErr);
+      report.abortedFailClosed = true;
+      report.abortReason = outerErr?.message || "Unexpected cleanup error";
+    }
+    return report;
+  }
+  // ==========================================================================
+  // 6. ABANDONED UPLOAD DISCARD & PERIODIC / STARTUP RECOVERY SWEEPS
+  // ==========================================================================
+  /**
+   * Handles explicit Product Editor Cancel/Close discard requests.
+   * Enforces ownership against the durable pending-upload registry so admins
+   * cannot probe or delete arbitrary URLs or another admin's pending uploads.
+   */
+  async discardPendingUploads(params) {
+    const storage = this.getStorage();
+    const snapshot = await this.stateStore.syncBackends();
+    const cleanOwnerId = String(params.ownerId || "").trim();
+    const acceptedUrls = [];
+    const rejectedUrls = [];
+    for (const rawUrl of Array.isArray(params.urls) ? params.urls : []) {
+      const trimmed = String(rawUrl || "").trim();
+      if (!trimmed) continue;
+      const key = storage.resolveManagedStorageKey(trimmed);
+      if (!key) {
+        rejectedUrls.push(trimmed);
+        continue;
+      }
+      const compositeKey = buildMediaCompositeKey(storage.providerName, key);
+      const pending = snapshot.pendingUploads[compositeKey];
+      if (!pending) {
+        rejectedUrls.push(trimmed);
+        continue;
+      }
+      const ownerMatches = pending.ownerId === cleanOwnerId || Boolean(params.isSuperAdmin);
+      if (!ownerMatches) {
+        rejectedUrls.push(trimmed);
+        continue;
+      }
+      acceptedUrls.push(pending.url || trimmed);
+    }
+    const report = await this.cleanupUnreferencedMedia(acceptedUrls, {
+      reason: "editor-cancel-discard",
+      excludeLeaseSessionId: params.sessionId,
+      requireDeferredClaim: false,
+      requeueOnConflict: true,
+      clearPendingOnComplete: true,
+      clearDeferredOnComplete: true
+    });
+    return { acceptedUrls, rejectedUrls, report };
+  }
+  /**
+   * Processes eligible entries in the durable deferred cleanup queue whose
+   * safety cooldown (eligibleAt) has elapsed.
+   */
+  async processDeferredCleanupQueue(nowOverrideMs) {
+    const storage = this.getStorage();
+    const nowMs = nowOverrideMs ?? this.now();
+    const snapshot = await this.stateStore.syncBackends();
+    const eligibleUrls = [];
+    for (const rec of Object.values(snapshot.deferredQueue || {})) {
+      if (!rec) continue;
+      if (rec.provider !== storage.providerName) continue;
+      if (rec.eligibleAt > nowMs) continue;
+      if (rec.processingClaim && rec.processingClaim.claimExpiresAt > nowMs && rec.processingClaim.ownerInstanceId !== this.stateStore.instanceId) {
+        continue;
+      }
+      eligibleUrls.push(rec.url);
+    }
+    return this.cleanupUnreferencedMedia(eligibleUrls, {
+      reason: "deferred-queue-sweep",
+      requireDeferredClaim: true,
+      clearPendingOnComplete: true,
+      clearDeferredOnComplete: true
+    });
+  }
+  /**
+   * Sweeps durable pending uploads older than MEDIA_PENDING_UPLOAD_TTL_MS.
+   * Safely recovers abandoned uploads across GoDaddy Node.js Hosting restarts.
+   */
+  async sweepExpiredPendingUploads(nowOverrideMs) {
+    const storage = this.getStorage();
+    const nowMs = nowOverrideMs ?? this.now();
+    const ttlMs = this.getPendingUploadTtlMs();
+    const snapshot = await this.stateStore.syncBackends();
+    const expiredEntries = [];
+    for (const rec of Object.values(snapshot.pendingUploads || {})) {
+      if (!rec) continue;
+      if (rec.provider !== storage.providerName) continue;
+      if (nowMs - rec.uploadedAt >= ttlMs) {
+        expiredEntries.push(rec);
+      }
+    }
+    if (expiredEntries.length === 0) {
+      return {
+        provider: storage.providerName,
+        dryRun: this.isDryRun(),
+        abortedFailClosed: false,
+        deletedKeys: [],
+        alreadyAbsentKeys: [],
+        preservedReferencedKeys: [],
+        skippedUnmanagedUrls: [],
+        deferredConflictKeys: [],
+        skippedClaimedKeys: [],
+        failedKeys: []
+      };
+    }
+    await this.enqueueDeferredMediaCleanup(
+      expiredEntries.map((e) => e.url),
+      {
+        reason: "pending-upload-ttl-expired",
+        cooldownMs: 0,
+        processImmediatelyIfZeroCooldown: false
+      }
+    );
+    return this.processDeferredCleanupQueue(nowMs);
+  }
+  /**
+   * Single-flight combined maintenance pass (reconciles backends, sweeps expired pending uploads,
+   * and processes eligible deferred cleanup queue items).
+   */
+  async runMaintenanceSweep(nowOverrideMs) {
+    if (this.sweepInProgress) {
+      return { skippedOverlap: true };
+    }
+    this.sweepInProgress = true;
+    try {
+      const nowMs = nowOverrideMs ?? this.now();
+      const expiredPendingReport = await this.sweepExpiredPendingUploads(nowMs);
+      const deferredReport = await this.processDeferredCleanupQueue(nowMs);
+      return { skippedOverlap: false, deferredReport, expiredPendingReport };
+    } finally {
+      this.sweepInProgress = false;
+    }
+  }
+  startBackgroundSweeper() {
+    if (this.startupTimer || this.sweepIntervalTimer) return;
+    this.stateStore.hydrate().catch((err) => {
+      console.warn("[MEDIA-CLEANUP] Startup hydration note:", err?.message || err);
+    });
+    this.startupTimer = setTimeout(() => {
+      this.startupTimer = null;
+      this.runMaintenanceSweep().catch((err) => {
+        console.warn("[MEDIA-CLEANUP] Startup recovery sweep note:", err?.message || err);
+      });
+    }, this.startupSweepDelayMs);
+    if (typeof this.startupTimer.unref === "function") {
+      this.startupTimer.unref();
+    }
+    this.sweepIntervalTimer = setInterval(() => {
+      this.runMaintenanceSweep().catch((err) => {
+        console.warn("[MEDIA-CLEANUP] Periodic maintenance sweep note:", err?.message || err);
+      });
+    }, this.sweepIntervalMs);
+    if (typeof this.sweepIntervalTimer.unref === "function") {
+      this.sweepIntervalTimer.unref();
+    }
+  }
+  stopBackgroundSweeper() {
+    if (this.startupTimer) {
+      clearTimeout(this.startupTimer);
+      this.startupTimer = null;
+    }
+    if (this.sweepIntervalTimer) {
+      clearInterval(this.sweepIntervalTimer);
+      this.sweepIntervalTimer = null;
+    }
+  }
+};
+var mediaCleanupService = new MediaCleanupService();
+
 // server/routes/apiRouter.ts
 var apiRouter = Router2();
 var ROLE_PERMISSION_FALLBACKS2 = {
@@ -21256,7 +23815,7 @@ apiRouter.post("/v1/customers/auth/firebase", async (req, res) => {
     if (!customer && verified.email) {
       customer = await customerRepository.findByEmailOrPhone(verified.email);
     }
-    const resolvedId = customer?.id || `cust-${crypto13.randomBytes(8).toString("hex")}`;
+    const resolvedId = customer?.id || `cust-${crypto14.randomBytes(8).toString("hex")}`;
     const savedCustomer = await customerRepository.save({
       id: resolvedId,
       firebaseUid: verified.uid,
@@ -21276,7 +23835,7 @@ apiRouter.post("/v1/customers/auth/firebase", async (req, res) => {
     if (savedCustomer.status === "SUSPENDED") {
       return res.status(403).json({ success: false, error: "Customer account is suspended." });
     }
-    const sessionToken = `cust_sess_${crypto13.randomBytes(32).toString("hex")}`;
+    const sessionToken = `cust_sess_${crypto14.randomBytes(32).toString("hex")}`;
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1e3);
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     await customerRepository.saveSession({
@@ -21687,7 +24246,13 @@ apiRouter.post("/v1/admin/products", requireStaffPermission2("products.create"),
       createdAt: /* @__PURE__ */ new Date(),
       updatedAt: /* @__PURE__ */ new Date()
     };
-    const saved = await productRepository.save(newProduct);
+    const saved = await mediaCleanupService.withMediaReferenceWrite(
+      () => productRepository.save(newProduct)
+    );
+    if (Array.isArray(saved.images) && saved.images.length > 0) {
+      mediaCleanupService.markUrlsCommitted(saved.images).catch(() => {
+      });
+    }
     if (Array.isArray(saved.variants) && saved.variants.length > 0) {
       await inventoryRepository.syncProductVariants(saved.variants);
     }
@@ -21751,7 +24316,25 @@ apiRouter.put("/v1/admin/products/:id", requireStaffPermission2("products.edit")
       inStock: computedStock > 0,
       updatedAt: /* @__PURE__ */ new Date()
     };
-    const saved = await productRepository.save(merged);
+    const previousImages = Array.isArray(existing.images) ? [...existing.images] : [];
+    const saved = await mediaCleanupService.withMediaReferenceWrite(
+      () => productRepository.save(merged)
+    );
+    if (Array.isArray(saved.images) && saved.images.length > 0) {
+      mediaCleanupService.markUrlsCommitted(saved.images).catch(() => {
+      });
+    }
+    const retainedSet = new Set(
+      (Array.isArray(saved.images) ? saved.images : []).filter((u) => typeof u === "string" && u.trim().length > 0).map((u) => u.trim())
+    );
+    const removedOrReplacedImages = previousImages.filter((u) => typeof u === "string" && u.trim().length > 0).map((u) => u.trim()).filter((u) => !retainedSet.has(u));
+    if (removedOrReplacedImages.length > 0) {
+      mediaCleanupService.enqueueDeferredMediaCleanup(removedOrReplacedImages, {
+        reason: `product-image-replaced-or-removed:${saved.id}`
+      }).catch((cleanupErr) => {
+        console.warn("[API] Post-commit product image cleanup enqueue note (non-fatal):", cleanupErr?.message || cleanupErr);
+      });
+    }
     if (saved.status === "REVIEW" || existing.status === "REVIEW") {
       approvalStore.syncProductReviewRequest({
         product: saved,
@@ -21790,10 +24373,20 @@ apiRouter.delete("/v1/admin/products/:id", requireStaffPermission2("products.del
     const productId = String(req.params.id || "");
     console.log(`[API] \u{1F5D1}\uFE0F DELETE request for Product ID: ${productId}`);
     const existing = await productRepository.findById(productId);
+    const candidateImages = Array.isArray(existing?.images) ? [...existing.images] : [];
     const variantIds = existing?.variants?.map((v) => v.id) || [];
-    const deleted = await productRepository.delete(productId);
+    const deleted = await mediaCleanupService.withMediaReferenceWrite(
+      () => productRepository.delete(productId)
+    );
     if (variantIds.length > 0) {
       await inventoryRepository.deleteByVariantIds(variantIds);
+    }
+    if (deleted && candidateImages.length > 0) {
+      mediaCleanupService.enqueueDeferredMediaCleanup(candidateImages, {
+        reason: `product-deleted:${productId}`
+      }).catch((cleanupErr) => {
+        console.warn("[API] Post-commit product delete media cleanup enqueue note (non-fatal):", cleanupErr?.message || cleanupErr);
+      });
     }
     console.log(`[API] \u2705 Product permanently deleted: ${productId} (success=${deleted})`);
     res.json({ success: true, message: "Product permanently deleted.", data: { id: productId, deleted } });
@@ -21805,8 +24398,26 @@ apiRouter.delete("/v1/admin/products/:id", requireStaffPermission2("products.del
 apiRouter.post("/v1/admin/products/clear-all", requireStaffPermission2("products.delete"), async (_req, res) => {
   try {
     console.log("[API] \u{1F5D1}\uFE0F CLEAR-ALL request for all products");
-    await productRepository.clearAll();
-    await inventoryRepository.clearAll();
+    const existingProducts = await productRepository.getAll();
+    const allCandidateImages = [];
+    for (const p of existingProducts || []) {
+      for (const img of p.images || []) {
+        if (typeof img === "string" && img.trim()) {
+          allCandidateImages.push(img.trim());
+        }
+      }
+    }
+    await mediaCleanupService.withMediaReferenceWrite(async () => {
+      await productRepository.clearAll();
+      await inventoryRepository.clearAll();
+    });
+    if (allCandidateImages.length > 0) {
+      mediaCleanupService.enqueueDeferredMediaCleanup(allCandidateImages, {
+        reason: "products-clear-all"
+      }).catch((cleanupErr) => {
+        console.warn("[API] Post-commit clear-all media cleanup enqueue note (non-fatal):", cleanupErr?.message || cleanupErr);
+      });
+    }
     res.json({ success: true, message: "All products and inventory permanently cleared from catalog." });
   } catch (err) {
     console.error("[API] Error clearing products:", err);
@@ -21881,7 +24492,14 @@ apiRouter.post("/v1/admin/categories", requireStaffPermission2("catalog.edit"), 
     isActive: enabledFlag,
     isEnabled: enabledFlag
   };
-  const saved = await productRepository.saveCategory(cat);
+  const saved = await mediaCleanupService.withMediaReferenceWrite(
+    () => productRepository.saveCategory(cat)
+  );
+  const catUrls = [saved.image, saved.bannerImage].filter((u) => typeof u === "string" && u.trim().length > 0);
+  if (catUrls.length > 0) {
+    mediaCleanupService.markUrlsCommitted(catUrls).catch(() => {
+    });
+  }
   return res.status(201).json({ success: true, data: saved });
 });
 apiRouter.put("/v1/admin/categories/:id", requireStaffPermission2("catalog.edit"), async (req, res) => {
@@ -21899,7 +24517,14 @@ apiRouter.put("/v1/admin/categories/:id", requireStaffPermission2("catalog.edit"
     isEnabled: enabledFlag,
     slug: body.slug ? String(body.slug).toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") : existing.slug
   };
-  const saved = await productRepository.saveCategory(updated);
+  const saved = await mediaCleanupService.withMediaReferenceWrite(
+    () => productRepository.saveCategory(updated)
+  );
+  const catUrls = [saved.image, saved.bannerImage].filter((u) => typeof u === "string" && u.trim().length > 0);
+  if (catUrls.length > 0) {
+    mediaCleanupService.markUrlsCommitted(catUrls).catch(() => {
+    });
+  }
   return res.json({ success: true, data: saved });
 });
 apiRouter.put("/v1/admin/categories/:id/products", requireStaffPermission2("catalog.edit"), async (req, res) => {
@@ -21983,16 +24608,37 @@ apiRouter.post("/v1/inventory/bulk-delete", requireStaffPermission2("inventory.d
         }
       }
     }
+    const preDeleteProducts = await productRepository.getAll();
+    const productImageSnapshot = /* @__PURE__ */ new Map();
+    for (const p of preDeleteProducts || []) {
+      productImageSnapshot.set(p.id, Array.isArray(p.images) ? [...p.images] : []);
+    }
     const invResult = await inventoryRepository.bulkDelete(
       Array.from(expandedIds),
       operatorId,
       reason || "Bulk product/SKU removal in Admin"
     );
-    const prodResult = await productRepository.removeVariants([
-      ...Array.from(expandedIds),
-      ...invResult.deletedVariantIds,
-      ...invResult.deletedSkus
-    ]);
+    const prodResult = await mediaCleanupService.withMediaReferenceWrite(
+      () => productRepository.removeVariants([
+        ...Array.from(expandedIds),
+        ...invResult.deletedVariantIds,
+        ...invResult.deletedSkus
+      ])
+    );
+    if (prodResult.removedProductIds.length > 0) {
+      const removedProductImages = [];
+      for (const removedId of prodResult.removedProductIds) {
+        const imgs = productImageSnapshot.get(removedId) || [];
+        removedProductImages.push(...imgs);
+      }
+      if (removedProductImages.length > 0) {
+        mediaCleanupService.enqueueDeferredMediaCleanup(removedProductImages, {
+          reason: `variant-bulk-delete-product-removed:${prodResult.removedProductIds.join(",")}`
+        }).catch((cleanupErr) => {
+          console.warn("[API] Post-commit bulk variant-delete media cleanup enqueue note (non-fatal):", cleanupErr?.message || cleanupErr);
+        });
+      }
+    }
     const totalDeleted = Math.max(invResult.deletedCount, prodResult.removedProductIds.length);
     console.log(`[API] \u{1F5D1}\uFE0F BULK DELETE completed by ${operatorId}: ${invResult.deletedCount} inventory records, ${prodResult.removedProductIds.length} products removed.`);
     return res.json({
@@ -22030,11 +24676,32 @@ apiRouter.delete("/v1/inventory/:variantId", requireStaffPermission2("inventory.
   const operatorId = req.user?.id || "OPERATOR";
   const variantId = String(req.params.variantId || "");
   const current = await inventoryRepository.getByVariantId(variantId);
+  const preDeleteProducts = await productRepository.getAll();
+  const productImageSnapshot = /* @__PURE__ */ new Map();
+  for (const p of preDeleteProducts || []) {
+    productImageSnapshot.set(p.id, Array.isArray(p.images) ? [...p.images] : []);
+  }
   const success = await inventoryRepository.deleteItem(variantId, operatorId, reason);
   if (!success) {
     return res.status(404).json({ success: false, error: "Inventory record not found." });
   }
-  await productRepository.removeVariants([variantId, current?.variantId || "", current?.sku || ""].filter(Boolean));
+  const prodResult = await mediaCleanupService.withMediaReferenceWrite(
+    () => productRepository.removeVariants([variantId, current?.variantId || "", current?.sku || ""].filter(Boolean))
+  );
+  if (prodResult.removedProductIds.length > 0) {
+    const removedProductImages = [];
+    for (const removedId of prodResult.removedProductIds) {
+      const imgs = productImageSnapshot.get(removedId) || [];
+      removedProductImages.push(...imgs);
+    }
+    if (removedProductImages.length > 0) {
+      mediaCleanupService.enqueueDeferredMediaCleanup(removedProductImages, {
+        reason: `variant-delete-product-removed:${prodResult.removedProductIds.join(",")}`
+      }).catch((cleanupErr) => {
+        console.warn("[API] Post-commit variant-delete media cleanup enqueue note (non-fatal):", cleanupErr?.message || cleanupErr);
+      });
+    }
+  }
   return res.json({ success: true, message: "Inventory item removed successfully" });
 });
 apiRouter.get("/v1/inventory/movements/recent", requireStaffPermission2("inventory.view"), async (req, res) => {
@@ -22077,11 +24744,13 @@ apiRouter.post("/v1/orders", async (req, res) => {
   const authCustomer = await resolveAuthenticatedCustomer(req);
   const idempotencyKey = req.headers["idempotency-key"] || req.body.idempotencyKey;
   const ip = (req.ip || req.socket.remoteAddress || "127.0.0.1").replace("::ffff:", "");
-  const result = await orderService.createOrder({
-    ...req.body,
-    customerId: authCustomer ? authCustomer.id : void 0,
-    idempotencyKey: idempotencyKey || req.body.idempotencyKey
-  }, ip);
+  const result = await mediaCleanupService.withMediaReferenceWrite(
+    () => orderService.createOrder({
+      ...req.body,
+      customerId: authCustomer ? authCustomer.id : void 0,
+      idempotencyKey: idempotencyKey || req.body.idempotencyKey
+    }, ip)
+  );
   if (!result.success) {
     return res.status(400).json(result);
   }
@@ -23248,11 +25917,11 @@ apiRouter.get("/v1/returns/proof/:filename", async (req, res) => {
         return res.status(403).json({ success: false, error: "Access denied to return proof image." });
       }
     }
-    const filePath = path16.join(RETURN_PROOFS_DIR, path16.basename(filename));
-    if (!fs18.existsSync(filePath)) {
+    const filePath = path18.join(RETURN_PROOFS_DIR, path18.basename(filename));
+    if (!fs20.existsSync(filePath)) {
       return res.status(404).json({ success: false, error: "Proof image not found." });
     }
-    const ext = path16.extname(filename).toLowerCase();
+    const ext = path18.extname(filename).toLowerCase();
     const contentType = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
     res.setHeader("Content-Type", contentType);
     res.setHeader("Cache-Control", "private, max-age=3600");
@@ -23284,7 +25953,7 @@ apiRouter.post("/v1/returns", async (req, res) => {
         requestType: body.requestType || body.resolutionType || "RETURN",
         reason: String(body.reason || body.reasonCategory || ""),
         comments: body.comments ?? body.description,
-        proofFiles: rawProofs.map((u) => path16.basename(String(u).split("?")[0] || "")),
+        proofFiles: rawProofs.map((u) => path18.basename(String(u).split("?")[0] || "")),
         items: Array.isArray(body.items) ? body.items : [],
         customer: {
           id: authCustomer?.id || order.customerId,
@@ -23727,9 +26396,9 @@ financeRouter.post("/reset", requireFinanceAccess("delete"), async (req, res) =>
 // server/routes/cmsRouter.ts
 init_cmsRepository();
 import express, { Router as Router4 } from "express";
-import fs21 from "fs";
-import path19 from "path";
-import crypto16 from "crypto";
+import fs22 from "fs";
+import path20 from "path";
+import crypto17 from "crypto";
 
 // server/services/storage/imageOptimizer.ts
 import sharp from "sharp";
@@ -23880,898 +26549,11 @@ async function optimizeImageForStorage(inputBuffer, options = {}) {
   }
 }
 
-// server/services/storage/storageAdapter.ts
-import fs19 from "fs";
-import path17 from "path";
-import { Storage } from "@google-cloud/storage";
-import {
-  S3Client,
-  PutObjectCommand,
-  GetObjectCommand,
-  DeleteObjectCommand,
-  HeadObjectCommand,
-  HeadBucketCommand
-} from "@aws-sdk/client-s3";
-var IMMUTABLE_IMAGE_CACHE_CONTROL = "public, max-age=31536000, immutable";
-function sanitizeRelativeStoragePath(destinationPath) {
-  const normalized = String(destinationPath || "").replace(/\\/g, "/").replace(/^\/+/, "");
-  const segments = normalized.split("/").filter((seg) => seg && seg !== "." && seg !== "..");
-  if (segments.length === 0) {
-    throw new Error("Invalid destination storage path.");
-  }
-  return segments.join("/");
-}
-function guessContentTypeFromPath(filePath) {
-  const ext = path17.extname(filePath).toLowerCase();
-  switch (ext) {
-    case ".webp":
-      return "image/webp";
-    case ".png":
-      return "image/png";
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    case ".gif":
-      return "image/gif";
-    case ".svg":
-      return "image/svg+xml";
-    case ".avif":
-      return "image/avif";
-    default:
-      return "application/octet-stream";
-  }
-}
-var LocalStorageAdapter = class {
-  constructor(baseDir, publicPrefix = "/generated-assets") {
-    this.providerName = "local";
-    this.baseDir = path17.resolve(baseDir || path17.resolve(process.cwd(), "public", "generated-assets"));
-    this.publicPrefix = publicPrefix.replace(/\/+$/, "");
-    if (!fs19.existsSync(this.baseDir)) {
-      fs19.mkdirSync(this.baseDir, { recursive: true });
-    }
-  }
-  resolveSafeFullPath(destinationPath) {
-    const cleanRelative = sanitizeRelativeStoragePath(destinationPath);
-    const fullPath = path17.resolve(this.baseDir, cleanRelative);
-    if (fullPath !== this.baseDir && !fullPath.startsWith(`${this.baseDir}${path17.sep}`)) {
-      throw new Error("Path traversal rejected by local storage adapter.");
-    }
-    return { cleanRelative, fullPath };
-  }
-  getConfigStatus() {
-    return {
-      provider: "local",
-      configured: true,
-      publicBaseUrl: this.publicPrefix
-    };
-  }
-  async uploadFile(buffer, destinationPath, contentType, _options) {
-    try {
-      const { cleanRelative, fullPath } = this.resolveSafeFullPath(destinationPath);
-      const parentDir = path17.dirname(fullPath);
-      if (!fs19.existsSync(parentDir)) {
-        fs19.mkdirSync(parentDir, { recursive: true });
-      }
-      const tmpPath = `${fullPath}.tmp-${process.pid}-${Date.now()}`;
-      fs19.writeFileSync(tmpPath, buffer);
-      fs19.renameSync(tmpPath, fullPath);
-      const url = this.getFileUrl(cleanRelative);
-      return {
-        success: true,
-        url,
-        destinationPath: cleanRelative,
-        sizeBytes: buffer.length,
-        contentType: contentType || guessContentTypeFromPath(cleanRelative),
-        provider: "local"
-      };
-    } catch (err) {
-      console.error("[STORAGE:LOCAL] Failed to write uploaded file:", err?.message || err);
-      return {
-        success: false,
-        url: "",
-        destinationPath,
-        provider: "local",
-        statusCode: 500,
-        error: "Failed to save uploaded image to local storage."
-      };
-    }
-  }
-  async getFile(destinationPath) {
-    try {
-      const { cleanRelative, fullPath } = this.resolveSafeFullPath(destinationPath);
-      if (!fs19.existsSync(fullPath)) {
-        return { success: false, error: "File not found in local storage." };
-      }
-      const buffer = fs19.readFileSync(fullPath);
-      return {
-        success: true,
-        buffer,
-        contentType: guessContentTypeFromPath(cleanRelative),
-        sizeBytes: buffer.length
-      };
-    } catch (err) {
-      return {
-        success: false,
-        error: err?.message || "Failed to read file from local storage."
-      };
-    }
-  }
-  async deleteFile(destinationPath) {
-    try {
-      const { fullPath } = this.resolveSafeFullPath(destinationPath);
-      if (fs19.existsSync(fullPath)) {
-        fs19.unlinkSync(fullPath);
-        return true;
-      }
-      return false;
-    } catch {
-      return false;
-    }
-  }
-  getFileUrl(destinationPath) {
-    const cleanRelative = sanitizeRelativeStoragePath(destinationPath);
-    const encoded = cleanRelative.split("/").map(encodeURIComponent).join("/");
-    return `${this.publicPrefix}/${encoded}`;
-  }
-  async fileExists(destinationPath) {
-    try {
-      const { fullPath } = this.resolveSafeFullPath(destinationPath);
-      return fs19.existsSync(fullPath);
-    } catch {
-      return false;
-    }
-  }
-};
-function isPlaceholderValue(value) {
-  const lower = value.trim().toLowerCase();
-  return !lower || lower.includes("your_") || lower.includes("your-") || lower.includes("<from-") || lower.includes("placeholder") || lower === "changeme";
-}
-function parseServiceAccountJson(raw) {
-  const trimmed = raw.trim();
-  const tryParse = (input) => JSON.parse(input);
-  try {
-    return tryParse(trimmed);
-  } catch {
-    const decoded = Buffer.from(trimmed, "base64").toString("utf8").trim();
-    return tryParse(decoded);
-  }
-}
-function resolveGcsConfiguration(overrideBucketName) {
-  const bucketName = String(overrideBucketName || process.env.GCS_BUCKET_NAME || "").trim();
-  const envProjectId = String(process.env.GCS_PROJECT_ID || "").trim();
-  const rawJson = String(process.env.GCS_SERVICE_ACCOUNT_JSON || "").trim();
-  const clientEmail = String(process.env.GCS_CLIENT_EMAIL || "").trim();
-  const privateKeyRaw = String(process.env.GCS_PRIVATE_KEY || "").trim();
-  const keyFilename = String(process.env.GOOGLE_APPLICATION_CREDENTIALS || "").trim();
-  const rawPublicPrefix = String(process.env.GCS_PUBLIC_URL_PREFIX || "").trim().replace(/\/+$/, "");
-  const defaultPublicBase = bucketName ? `https://storage.googleapis.com/${bucketName}` : "";
-  const publicBaseUrl = rawPublicPrefix && !isPlaceholderValue(rawPublicPrefix) ? rawPublicPrefix : defaultPublicBase;
-  if (!bucketName || isPlaceholderValue(bucketName)) {
-    return {
-      valid: false,
-      bucketName: "",
-      publicBaseUrl: "",
-      error: "Cloud storage is not properly configured: GCS_BUCKET_NAME is missing."
-    };
-  }
-  if (!/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
-    return {
-      valid: false,
-      bucketName,
-      publicBaseUrl,
-      error: "Cloud storage is not properly configured: GCS_BUCKET_NAME format is invalid."
-    };
-  }
-  if (rawPublicPrefix && !isPlaceholderValue(rawPublicPrefix) && !/^https:\/\/.+/i.test(rawPublicPrefix)) {
-    return {
-      valid: false,
-      bucketName,
-      publicBaseUrl,
-      error: "Cloud storage is not properly configured: GCS_PUBLIC_URL_PREFIX must use HTTPS."
-    };
-  }
-  if (rawJson && !isPlaceholderValue(rawJson)) {
-    try {
-      const parsed = parseServiceAccountJson(rawJson);
-      const parsedEmail = String(parsed.client_email || "").trim();
-      const parsedKey = String(parsed.private_key || "").replace(/\\n/g, "\n").trim();
-      const projectId = (!isPlaceholderValue(envProjectId) ? envProjectId : "") || String(parsed.project_id || "").trim();
-      if (!parsedEmail || !parsedKey || !parsedKey.includes("BEGIN")) {
-        return {
-          valid: false,
-          bucketName,
-          publicBaseUrl,
-          error: "Cloud storage is not properly configured: GCS_SERVICE_ACCOUNT_JSON is missing valid service account credentials."
-        };
-      }
-      return {
-        valid: true,
-        bucketName,
-        projectId: projectId || void 0,
-        publicBaseUrl,
-        credentials: {
-          client_email: parsedEmail,
-          private_key: parsedKey
-        }
-      };
-    } catch {
-      return {
-        valid: false,
-        bucketName,
-        publicBaseUrl,
-        error: "Cloud storage is not properly configured: GCS_SERVICE_ACCOUNT_JSON could not be parsed as valid JSON."
-      };
-    }
-  }
-  if (clientEmail && privateKeyRaw && !isPlaceholderValue(clientEmail) && !isPlaceholderValue(privateKeyRaw)) {
-    const normalizedKey = privateKeyRaw.replace(/\\n/g, "\n").trim();
-    if (!normalizedKey.includes("BEGIN")) {
-      return {
-        valid: false,
-        bucketName,
-        publicBaseUrl,
-        error: "Cloud storage is not properly configured: GCS_PRIVATE_KEY is invalid."
-      };
-    }
-    return {
-      valid: true,
-      bucketName,
-      projectId: !isPlaceholderValue(envProjectId) ? envProjectId : void 0,
-      publicBaseUrl,
-      credentials: {
-        client_email: clientEmail,
-        private_key: normalizedKey
-      }
-    };
-  }
-  if (keyFilename && !isPlaceholderValue(keyFilename)) {
-    if (!fs19.existsSync(keyFilename)) {
-      return {
-        valid: false,
-        bucketName,
-        publicBaseUrl,
-        error: "Cloud storage is not properly configured: credentials file referenced by GOOGLE_APPLICATION_CREDENTIALS was not found."
-      };
-    }
-    return {
-      valid: true,
-      bucketName,
-      projectId: !isPlaceholderValue(envProjectId) ? envProjectId : void 0,
-      publicBaseUrl,
-      keyFilename
-    };
-  }
-  return {
-    valid: false,
-    bucketName,
-    publicBaseUrl,
-    error: "Cloud storage is not properly configured: provide GCS_SERVICE_ACCOUNT_JSON (or GCS_CLIENT_EMAIL and GCS_PRIVATE_KEY)."
-  };
-}
-var warnedDeprecatedGcsMakePublic = false;
-var GoogleCloudStorageAdapter = class {
-  constructor(bucketNameOrOptions) {
-    this.providerName = "gcs";
-    this.storageClient = null;
-    this.bucket = null;
-    if (String(process.env.GCS_MAKE_PUBLIC || "").trim() && !warnedDeprecatedGcsMakePublic) {
-      warnedDeprecatedGcsMakePublic = true;
-      console.warn(
-        "[STORAGE:GCS] Ignoring deprecated GCS_MAKE_PUBLIC setting. Configure Uniform Bucket-Level Access and bucket-level IAM on your storefront media bucket instead."
-      );
-    }
-    const opts = typeof bucketNameOrOptions === "string" ? { bucketName: bucketNameOrOptions } : bucketNameOrOptions || {};
-    if (opts.storageClient) {
-      const bucketName = String(opts.bucketName || process.env.GCS_BUCKET_NAME || "").trim();
-      const publicBaseUrl = (opts.publicBaseUrl || (bucketName ? `https://storage.googleapis.com/${bucketName}` : "")).replace(/\/+$/, "");
-      if (!bucketName || !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
-        this.config = {
-          valid: false,
-          bucketName,
-          publicBaseUrl,
-          error: "Cloud storage is not properly configured: GCS_BUCKET_NAME is missing or invalid."
-        };
-      } else {
-        this.config = {
-          valid: true,
-          bucketName,
-          publicBaseUrl
-        };
-        this.storageClient = opts.storageClient;
-        this.bucket = this.storageClient.bucket(bucketName);
-      }
-      return;
-    }
-    this.config = resolveGcsConfiguration(opts.bucketName);
-    if (this.config.valid) {
-      const storageOpts = {};
-      if (this.config.projectId) storageOpts.projectId = this.config.projectId;
-      if (this.config.credentials) storageOpts.credentials = this.config.credentials;
-      if (this.config.keyFilename) storageOpts.keyFilename = this.config.keyFilename;
-      this.storageClient = new Storage(storageOpts);
-      this.bucket = this.storageClient.bucket(this.config.bucketName);
-    }
-  }
-  getConfigStatus() {
-    return {
-      provider: "gcs",
-      configured: this.config.valid,
-      bucketName: this.config.bucketName || void 0,
-      publicBaseUrl: this.config.publicBaseUrl || void 0,
-      error: this.config.error
-    };
-  }
-  async verifyBucketAccess() {
-    if (!this.config.valid || !this.bucket) {
-      return { ok: false, error: this.config.error || "Google Cloud Storage is not configured." };
-    }
-    try {
-      const [exists] = await this.bucket.exists();
-      if (!exists) {
-        return { ok: false, error: "Configured Google Cloud Storage bucket does not exist or is unreachable." };
-      }
-      return { ok: true };
-    } catch (err) {
-      console.error("[STORAGE:GCS] Bucket verification failed:", err?.message || err);
-      return {
-        ok: false,
-        error: "Unable to verify Google Cloud Storage bucket access. Check credentials and bucket IAM permissions."
-      };
-    }
-  }
-  async uploadFile(buffer, destinationPath, contentType = "application/octet-stream", options) {
-    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
-    if (!this.config.valid || !this.bucket) {
-      return {
-        success: false,
-        url: "",
-        destinationPath: cleanPath,
-        provider: "gcs",
-        statusCode: 503,
-        error: this.config.error || "Cloud storage is not properly configured."
-      };
-    }
-    try {
-      const file = this.bucket.file(cleanPath);
-      const cacheControl = options?.cacheControl || IMMUTABLE_IMAGE_CACHE_CONTROL;
-      await file.save(buffer, {
-        resumable: false,
-        validation: "crc32c",
-        contentType,
-        metadata: {
-          contentType,
-          cacheControl
-        }
-      });
-      const [exists] = await file.exists();
-      if (!exists) {
-        throw new Error("Uploaded object could not be verified in Google Cloud Storage.");
-      }
-      return {
-        success: true,
-        url: this.getFileUrl(cleanPath),
-        destinationPath: cleanPath,
-        sizeBytes: buffer.length,
-        contentType,
-        provider: "gcs"
-      };
-    } catch (err) {
-      const errCode = Number(err?.code);
-      console.error("[STORAGE:GCS] Upload failed:", err?.code || "", err?.message || err);
-      if (errCode === 403 || errCode === 401) {
-        return {
-          success: false,
-          url: "",
-          destinationPath: cleanPath,
-          provider: "gcs",
-          statusCode: 403,
-          error: "Cloud storage permission denied. Verify service-account IAM roles on the configured Google Cloud Storage bucket."
-        };
-      }
-      return {
-        success: false,
-        url: "",
-        destinationPath: cleanPath,
-        provider: "gcs",
-        statusCode: 502,
-        error: "Cloud storage upload failed. Verify Google Cloud Storage credentials, bucket permissions, and network availability."
-      };
-    }
-  }
-  async getFile(destinationPath) {
-    if (!this.config.valid || !this.bucket) {
-      return {
-        success: false,
-        statusCode: 503,
-        error: this.config.error || "Cloud storage is not properly configured."
-      };
-    }
-    try {
-      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
-      const file = this.bucket.file(cleanPath);
-      const [[buffer], [metadata]] = await Promise.all([file.download(), file.getMetadata()]);
-      return {
-        success: true,
-        buffer,
-        contentType: metadata?.contentType || guessContentTypeFromPath(cleanPath),
-        sizeBytes: buffer.length,
-        statusCode: 200
-      };
-    } catch (err) {
-      const errCode = Number(err?.code);
-      console.error("[STORAGE:GCS] File retrieval failed:", err?.code || "", err?.message || err);
-      if (errCode === 404) {
-        return {
-          success: false,
-          statusCode: 404,
-          error: "File not found in cloud storage."
-        };
-      }
-      if (errCode === 403 || errCode === 401) {
-        return {
-          success: false,
-          statusCode: 403,
-          error: "Cloud storage permission denied while retrieving file."
-        };
-      }
-      return {
-        success: false,
-        statusCode: 502,
-        error: "Failed to retrieve file from cloud storage."
-      };
-    }
-  }
-  async deleteFile(destinationPath) {
-    if (!this.config.valid || !this.bucket) {
-      return false;
-    }
-    try {
-      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
-      const file = this.bucket.file(cleanPath);
-      const [exists] = await file.exists();
-      if (!exists) return false;
-      await file.delete({ ignoreNotFound: true });
-      return true;
-    } catch (err) {
-      console.error("[STORAGE:GCS] File deletion failed:", err?.code || "", err?.message || err);
-      return false;
-    }
-  }
-  getFileUrl(destinationPath) {
-    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
-    const encoded = cleanPath.split("/").map(encodeURIComponent).join("/");
-    return `${this.config.publicBaseUrl}/${encoded}`;
-  }
-  async fileExists(destinationPath) {
-    if (!this.config.valid || !this.bucket) {
-      return false;
-    }
-    try {
-      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
-      const [exists] = await this.bucket.file(cleanPath).exists();
-      return Boolean(exists);
-    } catch (err) {
-      console.error("[STORAGE:GCS] Existence check failed:", err?.code || "", err?.message || err);
-      return false;
-    }
-  }
-};
-function resolveR2Configuration(overrides) {
-  const accountId = String(overrides?.accountId ?? process.env.R2_ACCOUNT_ID ?? "").trim();
-  const bucketName = String(overrides?.bucketName ?? process.env.R2_BUCKET_NAME ?? "").trim();
-  const accessKeyId = String(process.env.R2_ACCESS_KEY_ID || "").trim();
-  const secretAccessKey = String(process.env.R2_SECRET_ACCESS_KEY || "").trim();
-  const rawEndpoint = String(overrides?.endpoint ?? process.env.R2_ENDPOINT ?? "").trim().replace(/\/+$/, "");
-  const rawPublicUrl = String(overrides?.publicBaseUrl ?? process.env.R2_PUBLIC_URL ?? "").trim().replace(/\/+$/, "");
-  const derivedEndpoint = rawEndpoint && !isPlaceholderValue(rawEndpoint) ? rawEndpoint : accountId && !isPlaceholderValue(accountId) ? `https://${accountId}.r2.cloudflarestorage.com` : "";
-  const publicBaseUrl = rawPublicUrl && !isPlaceholderValue(rawPublicUrl) ? rawPublicUrl : "";
-  if (!bucketName || isPlaceholderValue(bucketName)) {
-    return {
-      valid: false,
-      accountId,
-      bucketName: "",
-      endpoint: derivedEndpoint,
-      publicBaseUrl,
-      error: "Cloudflare R2 storage is not properly configured: R2_BUCKET_NAME is missing."
-    };
-  }
-  if (!/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
-    return {
-      valid: false,
-      accountId,
-      bucketName,
-      endpoint: derivedEndpoint,
-      publicBaseUrl,
-      error: "Cloudflare R2 storage is not properly configured: R2_BUCKET_NAME format is invalid."
-    };
-  }
-  if (!derivedEndpoint) {
-    return {
-      valid: false,
-      accountId,
-      bucketName,
-      endpoint: "",
-      publicBaseUrl,
-      error: "Cloudflare R2 storage is not properly configured: provide R2_ENDPOINT or R2_ACCOUNT_ID."
-    };
-  }
-  if (!/^https:\/\/.+/i.test(derivedEndpoint)) {
-    return {
-      valid: false,
-      accountId,
-      bucketName,
-      endpoint: derivedEndpoint,
-      publicBaseUrl,
-      error: "Cloudflare R2 storage is not properly configured: R2_ENDPOINT must use HTTPS."
-    };
-  }
-  if (!publicBaseUrl) {
-    return {
-      valid: false,
-      accountId,
-      bucketName,
-      endpoint: derivedEndpoint,
-      publicBaseUrl: "",
-      error: "Cloudflare R2 storage is not properly configured: R2_PUBLIC_URL is missing."
-    };
-  }
-  if (!/^https:\/\/.+/i.test(publicBaseUrl)) {
-    return {
-      valid: false,
-      accountId,
-      bucketName,
-      endpoint: derivedEndpoint,
-      publicBaseUrl,
-      error: "Cloudflare R2 storage is not properly configured: R2_PUBLIC_URL must use HTTPS."
-    };
-  }
-  if (!accessKeyId || isPlaceholderValue(accessKeyId) || !secretAccessKey || isPlaceholderValue(secretAccessKey)) {
-    return {
-      valid: false,
-      accountId,
-      bucketName,
-      endpoint: derivedEndpoint,
-      publicBaseUrl,
-      error: "Cloudflare R2 storage is not properly configured: provide R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY."
-    };
-  }
-  return {
-    valid: true,
-    accountId,
-    bucketName,
-    endpoint: derivedEndpoint,
-    publicBaseUrl,
-    accessKeyId,
-    secretAccessKey
-  };
-}
-function getAwsErrorStatusCode(err) {
-  const metaStatus = Number(err?.$metadata?.httpStatusCode);
-  if (Number.isFinite(metaStatus) && metaStatus > 0) return metaStatus;
-  const codeNum = Number(err?.code ?? err?.statusCode);
-  if (Number.isFinite(codeNum) && codeNum > 0) return codeNum;
-  const name = String(err?.name || err?.Code || "");
-  if (name === "NotFound" || name === "NoSuchKey") return 404;
-  if (name === "AccessDenied" || name === "Forbidden" || name === "InvalidAccessKeyId" || name === "SignatureDoesNotMatch") {
-    return 403;
-  }
-  return void 0;
-}
-async function s3BodyToBuffer(body) {
-  if (!body) return Buffer.alloc(0);
-  if (Buffer.isBuffer(body)) return body;
-  if (body instanceof Uint8Array) return Buffer.from(body);
-  if (typeof body.transformToByteArray === "function") {
-    const bytes = await body.transformToByteArray();
-    return Buffer.from(bytes);
-  }
-  if (typeof body[Symbol.asyncIterator] === "function") {
-    const chunks = [];
-    for await (const chunk of body) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    }
-    return Buffer.concat(chunks);
-  }
-  throw new Error("Unsupported S3 response body stream format.");
-}
-var CloudflareR2StorageAdapter = class {
-  constructor(options) {
-    this.providerName = "r2";
-    this.s3Client = null;
-    if (options?.s3Client) {
-      const accountId = String(options.accountId ?? process.env.R2_ACCOUNT_ID ?? "").trim();
-      const bucketName = String(options.bucketName ?? process.env.R2_BUCKET_NAME ?? "").trim();
-      const rawEndpoint = String(options.endpoint ?? process.env.R2_ENDPOINT ?? "").trim().replace(/\/+$/, "");
-      const endpoint = rawEndpoint || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : "");
-      const publicBaseUrl = String(options.publicBaseUrl ?? process.env.R2_PUBLIC_URL ?? "").trim().replace(/\/+$/, "");
-      if (!bucketName || !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucketName)) {
-        this.config = {
-          valid: false,
-          accountId,
-          bucketName,
-          endpoint,
-          publicBaseUrl,
-          error: "Cloudflare R2 storage is not properly configured: R2_BUCKET_NAME is missing or invalid."
-        };
-      } else if (!endpoint || !/^https:\/\/.+/i.test(endpoint)) {
-        this.config = {
-          valid: false,
-          accountId,
-          bucketName,
-          endpoint,
-          publicBaseUrl,
-          error: "Cloudflare R2 storage is not properly configured: R2_ENDPOINT must use HTTPS."
-        };
-      } else if (!publicBaseUrl || !/^https:\/\/.+/i.test(publicBaseUrl)) {
-        this.config = {
-          valid: false,
-          accountId,
-          bucketName,
-          endpoint,
-          publicBaseUrl,
-          error: "Cloudflare R2 storage is not properly configured: R2_PUBLIC_URL must use HTTPS."
-        };
-      } else {
-        this.config = {
-          valid: true,
-          accountId,
-          bucketName,
-          endpoint,
-          publicBaseUrl
-        };
-        this.s3Client = options.s3Client;
-      }
-      return;
-    }
-    this.config = resolveR2Configuration(options);
-    if (this.config.valid && this.config.accessKeyId && this.config.secretAccessKey) {
-      this.s3Client = new S3Client({
-        region: "auto",
-        endpoint: this.config.endpoint,
-        credentials: {
-          accessKeyId: this.config.accessKeyId,
-          secretAccessKey: this.config.secretAccessKey
-        }
-      });
-    }
-  }
-  getConfigStatus() {
-    return {
-      provider: "r2",
-      configured: this.config.valid,
-      bucketName: this.config.bucketName || void 0,
-      publicBaseUrl: this.config.publicBaseUrl || void 0,
-      error: this.config.error
-    };
-  }
-  async verifyBucketAccess() {
-    if (!this.config.valid || !this.s3Client) {
-      return { ok: false, error: this.config.error || "Cloudflare R2 storage is not configured." };
-    }
-    try {
-      await this.s3Client.send(
-        new HeadBucketCommand({
-          Bucket: this.config.bucketName
-        })
-      );
-      return { ok: true };
-    } catch (err) {
-      const status = getAwsErrorStatusCode(err);
-      console.error("[STORAGE:R2] Bucket verification failed:", status || err?.name || "", err?.message || err);
-      if (status === 403 || status === 401) {
-        return {
-          ok: false,
-          error: "Cloudflare R2 permission denied. Verify R2 API token permissions on the configured bucket."
-        };
-      }
-      return {
-        ok: false,
-        error: "Unable to verify Cloudflare R2 bucket access. Check endpoint, bucket name, and credentials."
-      };
-    }
-  }
-  async uploadFile(buffer, destinationPath, contentType = "application/octet-stream", options) {
-    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
-    if (!this.config.valid || !this.s3Client) {
-      return {
-        success: false,
-        url: "",
-        destinationPath: cleanPath,
-        provider: "r2",
-        statusCode: 503,
-        error: this.config.error || "Cloudflare R2 storage is not properly configured."
-      };
-    }
-    try {
-      const cacheControl = options?.cacheControl || IMMUTABLE_IMAGE_CACHE_CONTROL;
-      await this.s3Client.send(
-        new PutObjectCommand({
-          Bucket: this.config.bucketName,
-          Key: cleanPath,
-          Body: buffer,
-          ContentType: contentType,
-          CacheControl: cacheControl
-        })
-      );
-      const exists = await this.fileExists(cleanPath);
-      if (!exists) {
-        throw new Error("Uploaded object could not be verified in Cloudflare R2 storage.");
-      }
-      return {
-        success: true,
-        url: this.getFileUrl(cleanPath),
-        destinationPath: cleanPath,
-        sizeBytes: buffer.length,
-        contentType,
-        provider: "r2"
-      };
-    } catch (err) {
-      const status = getAwsErrorStatusCode(err);
-      console.error("[STORAGE:R2] Upload failed:", status || err?.name || "", err?.message || err);
-      if (status === 403 || status === 401) {
-        return {
-          success: false,
-          url: "",
-          destinationPath: cleanPath,
-          provider: "r2",
-          statusCode: 403,
-          error: "Cloudflare R2 permission denied. Verify R2 API token write permissions on the configured bucket."
-        };
-      }
-      return {
-        success: false,
-        url: "",
-        destinationPath: cleanPath,
-        provider: "r2",
-        statusCode: 502,
-        error: "Cloudflare R2 upload failed. Verify R2 credentials, endpoint, bucket permissions, and network availability."
-      };
-    }
-  }
-  async getFile(destinationPath) {
-    if (!this.config.valid || !this.s3Client) {
-      return {
-        success: false,
-        statusCode: 503,
-        error: this.config.error || "Cloudflare R2 storage is not properly configured."
-      };
-    }
-    try {
-      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
-      const response = await this.s3Client.send(
-        new GetObjectCommand({
-          Bucket: this.config.bucketName,
-          Key: cleanPath
-        })
-      );
-      const buffer = await s3BodyToBuffer(response.Body);
-      return {
-        success: true,
-        buffer,
-        contentType: response.ContentType || guessContentTypeFromPath(cleanPath),
-        sizeBytes: buffer.length,
-        statusCode: 200
-      };
-    } catch (err) {
-      const status = getAwsErrorStatusCode(err);
-      console.error("[STORAGE:R2] File retrieval failed:", status || err?.name || "", err?.message || err);
-      if (status === 404) {
-        return {
-          success: false,
-          statusCode: 404,
-          error: "File not found in Cloudflare R2 storage."
-        };
-      }
-      if (status === 403 || status === 401) {
-        return {
-          success: false,
-          statusCode: 403,
-          error: "Cloudflare R2 permission denied while retrieving file."
-        };
-      }
-      return {
-        success: false,
-        statusCode: 502,
-        error: "Failed to retrieve file from Cloudflare R2 storage."
-      };
-    }
-  }
-  async deleteFile(destinationPath) {
-    if (!this.config.valid || !this.s3Client) {
-      return false;
-    }
-    try {
-      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
-      const exists = await this.fileExists(cleanPath);
-      if (!exists) return false;
-      await this.s3Client.send(
-        new DeleteObjectCommand({
-          Bucket: this.config.bucketName,
-          Key: cleanPath
-        })
-      );
-      return true;
-    } catch (err) {
-      const status = getAwsErrorStatusCode(err);
-      console.error("[STORAGE:R2] File deletion failed:", status || err?.name || "", err?.message || err);
-      return false;
-    }
-  }
-  getFileUrl(destinationPath) {
-    const cleanPath = sanitizeRelativeStoragePath(destinationPath);
-    const encoded = cleanPath.split("/").map(encodeURIComponent).join("/");
-    return `${this.config.publicBaseUrl}/${encoded}`;
-  }
-  async fileExists(destinationPath) {
-    if (!this.config.valid || !this.s3Client) {
-      return false;
-    }
-    try {
-      const cleanPath = sanitizeRelativeStoragePath(destinationPath);
-      await this.s3Client.send(
-        new HeadObjectCommand({
-          Bucket: this.config.bucketName,
-          Key: cleanPath
-        })
-      );
-      return true;
-    } catch (err) {
-      const status = getAwsErrorStatusCode(err);
-      if (status !== 404) {
-        console.error("[STORAGE:R2] Existence check failed:", status || err?.name || "", err?.message || err);
-      }
-      return false;
-    }
-  }
-};
-var activeStorageAdapter = null;
-var activeProviderKey = null;
-function getConfiguredStorageProvider() {
-  const provider = String(process.env.STORAGE_PROVIDER || "local").toLowerCase().trim();
-  if (provider === "gcs" || provider === "google" || provider === "google-cloud-storage") {
-    return "gcs";
-  }
-  if (provider === "r2" || provider === "cloudflare-r2") {
-    return "r2";
-  }
-  return "local";
-}
-function getStorageAdapter() {
-  const provider = getConfiguredStorageProvider();
-  if (activeStorageAdapter && activeProviderKey === provider) {
-    return activeStorageAdapter;
-  }
-  activeProviderKey = provider;
-  if (provider === "gcs") {
-    const gcsAdapter = new GoogleCloudStorageAdapter();
-    activeStorageAdapter = gcsAdapter;
-    const status = gcsAdapter.getConfigStatus();
-    if (status.configured) {
-      console.log(`[STORAGE] Initialized GoogleCloudStorageAdapter (bucket=${status.bucketName}).`);
-    } else {
-      console.warn(`[STORAGE] GoogleCloudStorageAdapter selected via STORAGE_PROVIDER=gcs, but configuration is incomplete: ${status.error}`);
-    }
-  } else if (provider === "r2") {
-    const r2Adapter = new CloudflareR2StorageAdapter();
-    activeStorageAdapter = r2Adapter;
-    const status = r2Adapter.getConfigStatus();
-    if (status.configured) {
-      console.log(`[STORAGE] Initialized CloudflareR2StorageAdapter (bucket=${status.bucketName}).`);
-    } else {
-      console.warn(`[STORAGE] CloudflareR2StorageAdapter selected via STORAGE_PROVIDER=r2, but configuration is incomplete: ${status.error}`);
-    }
-  } else {
-    activeStorageAdapter = new LocalStorageAdapter();
-    console.log("[STORAGE] Initialized LocalStorageAdapter (Provider: Local).");
-  }
-  return activeStorageAdapter;
-}
-
 // server/services/storage/chunkUploadSessionManager.ts
-import fs20 from "fs";
+import fs21 from "fs";
 import os from "os";
-import path18 from "path";
-import crypto14 from "crypto";
+import path19 from "path";
+import crypto15 from "crypto";
 var DEFAULT_CHUNK_SESSION_TTL_MS = 15 * 60 * 1e3;
 var MAX_TOTAL_CHUNKS = 64;
 var ChunkUploadError = class extends Error {
@@ -24786,7 +26568,7 @@ var ChunkUploadSessionManager = class {
   constructor(options) {
     this.sessions = /* @__PURE__ */ new Map();
     this.sweepTimer = null;
-    this.stagingDir = path18.resolve(options?.stagingDir || path18.join(os.tmpdir(), "toriwear-upload-chunks"));
+    this.stagingDir = path19.resolve(options?.stagingDir || path19.join(os.tmpdir(), "toriwear-upload-chunks"));
     this.ttlMs = options?.ttlMs ?? DEFAULT_CHUNK_SESSION_TTL_MS;
     if (options?.enablePeriodicSweep !== false) {
       const intervalMs = Math.max(6e4, Math.min(this.ttlMs, 5 * 60 * 1e3));
@@ -24799,8 +26581,8 @@ var ChunkUploadSessionManager = class {
     }
   }
   getStagingDir() {
-    if (!fs20.existsSync(this.stagingDir)) {
-      fs20.mkdirSync(this.stagingDir, { recursive: true, mode: 448 });
+    if (!fs21.existsSync(this.stagingDir)) {
+      fs21.mkdirSync(this.stagingDir, { recursive: true, mode: 448 });
     }
     return this.stagingDir;
   }
@@ -24820,8 +26602,8 @@ var ChunkUploadSessionManager = class {
   safeUnlink(filePath) {
     if (!filePath) return;
     try {
-      if (fs20.existsSync(filePath)) {
-        fs20.unlinkSync(filePath);
+      if (fs21.existsSync(filePath)) {
+        fs21.unlinkSync(filePath);
       }
     } catch {
     }
@@ -24853,18 +26635,18 @@ var ChunkUploadSessionManager = class {
         this.safeUnlink(session.tmpFilePath);
         cleaned++;
       } else {
-        activePaths.add(path18.resolve(session.tmpFilePath));
+        activePaths.add(path19.resolve(session.tmpFilePath));
       }
     }
-    if (fs20.existsSync(this.stagingDir)) {
+    if (fs21.existsSync(this.stagingDir)) {
       try {
-        const entries = fs20.readdirSync(this.stagingDir);
+        const entries = fs21.readdirSync(this.stagingDir);
         for (const name of entries) {
           if (!name.startsWith("chunk-") || !name.endsWith(".bin")) continue;
-          const fullPath = path18.resolve(this.stagingDir, name);
+          const fullPath = path19.resolve(this.stagingDir, name);
           if (activePaths.has(fullPath)) continue;
           try {
-            const stat = fs20.statSync(fullPath);
+            const stat = fs21.statSync(fullPath);
             if (now - stat.mtimeMs > this.ttlMs) {
               this.safeUnlink(fullPath);
               cleaned++;
@@ -24922,8 +26704,8 @@ var ChunkUploadSessionManager = class {
         );
       }
       const stagingDir = this.getStagingDir();
-      const uniqueToken = crypto14.randomBytes(16).toString("hex");
-      const tmpFilePath = path18.join(stagingDir, `chunk-${uniqueToken}.bin`);
+      const uniqueToken = crypto15.randomBytes(16).toString("hex");
+      const tmpFilePath = path19.join(stagingDir, `chunk-${uniqueToken}.bin`);
       const session = {
         sessionKey,
         uploadId,
@@ -24940,7 +26722,7 @@ var ChunkUploadSessionManager = class {
       };
       this.sessions.set(sessionKey, session);
       try {
-        fs20.writeFileSync(tmpFilePath, chunkBuffer, { flag: "wx", mode: 384 });
+        fs21.writeFileSync(tmpFilePath, chunkBuffer, { flag: "wx", mode: 384 });
         session.totalBytesReceived = chunkBuffer.length;
         session.nextExpectedIndex = 1;
         session.updatedAt = Date.now();
@@ -25023,7 +26805,7 @@ var ChunkUploadSessionManager = class {
         "OUT_OF_ORDER_CHUNK"
       );
     }
-    if (!fs20.existsSync(existing.tmpFilePath)) {
+    if (!fs21.existsSync(existing.tmpFilePath)) {
       this.destroySession(sessionKey);
       throw new ChunkUploadError(
         "Upload staging file is missing or expired.",
@@ -25042,7 +26824,7 @@ var ChunkUploadSessionManager = class {
     }
     existing.inFlight = true;
     try {
-      fs20.appendFileSync(existing.tmpFilePath, chunkBuffer);
+      fs21.appendFileSync(existing.tmpFilePath, chunkBuffer);
       existing.totalBytesReceived += chunkBuffer.length;
       existing.nextExpectedIndex = chunkIndex + 1;
       existing.updatedAt = Date.now();
@@ -25069,7 +26851,7 @@ var ChunkUploadSessionManager = class {
     const totalBytesReceived = session.totalBytesReceived;
     const sessionKey = session.sessionKey;
     try {
-      const assembledBuffer = fs20.readFileSync(tmpFilePath);
+      const assembledBuffer = fs21.readFileSync(tmpFilePath);
       this.destroySession(sessionKey);
       return {
         completed: true,
@@ -25181,15 +26963,15 @@ cmsRouter.get(["/hero", "/cms/hero", "/admin/hero", "/admin/cms/hero", "/cms/adm
   }
 });
 var resolveExistingBrandAssetUrl = (preferred, candidates) => {
-  const publicDir2 = path19.resolve(process.cwd(), "public");
+  const publicDir2 = path20.resolve(process.cwd(), "public");
   const toCheck = [preferred, ...candidates].filter((v) => Boolean(v && v.trim()));
   for (const url of toCheck) {
     if (!url.startsWith("/")) {
       return url;
     }
     const cleanRel = (url.split("?")[0] ?? url).replace(/^\/+/, "");
-    const fullPath = path19.resolve(publicDir2, cleanRel);
-    if (fs21.existsSync(fullPath)) {
+    const fullPath = path20.resolve(publicDir2, cleanRel);
+    if (fs22.existsSync(fullPath)) {
       return url;
     }
   }
@@ -25330,7 +27112,7 @@ cmsRouter.post(["/v1/store/meta/event", "/store/meta/event"], async (req, res) =
     if (!validEvents.has(eventName)) {
       return res.status(400).json({ success: false, error: "Unsupported Meta event name." });
     }
-    const eventId = String(body.eventId || crypto16.randomUUID());
+    const eventId = String(body.eventId || crypto17.randomUUID());
     const ip = (req.ip || req.socket.remoteAddress || "").replace("::ffff:", "");
     const result = await dispatchMetaCapiEvent2({
       eventName,
@@ -25350,7 +27132,15 @@ cmsRouter.post(["/v1/store/meta/event", "/store/meta/event"], async (req, res) =
 cmsRouter.post(["/admin/frontpage", "/frontpage", "/cms/frontpage", "/admin/cms/frontpage", "/cms/admin/frontpage"], requireAdminAuth(), async (req, res) => {
   try {
     const actorId = req.user?.id || req.user?.name || "ADMIN";
-    const saved = await cmsRepository.saveFrontPageData(req.body, actorId);
+    const saved = await mediaCleanupService.withMediaReferenceWrite(
+      () => cmsRepository.saveFrontPageData(req.body, actorId)
+    );
+    const savedUrls = /* @__PURE__ */ new Set();
+    extractAllMediaUrlsFromValue(saved, savedUrls);
+    if (savedUrls.size > 0) {
+      mediaCleanupService.markUrlsCommitted(Array.from(savedUrls)).catch(() => {
+      });
+    }
     res.json({
       success: true,
       message: "Frontpage CMS successfully published and persisted to backend.",
@@ -25366,7 +27156,15 @@ cmsRouter.put(["/admin/sections", "/sections", "/cms/sections", "/admin/cms/sect
       return res.status(400).json({ success: false, error: 'Expected "sections" array in request body.' });
     }
     const actorId = req.user?.id || req.user?.name || "ADMIN";
-    const updated = await cmsRepository.updateSections(req.body.sections, actorId);
+    const updated = await mediaCleanupService.withMediaReferenceWrite(
+      () => cmsRepository.updateSections(req.body.sections, actorId)
+    );
+    const savedUrls = /* @__PURE__ */ new Set();
+    extractAllMediaUrlsFromValue(updated, savedUrls);
+    if (savedUrls.size > 0) {
+      mediaCleanupService.markUrlsCommitted(Array.from(savedUrls)).catch(() => {
+      });
+    }
     return res.json({
       success: true,
       message: "Homepage sections order and visibility updated.",
@@ -25379,7 +27177,15 @@ cmsRouter.put(["/admin/sections", "/sections", "/cms/sections", "/admin/cms/sect
 cmsRouter.put(["/admin/hero", "/hero", "/cms/hero", "/admin/cms/hero", "/cms/admin/hero"], requireAdminAuth(), async (req, res) => {
   try {
     const actorId = req.user?.id || req.user?.name || "ADMIN";
-    const updated = await cmsRepository.updateHero(req.body, actorId);
+    const updated = await mediaCleanupService.withMediaReferenceWrite(
+      () => cmsRepository.updateHero(req.body, actorId)
+    );
+    const savedUrls = /* @__PURE__ */ new Set();
+    extractAllMediaUrlsFromValue(updated, savedUrls);
+    if (savedUrls.size > 0) {
+      mediaCleanupService.markUrlsCommitted(Array.from(savedUrls)).catch(() => {
+      });
+    }
     res.json({
       success: true,
       message: "Hero billboard configuration updated.",
@@ -25392,7 +27198,9 @@ cmsRouter.put(["/admin/hero", "/hero", "/cms/hero", "/admin/cms/hero", "/cms/adm
 cmsRouter.post(["/admin/reset", "/reset", "/cms/reset", "/admin/cms/reset", "/cms/admin/reset"], requireAdminAuth(), async (req, res) => {
   try {
     const actorId = req.user?.id || req.user?.name || "ADMIN";
-    const reset = await cmsRepository.resetToDefaults(actorId);
+    const reset = await mediaCleanupService.withMediaReferenceWrite(
+      () => cmsRepository.resetToDefaults(actorId)
+    );
     res.json({
       success: true,
       message: "CMS configurations reset to baseline factory defaults.",
@@ -25405,7 +27213,15 @@ cmsRouter.post(["/admin/reset", "/reset", "/cms/reset", "/admin/cms/reset", "/cm
 cmsRouter.put(["/admin/settings", "/settings", "/cms/settings", "/admin/cms/settings", "/cms/admin/settings"], requireAdminAuth(), async (req, res) => {
   try {
     const actorId = req.user?.id || req.user?.name || "ADMIN";
-    const updated = await cmsRepository.updateStoreSettings(req.body, actorId);
+    const updated = await mediaCleanupService.withMediaReferenceWrite(
+      () => cmsRepository.updateStoreSettings(req.body, actorId)
+    );
+    const savedUrls = /* @__PURE__ */ new Set();
+    extractAllMediaUrlsFromValue(updated, savedUrls);
+    if (savedUrls.size > 0) {
+      mediaCleanupService.markUrlsCommitted(Array.from(savedUrls)).catch(() => {
+      });
+    }
     res.json({
       success: true,
       message: "Store settings successfully updated.",
@@ -25416,9 +27232,9 @@ cmsRouter.put(["/admin/settings", "/settings", "/cms/settings", "/admin/cms/sett
   }
 });
 function buildUniqueAssetFilename(rawFilename, extension) {
-  const baseName = rawFilename ? path19.basename(rawFilename, path19.extname(rawFilename)) : "cms";
+  const baseName = rawFilename ? path20.basename(rawFilename, path20.extname(rawFilename)) : "cms";
   const safePrefix = baseName.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 20) || "cms";
-  return `cms-${safePrefix}-${Date.now()}-${crypto16.randomBytes(6).toString("hex")}.${extension}`;
+  return `cms-${safePrefix}-${Date.now()}-${crypto17.randomBytes(6).toString("hex")}.${extension}`;
 }
 cmsRouter.post(["/upload-asset", "/cms/upload-asset", "/admin/upload-asset", "/admin/cms/upload-asset"], requireAdminAuth(), async (req, res) => {
   try {
@@ -25451,6 +27267,16 @@ cmsRouter.post(["/upload-asset", "/cms/upload-asset", "/admin/upload-asset", "/a
         error: uploadRes.error || "Failed to persist uploaded image asset."
       });
     }
+    const ownerId = String(req.user?.id || req.user?.email || "ADMIN").trim();
+    const sessionId = typeof req.body?.sessionId === "string" ? req.body.sessionId.trim() : void 0;
+    await mediaCleanupService.registerPendingUpload({
+      url: uploadRes.url,
+      ownerId,
+      sessionId: sessionId || void 0,
+      storageKey: uploadRes.destinationPath,
+      provider: storage.providerName
+    }).catch(() => {
+    });
     return res.json({
       success: true,
       url: uploadRes.url,
@@ -25496,7 +27322,7 @@ cmsRouter.post(
       const maxUploadBytes = getConfiguredMaxUploadBytes();
       const chunkBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || "");
       if (chunkIndex === 0) {
-        const extFromName = path19.extname(rawFilename).toLowerCase().replace(".", "");
+        const extFromName = path20.extname(rawFilename).toLowerCase().replace(".", "");
         const allowedExts = /* @__PURE__ */ new Set(["png", "jpg", "jpeg", "webp", "gif", "svg", "avif"]);
         let ext = allowedExts.has(extFromName) ? extFromName === "jpeg" ? "jpg" : extFromName : "";
         if (!ext) {
@@ -25555,6 +27381,15 @@ cmsRouter.post(
           error: uploadRes.error || "Failed to persist uploaded image asset."
         });
       }
+      const editorSessionId = String(req.query.sessionId || "").trim() || void 0;
+      await mediaCleanupService.registerPendingUpload({
+        url: uploadRes.url,
+        ownerId,
+        sessionId: editorSessionId,
+        storageKey: uploadRes.destinationPath,
+        provider: storage.providerName
+      }).catch(() => {
+      });
       return res.json({
         success: true,
         completed: true,
@@ -25587,17 +27422,88 @@ cmsRouter.post(
     }
   }
 );
+cmsRouter.post(
+  ["/discard-uploads", "/cms/discard-uploads", "/admin/discard-uploads", "/admin/cms/discard-uploads"],
+  requireAdminAuth(),
+  async (req, res) => {
+    try {
+      const ownerId = String(req.user?.id || req.user?.email || "").trim();
+      if (!ownerId) {
+        return res.status(401).json({ success: false, error: "Authenticated admin identity required." });
+      }
+      const rawUrls = Array.isArray(req.body?.urls) ? req.body.urls : [];
+      const urls = rawUrls.filter((u) => typeof u === "string" && u.trim().length > 0).slice(0, 100);
+      const sessionId = typeof req.body?.sessionId === "string" ? req.body.sessionId.trim() : void 0;
+      const role = String(req.user?.role || "").toUpperCase();
+      const isSuperAdmin = role === "SUPER_ADMIN" || role === "FOUNDER";
+      const result = await mediaCleanupService.discardPendingUploads({
+        urls,
+        ownerId,
+        sessionId: sessionId || void 0,
+        isSuperAdmin
+      });
+      return res.json({
+        success: true,
+        acceptedCount: result.acceptedUrls.length,
+        rejectedCount: result.rejectedUrls.length,
+        deletedCount: result.report.deletedKeys.length,
+        preservedCount: result.report.preservedReferencedKeys.length
+      });
+    } catch (err) {
+      console.warn("[CMS] Discard uploads error (non-fatal):", err?.message || err);
+      return res.json({ success: true, acceptedCount: 0, deletedCount: 0 });
+    }
+  }
+);
+cmsRouter.post(
+  ["/media-lease", "/cms/media-lease", "/admin/media-lease", "/admin/cms/media-lease"],
+  requireAdminAuth(),
+  async (req, res) => {
+    try {
+      const ownerId = String(req.user?.id || req.user?.email || "").trim();
+      if (!ownerId) {
+        return res.status(401).json({ success: false, error: "Authenticated admin identity required." });
+      }
+      const action = String(req.body?.action || "heartbeat").trim().toLowerCase();
+      const sessionId = String(req.body?.sessionId || "").trim();
+      if (!sessionId || sessionId.length > 128) {
+        return res.status(400).json({ success: false, error: "Valid editor sessionId is required." });
+      }
+      if (action === "release") {
+        const released = await mediaCleanupService.releaseEditorMediaLease({ sessionId, ownerId });
+        return res.json({ success: true, released });
+      }
+      const rawUrls = Array.isArray(req.body?.urls) ? req.body.urls : [];
+      const urls = rawUrls.filter((u) => typeof u === "string" && u.trim().length > 0).slice(0, 200);
+      const entityId = typeof req.body?.entityId === "string" ? req.body.entityId.trim().slice(0, 128) : void 0;
+      const lease = await mediaCleanupService.upsertEditorMediaLease({
+        sessionId,
+        ownerId,
+        entityId,
+        urls
+      });
+      return res.json({
+        success: true,
+        leasedKeysCount: lease?.storageKeys.length ?? 0,
+        expiresAt: lease?.expiresAt ?? null
+      });
+    } catch (err) {
+      console.warn("[CMS] Media lease error (non-fatal):", err?.message || err);
+      return res.json({ success: true, leasedKeysCount: 0 });
+    }
+  }
+);
 
 // server/routes/earlyAccessRouter.ts
 import { Router as Router5 } from "express";
 
 // server/services/earlyAccessService.ts
 init_prisma();
-import crypto19 from "crypto";
+import crypto20 from "crypto";
 
 // server/services/notifications/resendEmailService.ts
 init_prisma();
-import crypto17 from "crypto";
+import crypto18 from "crypto";
 function getEmailProviderStatus() {
   const provider = String(process.env.EMAIL_PROVIDER || "resend").trim().toLowerCase();
   const apiKey = String(process.env.RESEND_API_KEY || "").trim();
@@ -25865,7 +27771,7 @@ function verifyResendWebhookSignature(params) {
   }
   const keyBytes = secret.startsWith("whsec_") ? Buffer.from(secret.slice(6), "base64") : Buffer.from(secret, "utf8");
   const signedContent = `${svixId}.${svixTimestamp}.${params.rawBody}`;
-  const expectedSig = crypto17.createHmac("sha256", keyBytes).update(signedContent).digest("base64");
+  const expectedSig = crypto18.createHmac("sha256", keyBytes).update(signedContent).digest("base64");
   const signatures = svixSignature.split(/\s+/).map((part) => {
     const idx = part.indexOf(",");
     return idx !== -1 ? { version: part.slice(0, idx), sig: part.slice(idx + 1) } : null;
@@ -25873,7 +27779,7 @@ function verifyResendWebhookSignature(params) {
   const expectedBuf = Buffer.from(expectedSig, "utf8");
   for (const entry of signatures) {
     const providedBuf = Buffer.from(entry.sig, "utf8");
-    if (providedBuf.length === expectedBuf.length && crypto17.timingSafeEqual(providedBuf, expectedBuf)) {
+    if (providedBuf.length === expectedBuf.length && crypto18.timingSafeEqual(providedBuf, expectedBuf)) {
       return { valid: true };
     }
   }
@@ -25882,7 +27788,7 @@ function verifyResendWebhookSignature(params) {
 
 // server/services/notifications/whatsappCloudService.ts
 init_prisma();
-import crypto18 from "crypto";
+import crypto19 from "crypto";
 function getWhatsAppProviderStatus() {
   const accessToken = String(process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
   const phoneNumberId = String(process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
@@ -26083,10 +27989,10 @@ function verifyMetaWebhookSignature(params) {
     return { valid: false, reason: "Missing or invalid X-Hub-Signature-256 header." };
   }
   const providedHex = header.slice(7).trim();
-  const expectedHex = crypto18.createHmac("sha256", appSecret).update(params.rawBody, "utf8").digest("hex");
+  const expectedHex = crypto19.createHmac("sha256", appSecret).update(params.rawBody, "utf8").digest("hex");
   const providedBuf = Buffer.from(providedHex, "hex");
   const expectedBuf = Buffer.from(expectedHex, "hex");
-  if (providedBuf.length === 0 || providedBuf.length !== expectedBuf.length || !crypto18.timingSafeEqual(providedBuf, expectedBuf)) {
+  if (providedBuf.length === 0 || providedBuf.length !== expectedBuf.length || !crypto19.timingSafeEqual(providedBuf, expectedBuf)) {
     return { valid: false, reason: "WhatsApp webhook HMAC signature verification failed." };
   }
   return { valid: true };
@@ -26162,19 +28068,19 @@ function getUnsubscribeSecret() {
   return "toriwear-dev-unsubscribe-secret-local-only";
 }
 function hashUnsubscribeToken(token) {
-  return crypto19.createHash("sha256").update(token).digest("hex");
+  return crypto20.createHash("sha256").update(token).digest("hex");
 }
 function createSignedUnsubscribeToken(subscriberId) {
   const secret = getUnsubscribeSecret();
   const payload = Buffer.from(
     JSON.stringify({
       sid: subscriberId,
-      nonce: crypto19.randomBytes(12).toString("hex"),
+      nonce: crypto20.randomBytes(12).toString("hex"),
       iat: Date.now()
     }),
     "utf8"
   ).toString("base64url");
-  const sig = crypto19.createHmac("sha256", secret).update(payload).digest("hex");
+  const sig = crypto20.createHmac("sha256", secret).update(payload).digest("hex");
   const token = `${payload}.${sig}`;
   return {
     token,
@@ -26189,10 +28095,10 @@ function verifySignedUnsubscribeToken(token) {
   const sig = clean.slice(dotIdx + 1);
   try {
     const secret = getUnsubscribeSecret();
-    const expectedSig = crypto19.createHmac("sha256", secret).update(payload).digest("hex");
+    const expectedSig = crypto20.createHmac("sha256", secret).update(payload).digest("hex");
     const a = Buffer.from(sig, "hex");
     const b = Buffer.from(expectedSig, "hex");
-    if (a.length === 0 || a.length !== b.length || !crypto19.timingSafeEqual(a, b)) {
+    if (a.length === 0 || a.length !== b.length || !crypto20.timingSafeEqual(a, b)) {
       return { valid: false };
     }
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
@@ -26316,7 +28222,7 @@ async function registerSubscriber(input) {
       saved = existing;
     }
   } else {
-    const newId = `eas_${crypto19.randomBytes(10).toString("hex")}`;
+    const newId = `eas_${crypto20.randomBytes(10).toString("hex")}`;
     const generated = createSignedUnsubscribeToken(newId);
     unsubscribeTokenRaw = generated.token;
     saved = await prisma2.earlyAccessSubscriber.create({
@@ -26356,7 +28262,7 @@ async function registerSubscriber(input) {
     const idemKey = `confirm-email:${saved.id}:${Math.floor(now.getTime() / 1e3)}`;
     const delivery = await prisma2.notificationDelivery.create({
       data: {
-        id: `del_${crypto19.randomBytes(10).toString("hex")}`,
+        id: `del_${crypto20.randomBytes(10).toString("hex")}`,
         subscriberId: saved.id,
         campaignId: null,
         eventType: "REGISTRATION_CONFIRMATION",
@@ -26389,7 +28295,7 @@ async function registerSubscriber(input) {
       const idemKey = `confirm-wa:${saved.id}:${Math.floor(now.getTime() / 1e3)}`;
       const delivery = await prisma2.notificationDelivery.create({
         data: {
-          id: `del_${crypto19.randomBytes(10).toString("hex")}`,
+          id: `del_${crypto20.randomBytes(10).toString("hex")}`,
           subscriberId: saved.id,
           campaignId: null,
           eventType: "REGISTRATION_CONFIRMATION",
@@ -26636,7 +28542,7 @@ async function exportSubscribersCsvAdmin(params) {
 }
 
 // server/services/notifications/campaignOrchestrator.ts
-import crypto20 from "crypto";
+import crypto21 from "crypto";
 async function createDraftCampaign(input, actorUserId) {
   const prisma2 = await assertDatabaseReady();
   const name = String(input.name || "").trim();
@@ -26650,7 +28556,7 @@ async function createDraftCampaign(input, actorUserId) {
   const tmplName = String(input.whatsappTemplateName || process.env.WHATSAPP_TEMPLATE_NAME || "").trim() || null;
   const campaign = await prisma2.notificationCampaign.create({
     data: {
-      id: `camp_${crypto20.randomBytes(8).toString("hex")}`,
+      id: `camp_${crypto21.randomBytes(8).toString("hex")}`,
       name,
       campaignType: String(input.campaignType || "LAUNCH_ANNOUNCEMENT").trim(),
       subject: input.subject ? String(input.subject).trim() : null,
@@ -26734,7 +28640,7 @@ async function sendTestCampaignNotification(params) {
       html,
       text: campaign.emailText || generatedTmpl.text,
       unsubscribeUrl: unsubUrl,
-      idempotencyKey: `test:${campaign.id}:email:${crypto20.randomBytes(6).toString("hex")}`,
+      idempotencyKey: `test:${campaign.id}:email:${crypto21.randomBytes(6).toString("hex")}`,
       tags: [{ name: "test_mode", value: "true" }]
     });
     results.email = {
@@ -26940,7 +28846,7 @@ async function confirmAndDispatchCampaign(params) {
       if (!existingDel) {
         const del = await prisma2.notificationDelivery.create({
           data: {
-            id: `del_${crypto20.randomBytes(10).toString("hex")}`,
+            id: `del_${crypto21.randomBytes(10).toString("hex")}`,
             subscriberId: sub.id,
             campaignId: campaign.id,
             eventType: campaign.campaignType || "LAUNCH_ANNOUNCEMENT",
@@ -26962,7 +28868,7 @@ async function confirmAndDispatchCampaign(params) {
       if (!existingDel) {
         const del = await prisma2.notificationDelivery.create({
           data: {
-            id: `del_${crypto20.randomBytes(10).toString("hex")}`,
+            id: `del_${crypto21.randomBytes(10).toString("hex")}`,
             subscriberId: sub.id,
             campaignId: campaign.id,
             eventType: campaign.campaignType || "LAUNCH_ANNOUNCEMENT",
@@ -27916,17 +29822,17 @@ init_prisma();
 
 // server/db/init-mysql.ts
 init_mysqlConfig();
-import fs22 from "fs";
-import path20 from "path";
+import fs23 from "fs";
+import path21 from "path";
 import mysql from "mysql2/promise";
 function resolveMigrationSqlPath(relativePath) {
   const candidates = [
-    path20.resolve(process.cwd(), relativePath),
-    path20.resolve(import.meta.dirname || process.cwd(), "..", relativePath),
-    path20.resolve(import.meta.dirname || process.cwd(), "../..", relativePath)
+    path21.resolve(process.cwd(), relativePath),
+    path21.resolve(import.meta.dirname || process.cwd(), "..", relativePath),
+    path21.resolve(import.meta.dirname || process.cwd(), "../..", relativePath)
   ];
   for (const candidate of candidates) {
-    if (fs22.existsSync(candidate)) {
+    if (fs23.existsSync(candidate)) {
       return candidate;
     }
   }
@@ -27973,7 +29879,7 @@ async function ensureMySqlSchemaInitialized() {
         console.warn("[MYSQL-INIT] Migration file prisma/migrations/0_init/migration.sql not found; skipping auto-DDL.");
         return false;
       }
-      const migrationSql = fs22.readFileSync(initMigrationPath, "utf8").trim();
+      const migrationSql = fs23.readFileSync(initMigrationPath, "utf8").trim();
       if (migrationSql) {
         if (existingCoreTables === 0) {
           console.log("[MYSQL-INIT] Empty MySQL database detected. Initializing TORIWEAR schema tables...");
@@ -28000,7 +29906,7 @@ async function ensureMySqlSchemaInitialized() {
     if (existingEaTables < 3 || !hasCouponCols || !hasUsageCols) {
       const additivePath = resolveMigrationSqlPath("prisma/migrations/20261117_early_access_notifications/migration.sql");
       if (additivePath) {
-        const additiveSql = fs22.readFileSync(additivePath, "utf8");
+        const additiveSql = fs23.readFileSync(additivePath, "utf8");
         console.log("[MYSQL-INIT] Applying additive Early Access & Coupon schema updates...");
         await applyStatementsIdempotently(connection, additiveSql);
         console.log("[MYSQL-INIT] Additive Early Access & Coupon schema verified.");
@@ -28021,7 +29927,7 @@ async function ensureMySqlSchemaInitialized() {
     if (existingRetTables < 3 || !hasCatCols || !hasProdCatCols) {
       const masterPath = resolveMigrationSqlPath("prisma/migrations/20261118_master_update/migration.sql");
       if (masterPath) {
-        const masterSql = fs22.readFileSync(masterPath, "utf8");
+        const masterSql = fs23.readFileSync(masterPath, "utf8");
         console.log("[MYSQL-INIT] Applying additive Master Update schema (Categories & Returns/Refunds)...");
         await applyStatementsIdempotently(connection, masterSql);
         console.log("[MYSQL-INIT] Additive Master Update schema verified.");
@@ -28170,22 +30076,22 @@ function requireStaffAuth(req, res, next) {
     next();
   });
 }
-var publicDir = path21.resolve(process.cwd(), "public");
-var assetsDir = path21.resolve(publicDir, "generated-assets");
-var brandAssetsDir = path21.resolve(publicDir, "assets");
-var modelsDir = path21.resolve(publicDir, "models");
-if (!fs23.existsSync(assetsDir)) {
-  fs23.mkdirSync(assetsDir, { recursive: true });
+var publicDir = path22.resolve(process.cwd(), "public");
+var assetsDir = path22.resolve(publicDir, "generated-assets");
+var brandAssetsDir = path22.resolve(publicDir, "assets");
+var modelsDir = path22.resolve(publicDir, "models");
+if (!fs24.existsSync(assetsDir)) {
+  fs24.mkdirSync(assetsDir, { recursive: true });
 }
-if (!fs23.existsSync(brandAssetsDir)) {
-  fs23.mkdirSync(brandAssetsDir, { recursive: true });
+if (!fs24.existsSync(brandAssetsDir)) {
+  fs24.mkdirSync(brandAssetsDir, { recursive: true });
 }
-if (!fs23.existsSync(modelsDir)) {
-  fs23.mkdirSync(modelsDir, { recursive: true });
+if (!fs24.existsSync(modelsDir)) {
+  fs24.mkdirSync(modelsDir, { recursive: true });
 }
 var blockSensitiveStaticFiles = (req, res, next) => {
   const cleanPath = (req.path || "").toLowerCase();
-  const base = path21.posix.basename(cleanPath);
+  const base = path22.posix.basename(cleanPath);
   if (base.startsWith(".") || cleanPath.endsWith(".json") || cleanPath.endsWith(".tmp") || cleanPath.endsWith(".bin") || cleanPath.includes(".tmp-chunk-")) {
     return res.status(404).json({ success: false, error: "Not found" });
   }
@@ -28214,20 +30120,20 @@ app.use("/models", express2.static(modelsDir, { maxAge: "7d" }));
 app.get(["/api/brand/logo-status", "/api/v1/brand/logo-status"], async (_req, res) => {
   try {
     const storeSettings = await cmsRepository.getStoreSettings();
-    const brandingDir = path21.join(brandAssetsDir, "branding");
+    const brandingDir = path22.join(brandAssetsDir, "branding");
     const resolveLogoPath = (baseName) => {
       const candidates = [
-        { url: `/assets/branding/${baseName}.svg`, filePath: path21.join(brandingDir, `${baseName}.svg`) },
-        { url: `/assets/${baseName}.svg`, filePath: path21.join(brandAssetsDir, `${baseName}.svg`) },
-        { url: `/assets/branding/${baseName}.png`, filePath: path21.join(brandingDir, `${baseName}.png`) },
-        { url: `/assets/${baseName}.png`, filePath: path21.join(brandAssetsDir, `${baseName}.png`) }
+        { url: `/assets/branding/${baseName}.svg`, filePath: path22.join(brandingDir, `${baseName}.svg`) },
+        { url: `/assets/${baseName}.svg`, filePath: path22.join(brandAssetsDir, `${baseName}.svg`) },
+        { url: `/assets/branding/${baseName}.png`, filePath: path22.join(brandingDir, `${baseName}.png`) },
+        { url: `/assets/${baseName}.png`, filePath: path22.join(brandAssetsDir, `${baseName}.png`) }
       ];
       for (const c of candidates) {
-        if (fs23.existsSync(c.filePath)) {
+        if (fs24.existsSync(c.filePath)) {
           return { exists: true, url: c.url, filePath: c.filePath };
         }
       }
-      return { exists: false, url: `/assets/${baseName}.png`, filePath: path21.join(brandAssetsDir, `${baseName}.png`) };
+      return { exists: false, url: `/assets/${baseName}.png`, filePath: path22.join(brandAssetsDir, `${baseName}.png`) };
     };
     const primary = resolveLogoPath("toriwear-official-logo");
     const secondary = resolveLogoPath("second-brand-logo");
@@ -28236,7 +30142,7 @@ app.get(["/api/brand/logo-status", "/api/v1/brand/logo-status"], async (_req, re
     let size = 0;
     let mtime = 0;
     if (primary.exists) {
-      const stat = fs23.statSync(primary.filePath);
+      const stat = fs24.statSync(primary.filePath);
       size = stat.size;
       mtime = Math.floor(stat.mtimeMs);
     }
@@ -28269,26 +30175,26 @@ app.post(["/api/brand/upload-logo", "/api/v1/brand/upload-logo"], requireStaffAu
     if (buffer.length === 0) {
       return res.status(400).json({ success: false, error: "Uploaded logo payload is empty." });
     }
-    const brandingDir = path21.join(brandAssetsDir, "branding");
-    if (!fs23.existsSync(brandingDir)) {
-      fs23.mkdirSync(brandingDir, { recursive: true });
+    const brandingDir = path22.join(brandAssetsDir, "branding");
+    if (!fs24.existsSync(brandingDir)) {
+      fs24.mkdirSync(brandingDir, { recursive: true });
     }
     const ext = isSvg ? "svg" : "png";
     const oppositeExt = isSvg ? "png" : "svg";
     const now = Date.now();
     const saveTargetFiles = (baseName) => {
-      const bPath = path21.join(brandingDir, `${baseName}.${ext}`);
-      const rPath = path21.join(brandAssetsDir, `${baseName}.${ext}`);
-      fs23.writeFileSync(bPath, buffer);
-      fs23.writeFileSync(rPath, buffer);
-      const oldB = path21.join(brandingDir, `${baseName}.${oppositeExt}`);
-      const oldR = path21.join(brandAssetsDir, `${baseName}.${oppositeExt}`);
-      if (fs23.existsSync(oldB)) fs23.unlinkSync(oldB);
-      if (fs23.existsSync(oldR)) fs23.unlinkSync(oldR);
+      const bPath = path22.join(brandingDir, `${baseName}.${ext}`);
+      const rPath = path22.join(brandAssetsDir, `${baseName}.${ext}`);
+      fs24.writeFileSync(bPath, buffer);
+      fs24.writeFileSync(rPath, buffer);
+      const oldB = path22.join(brandingDir, `${baseName}.${oppositeExt}`);
+      const oldR = path22.join(brandAssetsDir, `${baseName}.${oppositeExt}`);
+      if (fs24.existsSync(oldB)) fs24.unlinkSync(oldB);
+      if (fs24.existsSync(oldR)) fs24.unlinkSync(oldR);
       return `/assets/branding/${baseName}.${ext}`;
     };
     const currentSettings = await cmsRepository.getStoreSettings();
-    const defaultSecondaryFallback = fs23.existsSync(path21.join(brandingDir, "second-brand-logo.png")) ? "/assets/branding/second-brand-logo.png" : "/assets/second-brand-logo.png";
+    const defaultSecondaryFallback = fs24.existsSync(path22.join(brandingDir, "second-brand-logo.png")) ? "/assets/branding/second-brand-logo.png" : "/assets/second-brand-logo.png";
     let nextPrimaryUrl = currentSettings.logoUrl || "/assets/branding/toriwear-official-logo.png";
     let nextSecondaryUrl = currentSettings.secondaryLogoUrl || defaultSecondaryFallback;
     if (target === "secondary") {
@@ -28371,8 +30277,8 @@ app.post("/api/ai/image/test", requireStaffAuth, aiRateLimiter, async (_req, res
       imageSize: "1K"
     });
     const filename = `test-symbol-${Date.now()}.png`;
-    const filePath = path21.join(assetsDir, filename);
-    fs23.writeFileSync(filePath, Buffer.from(result.data, "base64"));
+    const filePath = path22.join(assetsDir, filename);
+    fs24.writeFileSync(filePath, Buffer.from(result.data, "base64"));
     const imageUrl = `/generated-assets/${filename}`;
     const durationMs = Date.now() - startTime;
     telemetryLogs.unshift({
@@ -28486,8 +30392,8 @@ app.post("/api/ai/design/generate", requireStaffAuth, aiRateLimiter, async (req,
       imageMimeType = result.mimeType;
       const assetId = `tori-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
       const filename = `${assetId}.png`;
-      const filePath = path21.join(assetsDir, filename);
-      fs23.writeFileSync(filePath, Buffer.from(result.data, "base64"));
+      const filePath = path22.join(assetsDir, filename);
+      fs24.writeFileSync(filePath, Buffer.from(result.data, "base64"));
       imageUrl = `/generated-assets/${filename}`;
       artworkStatus = "READY";
     } catch (imageErr) {
@@ -28615,8 +30521,8 @@ app.post("/api/ai/design/generate-artwork", requireStaffAuth, aiRateLimiter, asy
     const result = await imageManager.generateImage(prompt, { aspectRatio, imageSize });
     const assetId = `tori-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const filename = `${assetId}.png`;
-    const filePath = path21.join(assetsDir, filename);
-    fs23.writeFileSync(filePath, Buffer.from(result.data, "base64"));
+    const filePath = path22.join(assetsDir, filename);
+    fs24.writeFileSync(filePath, Buffer.from(result.data, "base64"));
     const imageUrl = `/generated-assets/${filename}`;
     return res.status(200).json({
       success: true,
@@ -28671,8 +30577,8 @@ Art Direction: Isolated original anime streetwear graphic on solid clean neutral
       mimeType = result.mimeType;
       const assetId = `tori-var-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
       const filename = `${assetId}.png`;
-      const filePath = path21.join(assetsDir, filename);
-      fs23.writeFileSync(filePath, Buffer.from(base64Data, "base64"));
+      const filePath = path22.join(assetsDir, filename);
+      fs24.writeFileSync(filePath, Buffer.from(base64Data, "base64"));
       imageUrl = `/generated-assets/${filename}`;
     } catch (err) {
       console.warn("[Variation Generation Notice]", err?.message || err);
@@ -28987,15 +30893,15 @@ async function startServer() {
     });
   } else {
     const candidateDistDirs = [
-      path21.resolve(process.cwd(), "dist"),
-      path21.resolve(import.meta.dirname || process.cwd(), "dist"),
-      path21.resolve(import.meta.dirname || process.cwd(), "..", "dist")
+      path22.resolve(process.cwd(), "dist"),
+      path22.resolve(import.meta.dirname || process.cwd(), "dist"),
+      path22.resolve(import.meta.dirname || process.cwd(), "..", "dist")
     ];
-    const distDir = candidateDistDirs.find((d) => fs23.existsSync(path21.join(d, "index.html"))) || candidateDistDirs[0];
-    const indexHtmlPath = path21.join(distDir, "index.html");
+    const distDir = candidateDistDirs.find((d) => fs24.existsSync(path22.join(d, "index.html"))) || candidateDistDirs[0];
+    const indexHtmlPath = path22.join(distDir, "index.html");
     const getRuntimeSpaHtml = async () => {
-      if (!fs23.existsSync(indexHtmlPath)) return null;
-      const rawHtml = fs23.readFileSync(indexHtmlPath, "utf8");
+      if (!fs24.existsSync(indexHtmlPath)) return null;
+      const rawHtml = fs24.readFileSync(indexHtmlPath, "utf8");
       let metaDomainCode = "";
       let metaPixelId = "";
       try {
@@ -29052,9 +30958,11 @@ async function startServer() {
   }
   httpServer.listen(port, "0.0.0.0", () => {
     console.log(`[TORIWEAR] Enterprise Platform server & WebSocket running on http://0.0.0.0:${port}`);
+    mediaCleanupService.startBackgroundSweeper();
   });
   const shutdown = async (signal) => {
     console.log(`[SERVER] Received ${signal}. Draining connections and shutting down gracefully...`);
+    mediaCleanupService.stopBackgroundSweeper();
     httpServer.close(async () => {
       console.log("[SERVER] Closed HTTP & WebSocket connections.");
       try {
