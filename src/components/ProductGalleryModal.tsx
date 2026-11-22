@@ -152,7 +152,7 @@ export const ProductGalleryModal: React.FC<ProductGalleryModalProps> = ({
           {/* Top Bar */}
           <div className="w-full flex items-center justify-between z-10 px-2 py-1">
             <div className="flex items-center gap-2">
-              <span className="font-heading text-sm sm:text-base font-bold text-white uppercase tracking-wider">
+              <span className="font-brush text-lg sm:text-xl font-normal text-white uppercase tracking-wide leading-tight">
                 {product.name}
               </span>
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-neutral-800 text-[#FF2028] font-bold">
@@ -344,7 +344,7 @@ export const ProductGalleryModal: React.FC<ProductGalleryModalProps> = ({
                     </div>
                   </div>
 
-                  <h1 className="text-2xl sm:text-3xl font-heading font-black text-white mt-1 uppercase tracking-tight">
+                  <h1 className="text-3xl sm:text-4xl font-brush font-normal text-white mt-1 uppercase tracking-wide leading-tight">
                     {product.name}
                   </h1>
 

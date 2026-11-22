@@ -189,7 +189,7 @@ export const CircleImageBox: React.FC<CircleImageBoxProps> = ({
 
         {/* Product Title */}
         <h3
-          className={`mt-1 font-sans text-xs sm:text-sm font-semibold tracking-tight line-clamp-1 transition ${
+          className={`mt-1 font-brush text-base sm:text-lg font-normal tracking-wide leading-tight line-clamp-1 transition ${
             isLight
               ? 'text-neutral-900 group-hover:text-sky-600'
               : 'text-white group-hover:text-neutral-200'

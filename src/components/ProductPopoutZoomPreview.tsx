@@ -88,6 +88,7 @@ export const ProductPopoutZoomPreview: React.FC<ProductPopoutZoomPreviewProps> =
           alt={product.name}
           enableHoverMagnify={true}
           hoverZoomScale={2.0}
+          wheelZoomMode="always"
           showToolbar={true}
           onSwipeNext={() => setSelectedImgIndex((prev) => (prev === imagesCount - 1 ? 0 : prev + 1))}
           onSwipePrev={() => setSelectedImgIndex((prev) => (prev === 0 ? imagesCount - 1 : prev - 1))}
@@ -183,7 +184,7 @@ export const ProductPopoutZoomPreview: React.FC<ProductPopoutZoomPreviewProps> =
               </button>
             </div>
 
-            <h3 className="font-heading text-lg sm:text-xl font-black text-white uppercase tracking-tight">
+            <h3 className="font-brush text-2xl sm:text-3xl font-normal text-white uppercase tracking-wide leading-tight">
               {product.name}
             </h3>
 

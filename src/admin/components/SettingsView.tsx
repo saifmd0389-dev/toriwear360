@@ -21,6 +21,8 @@ import {
   ShieldCheck,
   Share2,
   Loader2,
+  Sparkles,
+  Clock,
 } from 'lucide-react';
 import { LogisticsPartnersManager } from './logistics/LogisticsPartnersManager';
 import { RazorpayConfigView } from './payments/RazorpayConfigView';
@@ -126,6 +128,20 @@ export const SettingsView: React.FC = () => {
     const nextVal = typeof targetValue === 'boolean' ? targetValue : !form.maintenanceMode;
     setForm((prev) => ({ ...prev, maintenanceMode: nextVal }));
     updateSettings({ maintenanceMode: nextVal });
+  };
+
+  const handleToggleTwinCombo = (targetValue?: boolean) => {
+    const current = form.twinComboEnabled !== false;
+    const nextVal = typeof targetValue === 'boolean' ? targetValue : !current;
+    setForm((prev) => ({ ...prev, twinComboEnabled: nextVal }));
+    updateSettings({ twinComboEnabled: nextVal });
+  };
+
+  const handleToggleKidsComingSoon = (targetValue?: boolean) => {
+    const current = Boolean(form.kidsComingSoon);
+    const nextVal = typeof targetValue === 'boolean' ? targetValue : !current;
+    setForm((prev) => ({ ...prev, kidsComingSoon: nextVal }));
+    updateSettings({ kidsComingSoon: nextVal });
   };
 
   const handleMoveChannel = (index: number, delta: -1 | 1) => {
@@ -597,6 +613,129 @@ export const SettingsView: React.FC = () => {
                   className="self-start px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold transition-colors cursor-pointer"
                 >
                   Open Logistics Partners Tab →
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 4b: Storefront Feature Launch Controls (Twin Combo & Shop for Kids Coming Soon) */}
+          <div className="bg-[#14141c] border border-neutral-800 rounded-2xl p-6 space-y-4">
+            <div className="border-b border-neutral-800 pb-3">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-amber-400" />
+                <span>Storefront Feature Launch Controls</span>
+              </h3>
+              <p className="text-neutral-400 text-xs">
+                Enable or disable upcoming storefront features live without touching code or product inventory.
+              </p>
+            </div>
+
+            {/* Toggle 1: Men & Kid Twin Combo (-10%) */}
+            <div
+              onClick={() => handleToggleTwinCombo()}
+              className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-4 select-none ${
+                form.twinComboEnabled !== false
+                  ? 'bg-emerald-950/20 border-emerald-600/40'
+                  : 'bg-neutral-900/80 border-neutral-800 hover:border-neutral-700'
+              }`}
+            >
+              <div className="flex items-start sm:items-center gap-3">
+                <div
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                    form.twinComboEnabled !== false
+                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                      : 'bg-neutral-800 text-neutral-400'
+                  }`}
+                >
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-white text-sm">Men &amp; Kid Twin Combo (-10%)</span>
+                    <span
+                      className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase tracking-wider ${
+                        form.twinComboEnabled !== false
+                          ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                          : 'bg-neutral-800 text-neutral-400 border border-neutral-700'
+                      }`}
+                    >
+                      {form.twinComboEnabled !== false ? 'ENABLED: VISIBLE ON STOREFRONT' : 'DISABLED: HIDDEN'}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-neutral-400 mt-0.5">
+                    Controls the <strong className="text-neutral-200">&ldquo;TRY MEN &amp; KID TWIN COMBO -10%&rdquo;</strong> badge on product cards, Hero CTA, and Twinning Spotlight.
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 self-end sm:self-auto shrink-0" onClick={(e) => e.stopPropagation()}>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={form.twinComboEnabled !== false}
+                  onClick={() => handleToggleTwinCombo()}
+                  className={`px-3.5 py-1.5 rounded-lg font-bold text-xs transition cursor-pointer border ${
+                    form.twinComboEnabled !== false
+                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500'
+                      : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border-neutral-700'
+                  }`}
+                >
+                  {form.twinComboEnabled !== false ? 'Enabled — Click to Disable' : 'Disabled — Click to Enable'}
+                </button>
+              </div>
+            </div>
+
+            {/* Toggle 2: Shop for Kids Coming Soon Mode */}
+            <div
+              onClick={() => handleToggleKidsComingSoon()}
+              className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-4 select-none ${
+                form.kidsComingSoon
+                  ? 'bg-sky-950/30 border-sky-500/60'
+                  : 'bg-neutral-900/80 border-neutral-800 hover:border-neutral-700'
+              }`}
+            >
+              <div className="flex items-start sm:items-center gap-3">
+                <div
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                    form.kidsComingSoon
+                      ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30'
+                      : 'bg-neutral-800 text-neutral-400'
+                  }`}
+                >
+                  <Clock className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-white text-sm">Shop for Kids — Coming Soon Mode</span>
+                    <span
+                      className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase tracking-wider ${
+                        form.kidsComingSoon
+                          ? 'bg-sky-500/20 text-sky-300 border border-sky-400/40'
+                          : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                      }`}
+                    >
+                      {form.kidsComingSoon ? 'COMING SOON ACTIVE' : 'LIVE CATALOG: PUBLIC'}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-neutral-400 mt-0.5">
+                    When enabled, <strong className="text-neutral-200">Shop Kids</strong> shows a <strong className="text-neutral-200">&ldquo;Coming Soon&rdquo;</strong> badge and preview screen instead of the live Kids catalog.
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 self-end sm:self-auto shrink-0" onClick={(e) => e.stopPropagation()}>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={Boolean(form.kidsComingSoon)}
+                  onClick={() => handleToggleKidsComingSoon()}
+                  className={`px-3.5 py-1.5 rounded-lg font-bold text-xs transition cursor-pointer border ${
+                    form.kidsComingSoon
+                      ? 'bg-sky-600 hover:bg-sky-500 text-white border-sky-400'
+                      : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border-neutral-700'
+                  }`}
+                >
+                  {form.kidsComingSoon ? 'Coming Soon ON — Click to Disable' : 'Coming Soon OFF — Click to Enable'}
                 </button>
               </div>
             </div>

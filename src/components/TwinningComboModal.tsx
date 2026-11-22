@@ -161,7 +161,7 @@ export const TwinningComboModal: React.FC<TwinningComboModalProps> = ({
             </div>
 
             <div>
-              <h3 className="font-heading text-base sm:text-lg font-black text-white uppercase">
+              <h3 className="font-brush text-2xl font-normal text-white uppercase tracking-wide leading-tight">
                 {menProduct.name}
               </h3>
               <div className="mt-1 flex items-baseline gap-2">
@@ -224,7 +224,7 @@ export const TwinningComboModal: React.FC<TwinningComboModalProps> = ({
             </div>
 
             <div>
-              <h3 className="font-heading text-base sm:text-lg font-black text-white uppercase">
+              <h3 className="font-brush text-2xl font-normal text-white uppercase tracking-wide leading-tight">
                 {kidsProduct.name}
               </h3>
               <div className="mt-1 flex items-baseline gap-2">

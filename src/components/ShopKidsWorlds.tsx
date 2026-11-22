@@ -555,7 +555,7 @@ export const ShopKidsWorlds: React.FC<ShopKidsWorldsProps> = ({
                     <div>
                       <h4
                         onClick={() => onOpenProductDetail(product)}
-                        className="font-sans text-sm font-semibold text-neutral-950 tracking-tight group-hover:text-sky-600 transition cursor-pointer line-clamp-1"
+                        className="font-brush text-xl sm:text-2xl font-normal text-neutral-950 tracking-wide leading-tight group-hover:text-sky-600 transition cursor-pointer line-clamp-1"
                       >
                         {product.name}
                       </h4>

@@ -1,15 +1,32 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { ZoomIn, ZoomOut, RotateCcw, Maximize2 } from 'lucide-react';
+import {
+  type ZoomTransformState,
+  clampZoomPan,
+  clampZoomScale,
+  computeHoverMagnifyTransform,
+  computePinchTransform,
+  computeZoomTowardFocalPoint,
+  dampTransformStep,
+  normalizeWheelZoomFactor,
+} from '../utils/zoomMath';
 
 interface ProductZoomViewerProps {
   src: string;
   alt: string;
   className?: string;
   imageClassName?: string;
+  minScale?: number;
   maxScale?: number;
   initialScale?: number;
   hoverZoomScale?: number;
   enableHoverMagnify?: boolean;
+  /**
+   * 'smart' (default): Prevents page scrolling only when actively zooming (trackpad pinch,
+   * Ctrl+wheel, or while already zoomed/hover-magnified) and lets normal page scrolling pass through.
+   * 'always': For lightbox / popout modals where page scrolling is locked and wheel always zooms.
+   */
+  wheelZoomMode?: 'smart' | 'always';
   showToolbar?: boolean;
   onExpandClick?: () => void;
   onSwipeNext?: () => void;
@@ -25,15 +42,35 @@ export function getHighResProductImageUrl(url: string): string {
   return url;
 }
 
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest('button, a, input, select, textarea, [data-zoom-control="true"]'));
+}
+
+function supportsFineHoverPointer(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return true;
+  }
+  return window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+}
+
+const SMOOTH_LAMBDA = 18;
+const DIRECT_LAMBDA = 40;
+const ZOOM_EPSILON = 0.01;
+const PAGE_SCROLL_GUARD_MS = 280;
+const MIN_ZOOM_INERTIA_GUARD_MS = 220;
+
 export const ProductZoomViewer: React.FC<ProductZoomViewerProps> = ({
   src,
   alt,
   className = '',
   imageClassName = 'w-full h-full object-contain',
+  minScale = 1,
   maxScale = 3.5,
   initialScale = 1,
   hoverZoomScale = 2.0,
   enableHoverMagnify = false,
+  wheelZoomMode = 'smart',
   showToolbar = true,
   onExpandClick,
   onSwipeNext,
@@ -41,212 +78,619 @@ export const ProductZoomViewer: React.FC<ProductZoomViewerProps> = ({
   children,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [scale, setScale] = useState<number>(initialScale);
-  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [originPct, setOriginPct] = useState<{ x: number; y: number }>({ x: 50, y: 50 });
-  const [isHovering, setIsHovering] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
 
+  const safeInitialScale = clampZoomScale(initialScale, minScale, maxScale);
+
+  // Minimal React UI state (updated only on meaningful discrete changes, never per-frame)
+  const [displayPercent, setDisplayPercent] = useState<number>(() => Math.round(safeInitialScale * 100));
+  const [isManualZoomed, setIsManualZoomed] = useState<boolean>(() => safeInitialScale > minScale + ZOOM_EPSILON);
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const [hasLoadedHighRes, setHasLoadedHighRes] = useState<boolean>(() => safeInitialScale > minScale + ZOOM_EPSILON);
+
+  // Authoritative rAF animation state (mutated without forcing React re-renders on every input event)
+  const currentRef = useRef<ZoomTransformState>({ scale: safeInitialScale, x: 0, y: 0 });
+  const targetRef = useRef<ZoomTransformState>({ scale: safeInitialScale, x: 0, y: 0 });
+  const rafIdRef = useRef<number | null>(null);
+  const lastFrameTimeRef = useRef<number>(0);
+  const activeLambdaRef = useRef<number>(SMOOTH_LAMBDA);
+  const lastReportedPercentRef = useRef<number>(Math.round(safeInitialScale * 100));
+
+  // Interaction mode refs
+  const manualZoomActiveRef = useRef<boolean>(safeInitialScale > minScale + ZOOM_EPSILON);
+  const hoverActiveRef = useRef<boolean>(false);
+  const hoverSuppressedRef = useRef<boolean>(false);
+  const isDraggingRef = useRef<boolean>(false);
   const dragOriginRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const lastTouchAtRef = useRef<number>(0);
+  const lastPageScrollAtRef = useRef<number>(0);
+  const zoomOutHitMinAtRef = useRef<number>(0);
+
+  // Touch gesture refs
+  const pinchStateRef = useRef<{
+    startDist: number;
+    startMidX: number;
+    startMidY: number;
+    startTransform: ZoomTransformState;
+  } | null>(null);
   const touchPanStartRef = useRef<{ x: number; y: number } | null>(null);
-  const pinchStartDistRef = useRef<number | null>(null);
-  const pinchStartScaleRef = useRef<number>(1);
   const swipeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const hadPinchInGestureRef = useRef<boolean>(false);
   const lastTapTimeRef = useRef<number>(0);
 
+  // Keep latest callbacks in refs so native DOM listeners stay cleanly bound without churn
+  const onSwipeNextRef = useRef(onSwipeNext);
+  const onSwipePrevRef = useRef(onSwipePrev);
   useEffect(() => {
-    setScale(initialScale);
-    setPan({ x: 0, y: 0 });
-    setOriginPct({ x: 50, y: 50 });
-  }, [src, initialScale]);
+    onSwipeNextRef.current = onSwipeNext;
+    onSwipePrevRef.current = onSwipePrev;
+  }, [onSwipeNext, onSwipePrev]);
 
-  const clampScale = useCallback(
-    (next: number) => Math.max(1, Math.min(maxScale, Number(next.toFixed(2)))),
-    [maxScale]
+  const applyTransformToDom = useCallback((state: ZoomTransformState) => {
+    const imgEl = imgRef.current;
+    if (imgEl) {
+      imgEl.style.transform = `translate3d(${state.x.toFixed(3)}px, ${state.y.toFixed(3)}px, 0) scale(${state.scale.toFixed(4)})`;
+    }
+    const nextPct = Math.round(state.scale * 100);
+    if (nextPct !== lastReportedPercentRef.current) {
+      lastReportedPercentRef.current = nextPct;
+      setDisplayPercent(nextPct);
+    }
+    if (state.scale > minScale + ZOOM_EPSILON) {
+      setHasLoadedHighRes((prev) => (prev ? prev : true));
+    }
+  }, [minScale]);
+
+  const stopAnimation = useCallback(() => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    lastFrameTimeRef.current = 0;
+  }, []);
+
+  const scheduleAnimation = useCallback(
+    (lambda: number = SMOOTH_LAMBDA) => {
+      activeLambdaRef.current = lambda;
+      if (rafIdRef.current !== null) return;
+
+      const tick = (now: number) => {
+        const dt = lastFrameTimeRef.current > 0 ? (now - lastFrameTimeRef.current) / 1000 : 1 / 60;
+        lastFrameTimeRef.current = now;
+
+        const { next, settled } = dampTransformStep(
+          currentRef.current,
+          targetRef.current,
+          dt,
+          activeLambdaRef.current
+        );
+        currentRef.current = next;
+        applyTransformToDom(next);
+
+        if (settled) {
+          rafIdRef.current = null;
+          lastFrameTimeRef.current = 0;
+        } else {
+          rafIdRef.current = requestAnimationFrame(tick);
+        }
+      };
+
+      rafIdRef.current = requestAnimationFrame(tick);
+    },
+    [applyTransformToDom]
   );
 
-  const clampPan = useCallback(
-    (nextX: number, nextY: number, activeScale: number) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      const maxX = rect ? (rect.width * (activeScale - 1)) / 2 : 260;
-      const maxY = rect ? (rect.height * (activeScale - 1)) / 2 : 260;
-      return {
-        x: Math.max(-maxX, Math.min(maxX, nextX)),
-        y: Math.max(-maxY, Math.min(maxY, nextY)),
-      };
+  const setTransformImmediate = useCallback(
+    (next: ZoomTransformState) => {
+      stopAnimation();
+      currentRef.current = { ...next };
+      targetRef.current = { ...next };
+      applyTransformToDom(next);
+    },
+    [stopAnimation, applyTransformToDom]
+  );
+
+  const setTransformTarget = useCallback(
+    (next: ZoomTransformState, lambda: number = SMOOTH_LAMBDA) => {
+      targetRef.current = { ...next };
+      scheduleAnimation(lambda);
+    },
+    [scheduleAnimation]
+  );
+
+  const updateManualZoomFlag = useCallback(
+    (active: boolean) => {
+      manualZoomActiveRef.current = active;
+      setIsManualZoomed(active);
     },
     []
   );
 
-  const resetZoom = useCallback(() => {
-    setScale(1);
-    setPan({ x: 0, y: 0 });
-    setOriginPct({ x: 50, y: 50 });
-    setIsDragging(false);
+  const getContainerRect = useCallback(() => {
+    return containerRef.current?.getBoundingClientRect() || null;
   }, []);
 
+  const resetZoom = useCallback(
+    (suppressHoverUntilLeave = true) => {
+      hoverActiveRef.current = false;
+      if (suppressHoverUntilLeave) {
+        hoverSuppressedRef.current = true;
+      }
+      isDraggingRef.current = false;
+      setIsDragging(false);
+      updateManualZoomFlag(false);
+      setTransformTarget({ scale: minScale, x: 0, y: 0 }, SMOOTH_LAMBDA);
+    },
+    [minScale, setTransformTarget, updateManualZoomFlag]
+  );
+
+  // Reset cleanly whenever image src or initialScale changes (e.g. gallery slide change)
+  useEffect(() => {
+    const clampedInit = clampZoomScale(initialScale, minScale, maxScale);
+    hoverActiveRef.current = false;
+    hoverSuppressedRef.current = false;
+    isDraggingRef.current = false;
+    pinchStateRef.current = null;
+    touchPanStartRef.current = null;
+    swipeStartRef.current = null;
+    hadPinchInGestureRef.current = false;
+    setIsDragging(false);
+    setHasLoadedHighRes(clampedInit > minScale + ZOOM_EPSILON);
+    updateManualZoomFlag(clampedInit > minScale + ZOOM_EPSILON);
+    setTransformImmediate({ scale: clampedInit, x: 0, y: 0 });
+  }, [src, initialScale, minScale, maxScale, setTransformImmediate, updateManualZoomFlag]);
+
+  // Cleanup animation frame on unmount
+  useEffect(() => {
+    return () => stopAnimation();
+  }, [stopAnimation]);
+
+  // Track normal page scrolling so hover magnification never hijacks an active page scroll
+  useEffect(() => {
+    if (wheelZoomMode === 'always') return;
+    const onWindowScroll = () => {
+      lastPageScrollAtRef.current = performance.now();
+    };
+    window.addEventListener('scroll', onWindowScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onWindowScroll);
+  }, [wheelZoomMode]);
+
+  // Keep pan offsets clamped on responsive container resizes (e.g., orientation / viewport change)
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const clampedTarget = clampZoomPan(targetRef.current.x, targetRef.current.y, targetRef.current.scale, {
+        width: rect.width,
+        height: rect.height,
+      });
+      if (clampedTarget.x !== targetRef.current.x || clampedTarget.y !== targetRef.current.y) {
+        targetRef.current = {
+          scale: targetRef.current.scale,
+          x: clampedTarget.x,
+          y: clampedTarget.y,
+        };
+        scheduleAnimation(SMOOTH_LAMBDA);
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [scheduleAnimation]);
+
+  // Escape key resets zoom when zoomed in
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && scale > 1) {
-        resetZoom();
+      if (e.key === 'Escape' && (manualZoomActiveRef.current || targetRef.current.scale > minScale + ZOOM_EPSILON)) {
+        resetZoom(true);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [scale, resetZoom]);
+  }, [minScale, resetZoom]);
 
-  // Effective transform scale (supports desktop cursor-follow hover magnification when scale === 1)
-  const isHoverActive = enableHoverMagnify && isHovering && scale === 1;
-  const activeScale = isHoverActive ? hoverZoomScale : scale;
-  const highResSrc = activeScale > 1 ? getHighResProductImageUrl(src) : src;
+  // Zoom around a viewport point (clientX, clientY), or center if omitted
+  const zoomToScaleAtPoint = useCallback(
+    (desiredScale: number, clientX?: number, clientY?: number, lambda: number = SMOOTH_LAMBDA) => {
+      const rect = getContainerRect();
+      const size = rect ? { width: rect.width, height: rect.height } : { width: 400, height: 400 };
+      const focalX = rect && typeof clientX === 'number' ? clientX - (rect.left + rect.width / 2) : 0;
+      const focalY = rect && typeof clientY === 'number' ? clientY - (rect.top + rect.height / 2) : 0;
+
+      const next = computeZoomTowardFocalPoint(
+        targetRef.current,
+        desiredScale,
+        focalX,
+        focalY,
+        size,
+        minScale,
+        maxScale
+      );
+
+      hoverActiveRef.current = false;
+      hoverSuppressedRef.current = true;
+
+      if (next.scale <= minScale + ZOOM_EPSILON) {
+        updateManualZoomFlag(false);
+        setTransformTarget({ scale: minScale, x: 0, y: 0 }, lambda);
+      } else {
+        updateManualZoomFlag(true);
+        setTransformTarget(next, lambda);
+      }
+    },
+    [getContainerRect, maxScale, minScale, setTransformTarget, updateManualZoomFlag]
+  );
+
+  // Native non-passive wheel & touch listeners (required so preventDefault works cleanly only when zooming/panning)
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const handleNativeWheel = (e: WheelEvent) => {
+      const now = performance.now();
+      const factor = normalizeWheelZoomFactor(e.deltaY, e.deltaX, e.deltaMode, e.ctrlKey);
+      if (factor === null) {
+        return;
+      }
+
+      const isPinchWheel = e.ctrlKey;
+      const isCurrentlyZoomed =
+        manualZoomActiveRef.current ||
+        hoverActiveRef.current ||
+        targetRef.current.scale > minScale + ZOOM_EPSILON;
+
+      if (wheelZoomMode === 'smart') {
+        // If user is in the middle of scrolling the page and not manually zoomed, never hijack scroll
+        const recentlyScrolledPage = now - lastPageScrollAtRef.current < PAGE_SCROLL_GUARD_MS;
+        if (!isPinchWheel && !manualZoomActiveRef.current && recentlyScrolledPage) {
+          return;
+        }
+
+        // Brief inertia guard immediately after wheel-zooming back to 1.0x so trackpad momentum
+        // doesn't abruptly jolt the page down at the end of a zoom-out gesture
+        if (!isPinchWheel && !isCurrentlyZoomed) {
+          if (e.deltaY > 0 && now - zoomOutHitMinAtRef.current < MIN_ZOOM_INERTIA_GUARD_MS) {
+            e.preventDefault();
+            return;
+          }
+          // When page is already at the very top (cannot scroll further up) and user scrolls up over the image,
+          // allow smooth zoom-in without conflicting with page scrolling.
+          const canZoomInAtPageTop = e.deltaY < 0 && typeof window !== 'undefined' && window.scrollY <= 1;
+          if (!canZoomInAtPageTop) {
+            // Not actively zoomed and not pinching: let normal page scrolling proceed uninterrupted
+            return;
+          }
+        }
+      }
+
+      // Actively zooming: prevent unwanted page scroll and browser pinch-zoom
+      e.preventDefault();
+
+      const prevScale = targetRef.current.scale;
+      const desiredScale = clampZoomScale(prevScale * factor, minScale, maxScale);
+
+      // If already clamped at minScale in smart mode while scrolling out, allow settling cleanly
+      if (desiredScale <= minScale + ZOOM_EPSILON) {
+        if (prevScale > minScale + ZOOM_EPSILON) {
+          zoomOutHitMinAtRef.current = now;
+        }
+        hoverActiveRef.current = false;
+        hoverSuppressedRef.current = true;
+        updateManualZoomFlag(false);
+        setTransformTarget({ scale: minScale, x: 0, y: 0 }, SMOOTH_LAMBDA);
+        return;
+      }
+
+      zoomToScaleAtPoint(desiredScale, e.clientX, e.clientY, SMOOTH_LAMBDA);
+    };
+
+    const handleNativeTouchStart = (e: TouchEvent) => {
+      lastTouchAtRef.current = performance.now();
+      if (isInteractiveTarget(e.target)) return;
+
+      // Cancel any hover magnification on touch interaction
+      if (hoverActiveRef.current) {
+        hoverActiveRef.current = false;
+      }
+
+      const t0 = e.touches[0];
+      const t1 = e.touches[1];
+
+      if (e.touches.length === 2 && t0 && t1) {
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const startDist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+        const startMidX = (t0.clientX + t1.clientX) / 2 - cx;
+        const startMidY = (t0.clientY + t1.clientY) / 2 - cy;
+
+        // Snapshot exact current transform to start pinch seamlessly with zero jump
+        const snapshot = { ...currentRef.current };
+        targetRef.current = { ...snapshot };
+        pinchStateRef.current = {
+          startDist: Math.max(1, startDist),
+          startMidX,
+          startMidY,
+          startTransform: snapshot,
+        };
+        hadPinchInGestureRef.current = true;
+        touchPanStartRef.current = null;
+        swipeStartRef.current = null;
+        return;
+      }
+
+      if (e.touches.length === 1 && t0) {
+        hadPinchInGestureRef.current = false;
+        const now = Date.now();
+        if (now - lastTapTimeRef.current < 280) {
+          lastTapTimeRef.current = 0;
+          if (manualZoomActiveRef.current && targetRef.current.scale > minScale + 0.05) {
+            resetZoom(true);
+          } else {
+            zoomToScaleAtPoint(Math.min(maxScale, 2.2), t0.clientX, t0.clientY, SMOOTH_LAMBDA);
+          }
+          swipeStartRef.current = null;
+          touchPanStartRef.current = null;
+          return;
+        }
+        lastTapTimeRef.current = now;
+
+        if (targetRef.current.scale > minScale + ZOOM_EPSILON) {
+          touchPanStartRef.current = {
+            x: t0.clientX - targetRef.current.x,
+            y: t0.clientY - targetRef.current.y,
+          };
+          swipeStartRef.current = null;
+        } else {
+          touchPanStartRef.current = null;
+          swipeStartRef.current = { x: t0.clientX, y: t0.clientY };
+        }
+      }
+    };
+
+    const handleNativeTouchMove = (e: TouchEvent) => {
+      lastTouchAtRef.current = performance.now();
+      const t0 = e.touches[0];
+      const t1 = e.touches[1];
+
+      // Two-finger smooth focal pinch-to-zoom + simultaneous two-finger pan
+      if (e.touches.length === 2 && t0 && t1 && pinchStateRef.current) {
+        e.preventDefault();
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const currentDist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+        const currentMidX = (t0.clientX + t1.clientX) / 2 - cx;
+        const currentMidY = (t0.clientY + t1.clientY) / 2 - cy;
+
+        const next = computePinchTransform(
+          pinchStateRef.current.startTransform,
+          pinchStateRef.current.startDist,
+          currentDist,
+          pinchStateRef.current.startMidX,
+          pinchStateRef.current.startMidY,
+          currentMidX,
+          currentMidY,
+          { width: rect.width, height: rect.height },
+          minScale,
+          maxScale
+        );
+
+        hoverActiveRef.current = false;
+        hoverSuppressedRef.current = true;
+        updateManualZoomFlag(next.scale > minScale + ZOOM_EPSILON);
+        setTransformTarget(next, DIRECT_LAMBDA);
+        return;
+      }
+
+      // Single-finger pan when zoomed in
+      if (e.touches.length === 1 && t0 && targetRef.current.scale > minScale + ZOOM_EPSILON && touchPanStartRef.current) {
+        e.preventDefault();
+        const rect = el.getBoundingClientRect();
+        const clamped = clampZoomPan(
+          t0.clientX - touchPanStartRef.current.x,
+          t0.clientY - touchPanStartRef.current.y,
+          targetRef.current.scale,
+          { width: rect.width, height: rect.height }
+        );
+        setTransformTarget(
+          { scale: targetRef.current.scale, x: clamped.x, y: clamped.y },
+          DIRECT_LAMBDA
+        );
+      }
+    };
+
+    const handleNativeTouchEnd = (e: TouchEvent) => {
+      lastTouchAtRef.current = performance.now();
+
+      // Seamless transition from 2 fingers -> 1 finger while still zoomed: re-anchor pan without jumping
+      if (e.touches.length === 1 && pinchStateRef.current) {
+        const remaining = e.touches[0];
+        pinchStateRef.current = null;
+        if (remaining && targetRef.current.scale > minScale + ZOOM_EPSILON) {
+          touchPanStartRef.current = {
+            x: remaining.clientX - targetRef.current.x,
+            y: remaining.clientY - targetRef.current.y,
+          };
+        } else {
+          touchPanStartRef.current = null;
+        }
+        return;
+      }
+
+      if (e.touches.length === 0) {
+        pinchStateRef.current = null;
+        touchPanStartRef.current = null;
+
+        // Settle cleanly to 1.0x if released right near the floor
+        if (targetRef.current.scale <= minScale + 0.03) {
+          updateManualZoomFlag(false);
+          setTransformTarget({ scale: minScale, x: 0, y: 0 }, SMOOTH_LAMBDA);
+        }
+
+        // Gallery swipe only when at 1.0x and no pinch occurred during this touch gesture
+        if (
+          !hadPinchInGestureRef.current &&
+          targetRef.current.scale <= minScale + ZOOM_EPSILON &&
+          swipeStartRef.current &&
+          e.changedTouches[0]
+        ) {
+          const dx = e.changedTouches[0].clientX - swipeStartRef.current.x;
+          const dy = e.changedTouches[0].clientY - swipeStartRef.current.y;
+          swipeStartRef.current = null;
+          if (Math.abs(dx) > 42 && Math.abs(dx) > Math.abs(dy) * 1.35) {
+            if (dx < 0) onSwipeNextRef.current?.();
+            else onSwipePrevRef.current?.();
+          }
+        } else {
+          swipeStartRef.current = null;
+        }
+        hadPinchInGestureRef.current = false;
+      }
+    };
+
+    // Prevent Safari native gesture zoom while pinching over the image
+    const preventSafariGesture = (e: Event) => {
+      e.preventDefault();
+    };
+
+    el.addEventListener('wheel', handleNativeWheel, { passive: false });
+    el.addEventListener('touchstart', handleNativeTouchStart, { passive: true });
+    el.addEventListener('touchmove', handleNativeTouchMove, { passive: false });
+    el.addEventListener('touchend', handleNativeTouchEnd, { passive: true });
+    el.addEventListener('touchcancel', handleNativeTouchEnd, { passive: true });
+    el.addEventListener('gesturestart', preventSafariGesture, { passive: false });
+    el.addEventListener('gesturechange', preventSafariGesture, { passive: false });
+
+    return () => {
+      el.removeEventListener('wheel', handleNativeWheel);
+      el.removeEventListener('touchstart', handleNativeTouchStart);
+      el.removeEventListener('touchmove', handleNativeTouchMove);
+      el.removeEventListener('touchend', handleNativeTouchEnd);
+      el.removeEventListener('touchcancel', handleNativeTouchEnd);
+      el.removeEventListener('gesturestart', preventSafariGesture);
+      el.removeEventListener('gesturechange', preventSafariGesture);
+    };
+  }, [maxScale, minScale, resetZoom, setTransformTarget, updateManualZoomFlag, wheelZoomMode, zoomToScaleAtPoint]);
+
+  // Window-bound mouse drag listeners so panning stays smooth even if pointer crosses container edge
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleWindowMouseMove = (e: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      const rect = getContainerRect();
+      if (!rect) return;
+      const clamped = clampZoomPan(
+        e.clientX - dragOriginRef.current.x,
+        e.clientY - dragOriginRef.current.y,
+        targetRef.current.scale,
+        { width: rect.width, height: rect.height }
+      );
+      setTransformTarget(
+        { scale: targetRef.current.scale, x: clamped.x, y: clamped.y },
+        DIRECT_LAMBDA
+      );
+    };
+
+    const handleWindowMouseUp = () => {
+      isDraggingRef.current = false;
+      setIsDragging(false);
+    };
+
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+    };
+  }, [getContainerRect, isDragging, setTransformTarget]);
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const pctX = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
-    const pctY = Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100));
+    // Ignore synthesized mouse events right after touch input
+    if (performance.now() - lastTouchAtRef.current < 500) return;
+    if (isDraggingRef.current) return;
 
-    if (isDragging && scale > 1) {
-      const clamped = clampPan(e.clientX - dragOriginRef.current.x, e.clientY - dragOriginRef.current.y, scale);
-      setPan(clamped);
-      return;
+    // Desktop hover-magnify (only when enabled, not manually zoomed, not suppressed, and not mid-page-scroll)
+    if (
+      enableHoverMagnify &&
+      !manualZoomActiveRef.current &&
+      !hoverSuppressedRef.current &&
+      supportsFineHoverPointer()
+    ) {
+      if (wheelZoomMode === 'smart' && performance.now() - lastPageScrollAtRef.current < PAGE_SCROLL_GUARD_MS) {
+        return;
+      }
+      const rect = getContainerRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return;
+      const normX = (e.clientX - rect.left) / rect.width;
+      const normY = (e.clientY - rect.top) / rect.height;
+      hoverActiveRef.current = true;
+      const next = computeHoverMagnifyTransform(
+        normX,
+        normY,
+        hoverZoomScale,
+        { width: rect.width, height: rect.height },
+        minScale,
+        maxScale
+      );
+      setTransformTarget(next, SMOOTH_LAMBDA);
     }
-
-    setOriginPct({ x: pctX, y: pctY });
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (scale <= 1) return;
-    e.preventDefault();
-    setIsDragging(true);
-    dragOriginRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
-  };
+    if (e.button !== 0 || isInteractiveTarget(e.target)) return;
+    if (targetRef.current.scale <= minScale + ZOOM_EPSILON) return;
 
-  const handleMouseUp = () => {
-    setIsDragging(false);
+    e.preventDefault();
+    // If dragging from hover-magnify, seamlessly promote to manual zoom at exact current coordinates
+    if (!manualZoomActiveRef.current && hoverActiveRef.current) {
+      hoverActiveRef.current = false;
+      hoverSuppressedRef.current = true;
+      updateManualZoomFlag(true);
+    }
+    isDraggingRef.current = true;
+    setIsDragging(true);
+    dragOriginRef.current = {
+      x: e.clientX - targetRef.current.x,
+      y: e.clientY - targetRef.current.y,
+    };
   };
 
   const handleMouseLeave = () => {
-    setIsHovering(false);
-    setIsDragging(false);
-    if (enableHoverMagnify && scale === 1) {
-      setOriginPct({ x: 50, y: 50 });
+    // Re-enable hover magnification on next hover entry once cursor leaves
+    hoverSuppressedRef.current = false;
+    if (hoverActiveRef.current && !manualZoomActiveRef.current) {
+      hoverActiveRef.current = false;
+      setTransformTarget({ scale: minScale, x: 0, y: 0 }, SMOOTH_LAMBDA);
     }
   };
 
-  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    // Allow wheel zoom on desktop only when user hovers with Ctrl/Alt or already zoomed/enableHoverMagnify
-    if (!enableHoverMagnify && scale === 1 && !e.ctrlKey) return;
-    e.preventDefault();
-    const delta = e.deltaY < 0 ? 0.35 : -0.35;
-    setScale((prev) => {
-      const base = prev === 1 && isHoverActive ? hoverZoomScale : prev;
-      const next = clampScale(base + delta);
-      if (next <= 1) {
-        setPan({ x: 0, y: 0 });
-      }
-      return next;
-    });
-  };
-
-  const handleDoubleAction = (e?: React.SyntheticEvent) => {
-    e?.stopPropagation();
-    if (scale > 1.05) {
-      resetZoom();
+  const handleDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isInteractiveTarget(e.target)) return;
+    e.stopPropagation();
+    if (manualZoomActiveRef.current && targetRef.current.scale > minScale + 0.05) {
+      resetZoom(true);
     } else {
-      setScale(2.2);
-      setPan({ x: 0, y: 0 });
+      zoomToScaleAtPoint(Math.min(maxScale, 2.2), e.clientX, e.clientY, SMOOTH_LAMBDA);
     }
   };
 
-  const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
-    const t0 = e.touches[0];
-    const t1 = e.touches[1];
-
-    if (e.touches.length === 2 && t0 && t1) {
-      const dist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
-      pinchStartDistRef.current = dist;
-      pinchStartScaleRef.current = scale;
-      swipeStartRef.current = null;
-      return;
-    }
-
-    if (e.touches.length === 1 && t0) {
-      const now = Date.now();
-      if (now - lastTapTimeRef.current < 280) {
-        lastTapTimeRef.current = 0;
-        handleDoubleAction(e);
-        return;
-      }
-      lastTapTimeRef.current = now;
-
-      if (scale > 1) {
-        touchPanStartRef.current = { x: t0.clientX - pan.x, y: t0.clientY - pan.y };
-        swipeStartRef.current = null;
-      } else {
-        swipeStartRef.current = { x: t0.clientX, y: t0.clientY };
-      }
-    }
-  };
-
-  const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
-    const t0 = e.touches[0];
-    const t1 = e.touches[1];
-
-    if (e.touches.length === 2 && t0 && t1 && pinchStartDistRef.current) {
-      e.preventDefault();
-      const dist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
-      const ratio = dist / pinchStartDistRef.current;
-      const next = clampScale(pinchStartScaleRef.current * ratio);
-      setScale(next);
-      if (next <= 1) setPan({ x: 0, y: 0 });
-      return;
-    }
-
-    if (e.touches.length === 1 && t0 && scale > 1 && touchPanStartRef.current) {
-      e.preventDefault();
-      const clamped = clampPan(
-        t0.clientX - touchPanStartRef.current.x,
-        t0.clientY - touchPanStartRef.current.y,
-        scale
-      );
-      setPan(clamped);
-    }
-  };
-
-  const handleTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
-    pinchStartDistRef.current = null;
-    touchPanStartRef.current = null;
-
-    if (scale === 1 && swipeStartRef.current && e.changedTouches[0]) {
-      const dx = e.changedTouches[0].clientX - swipeStartRef.current.x;
-      const dy = e.changedTouches[0].clientY - swipeStartRef.current.y;
-      swipeStartRef.current = null;
-      if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy) * 1.2) {
-        if (dx < 0) onSwipeNext?.();
-        else onSwipePrev?.();
-      }
-    }
-  };
+  const highResSrc = hasLoadedHighRes ? getHighResProductImageUrl(src) : src;
 
   return (
     <div
       ref={containerRef}
-      onMouseEnter={() => setIsHovering(true)}
       onMouseMove={handleMouseMove}
       onMouseDown={handleMouseDown}
-      onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseLeave}
-      onWheel={handleWheel}
-      onDoubleClick={handleDoubleAction}
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
+      onDoubleClick={handleDoubleClick}
       style={{
-        touchAction: scale > 1 ? 'none' : 'pan-y',
+        touchAction: isManualZoomed ? 'none' : 'pan-y',
       }}
       className={`relative overflow-hidden select-none ${
-        scale > 1
+        isManualZoomed
           ? isDragging
             ? 'cursor-grabbing'
             : 'cursor-grab'
@@ -256,16 +700,15 @@ export const ProductZoomViewer: React.FC<ProductZoomViewerProps> = ({
       } ${className}`}
     >
       <img
+        ref={imgRef}
         src={highResSrc}
         alt={alt}
         referrerPolicy="no-referrer"
+        draggable={false}
         style={{
-          transformOrigin: scale > 1 ? '50% 50%' : `${originPct.x}% ${originPct.y}%`,
-          transform:
-            scale > 1
-              ? `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${activeScale})`
-              : `scale(${activeScale})`,
-          transition: isDragging || isHoverActive ? 'transform 0.08s linear' : 'transform 0.25s ease-out',
+          transformOrigin: '50% 50%',
+          transform: `translate3d(${currentRef.current.x.toFixed(3)}px, ${currentRef.current.y.toFixed(3)}px, 0) scale(${currentRef.current.scale.toFixed(4)})`,
+          transition: 'none',
         }}
         className={`${imageClassName} pointer-events-none select-none will-change-transform`}
       />
@@ -274,15 +717,16 @@ export const ProductZoomViewer: React.FC<ProductZoomViewerProps> = ({
 
       {showToolbar && (
         <div
+          data-zoom-control="true"
           onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
           className="absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-full bg-black/80 backdrop-blur-md border border-white/15 px-2 py-1 text-white text-[10px] font-mono shadow-lg"
         >
           <button
             type="button"
             onClick={() => {
-              const next = clampScale(scale - 0.5);
-              setScale(next);
-              if (next <= 1) setPan({ x: 0, y: 0 });
+              const nextScale = clampZoomScale(targetRef.current.scale - 0.5, minScale, maxScale);
+              zoomToScaleAtPoint(nextScale, undefined, undefined, SMOOTH_LAMBDA);
             }}
             className="p-1 hover:text-red-400 transition cursor-pointer"
             title="Zoom Out"
@@ -290,22 +734,25 @@ export const ProductZoomViewer: React.FC<ProductZoomViewerProps> = ({
           >
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
-          <span className="min-w-[36px] text-center font-bold">
-            {Math.round(activeScale * 100)}%
+          <span className="min-w-[36px] text-center font-bold tabular-nums">
+            {displayPercent}%
           </span>
           <button
             type="button"
-            onClick={() => setScale(clampScale(scale + 0.5))}
+            onClick={() => {
+              const nextScale = clampZoomScale(targetRef.current.scale + 0.5, minScale, maxScale);
+              zoomToScaleAtPoint(nextScale, undefined, undefined, SMOOTH_LAMBDA);
+            }}
             className="p-1 hover:text-red-400 transition cursor-pointer"
             title="Zoom In"
             aria-label="Zoom In"
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
-          {scale > 1 && (
+          {isManualZoomed && (
             <button
               type="button"
-              onClick={resetZoom}
+              onClick={() => resetZoom(true)}
               className="p-1 hover:text-amber-400 transition cursor-pointer"
               title="Reset Zoom"
               aria-label="Reset Zoom"

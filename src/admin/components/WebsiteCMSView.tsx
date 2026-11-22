@@ -22,6 +22,8 @@ import {
   BookOpen,
   Compass,
   Loader2,
+  Sparkles,
+  Clock,
 } from 'lucide-react';
 import { OfficialToriwearLogo, notifyBrandLogoUpdated } from '../../components/OfficialToriwearLogo';
 import {
@@ -44,6 +46,8 @@ export const WebsiteCMSView: React.FC = () => {
   const {
     websiteSections,
     heroSettings,
+    settings,
+    updateSettings,
     syncCmsStateLocally,
     showToast,
   } = useAdmin();
@@ -551,6 +555,69 @@ export const WebsiteCMSView: React.FC = () => {
       {/* TAB 1: HOMEPAGE SECTIONS ARCHITECTURE */}
       {activeTab === 'SECTIONS' && (
         <div className="space-y-4">
+          {/* Quick Storefront Feature Launch Toggles */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="bg-[#14141c] border border-neutral-800 rounded-2xl p-4 flex items-center justify-between gap-3">
+              <div className="flex items-start gap-3 min-w-0">
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${settings.twinComboEnabled !== false ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' : 'bg-neutral-900 text-neutral-500 border border-neutral-800'}`}>
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-xs sm:text-sm text-white">Men &amp; Kid Twin Combo (-10%)</span>
+                    <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold uppercase ${settings.twinComboEnabled !== false ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' : 'bg-neutral-800 text-neutral-400 border border-neutral-700'}`}>
+                      {settings.twinComboEnabled !== false ? 'ENABLED' : 'DISABLED'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-neutral-400 mt-0.5">
+                    Show or hide &ldquo;Try Men &amp; Kid Twin Combo -10%&rdquo; badges &amp; spotlight.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => updateSettings({ twinComboEnabled: !(settings.twinComboEnabled !== false) })}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer shrink-0 border ${
+                  settings.twinComboEnabled !== false
+                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500'
+                    : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'
+                }`}
+              >
+                {settings.twinComboEnabled !== false ? 'Disable' : 'Enable'}
+              </button>
+            </div>
+
+            <div className="bg-[#14141c] border border-neutral-800 rounded-2xl p-4 flex items-center justify-between gap-3">
+              <div className="flex items-start gap-3 min-w-0">
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${settings.kidsComingSoon ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-neutral-900 text-neutral-500 border border-neutral-800'}`}>
+                  <Clock className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-xs sm:text-sm text-white">Shop for Kids — Coming Soon</span>
+                    <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold uppercase ${settings.kidsComingSoon ? 'bg-sky-500/20 text-sky-300 border border-sky-400/40' : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'}`}>
+                      {settings.kidsComingSoon ? 'COMING SOON ON' : 'LIVE'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-neutral-400 mt-0.5">
+                    Display &ldquo;Coming Soon&rdquo; badge &amp; preview screen for Shop Kids.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => updateSettings({ kidsComingSoon: !Boolean(settings.kidsComingSoon) })}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer shrink-0 border ${
+                  settings.kidsComingSoon
+                    ? 'bg-sky-600 hover:bg-sky-500 text-white border-sky-400'
+                    : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'
+                }`}
+              >
+                {settings.kidsComingSoon ? 'Disable' : 'Enable'}
+              </button>
+            </div>
+          </div>
+
           <div className="bg-[#14141c] border border-neutral-800 rounded-2xl p-4 text-xs text-neutral-400 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <span>
               Use arrow buttons to rearrange the customer storefront render order. Toggle the eye icon to show or hide sections live.

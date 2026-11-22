@@ -189,6 +189,8 @@ cmsRouter.get(['/settings', '/cms/settings', '/admin/settings', '/admin/cms/sett
         codFee: full.codFee,
         currency: full.currency,
         maintenanceMode: full.maintenanceMode,
+        twinComboEnabled: full.twinComboEnabled !== false,
+        kidsComingSoon: Boolean(full.kidsComingSoon),
         supportEmail: full.supportEmail,
         supportPhone: full.supportPhone,
         gstNumber: full.gstNumber,

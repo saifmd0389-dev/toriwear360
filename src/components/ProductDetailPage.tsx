@@ -646,6 +646,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                   imageClassName="w-full h-full object-cover object-center"
                   enableHoverMagnify={true}
                   hoverZoomScale={1.9}
+                  wheelZoomMode="smart"
                   showToolbar={true}
                   onExpandClick={() => handleOpenZoom(activeCarouselIndex)}
                   onSwipeNext={() => handleCarouselNext()}
@@ -907,7 +908,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
             
             {/* 1. Title, Subtitle, Price */}
             <div>
-              <h1 className="text-xl sm:text-2xl font-bold text-neutral-900 tracking-tight leading-snug">
+              <h1 className="font-brush text-3xl sm:text-4xl font-normal text-neutral-900 tracking-wide leading-tight">
                 {product.name}
               </h1>
 
@@ -1456,7 +1457,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
                     </div>
                   </div>
 
-                  <h3 className="text-xs font-bold text-neutral-900 truncate group-hover:text-[#e11b23] transition">
+                  <h3 className="font-brush text-lg font-normal text-neutral-900 tracking-wide leading-tight truncate group-hover:text-[#e11b23] transition">
                     {item.name}
                   </h3>
                   <p className="text-[11px] text-neutral-500 truncate">
@@ -1505,7 +1506,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
           <div className="w-full border-b border-neutral-200 bg-white px-4 sm:px-8 py-3.5 flex items-center justify-between gap-4 shrink-0">
             <div className="min-w-0">
               <div className="flex items-center gap-2.5">
-                <h2 className="text-sm sm:text-base font-bold text-neutral-900 truncate">
+                <h2 className="font-brush text-xl sm:text-2xl font-normal text-neutral-900 tracking-wide leading-tight truncate">
                   {product.name}
                 </h2>
                 <span className="px-2 py-0.5 bg-neutral-900 text-white text-[10px] font-mono font-bold uppercase tracking-wider shrink-0">
@@ -1629,7 +1630,9 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
               className="h-full max-h-[74vh] w-full max-w-3xl aspect-[3/4] bg-neutral-950 rounded-xs shadow-2xl"
               imageClassName="w-full h-full object-contain"
               initialScale={1.5}
+              maxScale={4}
               enableHoverMagnify={true}
+              wheelZoomMode="always"
               showToolbar={true}
               onSwipeNext={() =>
                 setZoomImgIndex((prev) => (prev < galleryImages.length - 1 ? prev + 1 : 0))

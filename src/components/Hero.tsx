@@ -7,6 +7,7 @@ import { ShimmerImage } from './StorefrontSkeletons';
 
 interface HeroProps {
   isLoading?: boolean;
+  kidsComingSoon?: boolean;
   onShopMen: () => void;
   onShopKids: () => void;
   onExploreChapters?: () => void;
@@ -16,6 +17,7 @@ interface HeroProps {
 
 export const Hero: React.FC<HeroProps> = ({
   isLoading = false,
+  kidsComingSoon = false,
   onShopMen,
   onShopKids,
   onOpenCombo,
@@ -419,7 +421,13 @@ export const Hero: React.FC<HeroProps> = ({
               className="w-full sm:w-auto px-8 py-4 bg-[#151515] hover:bg-[#222222] text-white border border-neutral-700 hover:border-neutral-500 font-sans font-semibold text-sm uppercase tracking-[0.06em] rounded-xl transition active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
             >
               <span>{heroSettings?.secondaryCtaText || 'SHOP KIDS'}</span>
-              <Sparkles className="w-4 h-4 text-sky-400" />
+              {kidsComingSoon ? (
+                <span className="text-[10px] bg-sky-500/20 text-sky-300 border border-sky-400/40 px-2 py-0.5 rounded font-mono font-bold tracking-wider">
+                  COMING SOON
+                </span>
+              ) : (
+                <Sparkles className="w-4 h-4 text-sky-400" />
+              )}
             </button>
 
             {/* Tertiary CTA: TRY COMBO TWINNING */}

@@ -4,6 +4,7 @@ import { ShimmerImage } from './StorefrontSkeletons';
 
 interface DepartmentPortalsProps {
   isLoading?: boolean;
+  kidsComingSoon?: boolean;
   onShopMen: () => void;
   onShopKids: () => void;
   onOpenCombo?: () => void;
@@ -13,6 +14,7 @@ interface DepartmentPortalsProps {
 
 export const DepartmentPortals: React.FC<DepartmentPortalsProps> = ({
   isLoading = false,
+  kidsComingSoon = false,
   onShopMen,
   onShopKids,
   menCount,
@@ -122,7 +124,11 @@ export const DepartmentPortals: React.FC<DepartmentPortalsProps> = ({
               <span className="bg-sky-500 text-neutral-950 text-[11px] font-mono font-black uppercase tracking-wider px-3 py-1 rounded-full shadow-lg">
                 KIDS' COLLECTION
               </span>
-              {isLoading ? (
+              {kidsComingSoon ? (
+                <span className="bg-sky-500/20 backdrop-blur-md border border-sky-400/50 text-sky-200 text-[11px] font-mono font-bold px-3 py-1 rounded-full">
+                  COMING SOON
+                </span>
+              ) : isLoading ? (
                 <span className="h-6 w-40 rounded-full skeleton-dark border border-neutral-800" />
               ) : (
                 <span className="bg-black/80 backdrop-blur-md border border-neutral-700 text-neutral-300 text-[11px] font-mono px-3 py-1 rounded-full skeleton-reveal">
@@ -153,7 +159,7 @@ export const DepartmentPortals: React.FC<DepartmentPortalsProps> = ({
                   }}
                   className="px-6 py-3 bg-sky-400 hover:bg-sky-300 text-neutral-950 font-sans font-bold text-xs uppercase tracking-[0.06em] rounded-xl transition-all duration-300 flex items-center gap-2 shadow-xl"
                 >
-                  <span>OPEN KIDS' CATALOGUE</span>
+                  <span>{kidsComingSoon ? 'COMING SOON · PREVIEW' : "OPEN KIDS' CATALOGUE"}</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </div>

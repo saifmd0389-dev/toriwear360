@@ -157,7 +157,7 @@ export const RecentlyViewedSection: React.FC<RecentlyViewedSectionProps> = ({
                   <div>
                     <h3
                       onClick={() => onSelectProduct(product)}
-                      className="text-xs font-bold text-white tracking-tight truncate group-hover:text-red-400 transition cursor-pointer"
+                      className="font-brush text-base sm:text-lg font-normal text-white tracking-wide leading-tight truncate group-hover:text-red-400 transition cursor-pointer"
                       title={product.name}
                     >
                       {product.name}

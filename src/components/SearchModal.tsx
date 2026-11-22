@@ -204,7 +204,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                     <div className="text-[11px] font-sans text-[#FF2028] uppercase font-semibold tracking-[0.04em]">
                       {p.department} // {p.world}
                     </div>
-                    <div className="font-sans text-sm font-semibold text-white group-hover:text-[#FF2028] transition">
+                    <div className="font-brush text-lg sm:text-xl font-normal text-white tracking-wide leading-tight group-hover:text-[#FF2028] transition">
                       {p.name}
                     </div>
                     <div className="text-[11px] font-sans text-neutral-400">

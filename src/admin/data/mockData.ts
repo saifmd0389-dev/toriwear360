@@ -537,6 +537,8 @@ export const INITIAL_STORE_SETTINGS: StoreSettings = {
   expressShippingFee: 149,
   codFee: 50,
   maintenanceMode: false,
+  twinComboEnabled: true,
+  kidsComingSoon: false,
   enforceApprovedLicenseOnly: true,
   lowStockThreshold: 5,
   criticalStockThreshold: 2,

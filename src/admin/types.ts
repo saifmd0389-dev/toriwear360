@@ -566,6 +566,8 @@ export interface StoreSettings {
   expressShippingFee: number;
   codFee: number;
   maintenanceMode: boolean;
+  twinComboEnabled?: boolean;
+  kidsComingSoon?: boolean;
   enforceApprovedLicenseOnly: boolean;
   lowStockThreshold: number;
   criticalStockThreshold: number;

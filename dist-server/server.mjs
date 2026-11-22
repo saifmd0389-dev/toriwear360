@@ -275,21 +275,21 @@ function isPlaceholder(val) {
   return !lower || lower === "<from-hosting>" || lower.includes("placeholder") || lower.includes("your_") || lower === "localhost:5432";
 }
 function resolveMySqlConnectionConfig() {
-  const host = cleanEnvValue(process.env.DB_HOST);
+  const host2 = cleanEnvValue(process.env.DB_HOST);
   const portRaw = cleanEnvValue(process.env.DB_PORT);
   const database = cleanEnvValue(process.env.DB_NAME);
   const user = cleanEnvValue(process.env.DB_USER);
   const password = cleanEnvValue(process.env.DB_PASSWORD);
-  if (host && database && user && !isPlaceholder(host) && !isPlaceholder(database) && !isPlaceholder(user)) {
+  if (host2 && database && user && !isPlaceholder(host2) && !isPlaceholder(database) && !isPlaceholder(user)) {
     const parsedPort = parseInt(portRaw || "3306", 10);
     const port2 = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3306;
     const sslSuffix = cleanEnvValue(process.env.DB_SSL).toLowerCase() === "true" ? "?sslaccept=strict" : "";
-    const url = `mysql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port2}/${encodeURIComponent(database)}${sslSuffix}`;
+    const url = `mysql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host2}:${port2}/${encodeURIComponent(database)}${sslSuffix}`;
     process.env.DATABASE_URL = url;
     return {
       configured: true,
       url,
-      params: { host, port: port2, user, password, database },
+      params: { host: host2, port: port2, user, password, database },
       source: "db_env_vars"
     };
   }
@@ -4501,6 +4501,65 @@ async function insertPermanentRetiredTombstoneInTx(tx, tombstone) {
   }
   throw new MediaCoordinationUnavailableError("Prisma transaction client cannot insert permanent tombstone.");
 }
+function cleanEnvFlag(raw) {
+  let val = String(raw || "").trim();
+  if (val.startsWith('"') && val.endsWith('"') && val.length >= 2 || val.startsWith("'") && val.endsWith("'") && val.length >= 2) {
+    val = val.slice(1, -1).trim();
+  }
+  return val;
+}
+function isPlaceholderEnvValue(val) {
+  const lower = val.toLowerCase();
+  return !lower || lower === "<from-hosting>" || lower.includes("placeholder") || lower.includes("your_") || lower === "localhost:5432";
+}
+function evaluateMySqlCoordinationExpectation(env = process.env) {
+  const rawUseMysql = cleanEnvFlag(env.USE_MYSQL).toLowerCase();
+  if (rawUseMysql === "false" || rawUseMysql === "0" || rawUseMysql === "no") {
+    return {
+      mysqlExpected: false,
+      explicitlyDisabled: true,
+      reason: "USE_MYSQL=false explicitly configured (single-process local coordination)"
+    };
+  }
+  if (rawUseMysql !== "") {
+    return {
+      mysqlExpected: true,
+      explicitlyDisabled: false,
+      reason: rawUseMysql === "true" || rawUseMysql === "1" || rawUseMysql === "yes" ? "USE_MYSQL=true explicitly configured" : `Non-false USE_MYSQL="${rawUseMysql}" requires MySQL coordination`
+    };
+  }
+  const dbHost = cleanEnvFlag(env.DB_HOST);
+  const dbName = cleanEnvFlag(env.DB_NAME);
+  const dbUser = cleanEnvFlag(env.DB_USER);
+  if (!isPlaceholderEnvValue(dbHost) || !isPlaceholderEnvValue(dbName) || !isPlaceholderEnvValue(dbUser)) {
+    return {
+      mysqlExpected: true,
+      explicitlyDisabled: false,
+      reason: "MySQL DB_* environment variables are configured"
+    };
+  }
+  const dbUrl = cleanEnvFlag(env.DATABASE_URL);
+  const dbUrlLower = dbUrl.toLowerCase();
+  if (dbUrl && !isPlaceholderEnvValue(dbUrl) && (dbUrlLower.startsWith("mysql://") || dbUrlLower.startsWith("mysqls://"))) {
+    return {
+      mysqlExpected: true,
+      explicitlyDisabled: false,
+      reason: "MySQL DATABASE_URL is configured"
+    };
+  }
+  if (cleanEnvFlag(env.NODE_ENV).toLowerCase() === "production") {
+    return {
+      mysqlExpected: true,
+      explicitlyDisabled: false,
+      reason: "NODE_ENV=production requires MySQL coordination"
+    };
+  }
+  return {
+    mysqlExpected: false,
+    explicitlyDisabled: true,
+    reason: "MySQL is not configured in non-production environment (single-process local coordination)"
+  };
+}
 var MEDIA_CLEANUP_MYSQL_KEY, MEDIA_CLEANUP_MYSQL_GROUP, MEDIA_COORDINATION_MYSQL_KEY, MEDIA_TOMBSTONE_MYSQL_GROUP, MEDIA_RETIRED_KEY_PREFIX, DEFAULT_WRITER_TX_TIMEOUT_MS, DEFAULT_WRITER_TX_MAX_WAIT_MS, DEFAULT_CLEANUP_GATE_TX_TIMEOUT_MS, DEFAULT_CLEANUP_GATE_TX_MAX_WAIT_MS, DEFAULT_FENCE_HEARTBEAT_STALE_MS, MediaConflictError, MediaCoordinationUnavailableError, MediaEnumerationIncompleteError, AsyncRWLock, EMBEDDED_URL_PATTERN, MediaWriteCoordinator, mediaWriteCoordinator;
 var init_mediaCoordination = __esm({
   "server/services/storage/mediaCoordination.ts"() {
@@ -4611,6 +4670,7 @@ var init_mediaCoordination = __esm({
         this.workerId = options?.workerId || `worker-${process.pid}-${crypto5.randomBytes(4).toString("hex")}`;
         this.getPrisma = options?.prismaProvider || (() => getRawPrismaClient());
         this.getStorage = options?.storageAdapterProvider || (() => getStorageAdapter());
+        this.getEnv = options?.envProvider || (() => process.env);
         this.localCoordinationFilePath = options?.localCoordinationFilePath || resolveSecureStorePath("media_write_coordination.json");
         this.localRetiredFilePath = options?.localRetiredFilePath || resolveSecureStorePath("media_retired_keys.json");
         this.writerTxTimeoutMs = options?.writerTxTimeoutMs ?? DEFAULT_WRITER_TX_TIMEOUT_MS;
@@ -4618,15 +4678,39 @@ var init_mediaCoordination = __esm({
         this.cleanupGateTxTimeoutMs = options?.cleanupGateTxTimeoutMs ?? DEFAULT_CLEANUP_GATE_TX_TIMEOUT_MS;
         this.cleanupGateTxMaxWaitMs = options?.cleanupGateTxMaxWaitMs ?? DEFAULT_CLEANUP_GATE_TX_MAX_WAIT_MS;
       }
-      getMySqlClient() {
-        const client = this.getPrisma();
-        if (client && typeof client.$transaction === "function") {
-          return client;
+      /**
+       * Resolves the authoritative coordination backend without ever silently falling back
+       * to local JSON when MySQL is configured or expected.
+       */
+      resolveCoordinationBackend() {
+        const env = this.getEnv();
+        const rawUseMysql = cleanEnvFlag(env.USE_MYSQL).toLowerCase();
+        if (rawUseMysql === "false" || rawUseMysql === "0" || rawUseMysql === "no") {
+          return { mode: "local-single-process" };
         }
-        return null;
+        const expectation = evaluateMySqlCoordinationExpectation(env);
+        let client = null;
+        try {
+          client = this.getPrisma();
+        } catch (err) {
+          return {
+            mode: "unavailable",
+            reason: `MySQL Prisma client initialization failed: ${err?.message || String(err)}`
+          };
+        }
+        if (client && typeof client.$transaction === "function") {
+          return { mode: "mysql", prisma: client };
+        }
+        if (expectation.mysqlExpected) {
+          return {
+            mode: "unavailable",
+            reason: `MySQL media coordination is unavailable (${expectation.reason}): Prisma client is missing, failed to initialize, or lacks transaction support.`
+          };
+        }
+        return { mode: "local-single-process" };
       }
       isMySqlCoordinationActive() {
-        return this.getMySqlClient() !== null;
+        return this.resolveCoordinationBackend().mode === "mysql";
       }
       // ---- Single-process local JSON persistence (strictly USE_MYSQL === false) ----
       readLocalCoordinationState() {
@@ -4679,8 +4763,12 @@ var init_mediaCoordination = __esm({
         const uniqueKeys = Array.from(new Set(compositeKeys.filter(Boolean))).sort();
         if (uniqueKeys.length === 0) return;
         const retiredCode = options?.codeOnRetired || "MEDIA_OBJECT_RETIRED";
-        const prisma2 = this.getMySqlClient();
-        if (prisma2) {
+        const backend = this.resolveCoordinationBackend();
+        if (backend.mode === "unavailable") {
+          throw new MediaCoordinationUnavailableError(backend.reason);
+        }
+        if (backend.mode === "mysql") {
+          const prisma2 = backend.prisma;
           try {
             await ensureCoordinationRowInMySql(prisma2);
             await prisma2.$transaction(
@@ -4743,11 +4831,15 @@ var init_mediaCoordination = __esm({
         if (!extracted.complete) {
           throw new MediaEnumerationIncompleteError(extracted.reason || "incomplete payload scan");
         }
-        const prisma2 = this.getMySqlClient();
         if (extracted.compositeKeys.length === 0 && !params.resolveAdditionalPayloadInTx) {
           return params.executeInTx(null, []);
         }
-        if (prisma2) {
+        const backend = this.resolveCoordinationBackend();
+        if (backend.mode === "unavailable") {
+          throw new MediaCoordinationUnavailableError(backend.reason);
+        }
+        if (backend.mode === "mysql") {
+          const prisma2 = backend.prisma;
           try {
             await ensureCoordinationRowInMySql(prisma2);
           } catch (err) {
@@ -4831,8 +4923,15 @@ var init_mediaCoordination = __esm({
        */
       async acquireDeletionFenceAtomic(params) {
         const compositeKey = buildMediaCompositeKey(params.provider, params.storageKey);
-        const prisma2 = this.getMySqlClient();
-        if (prisma2) {
+        const backend = this.resolveCoordinationBackend();
+        if (backend.mode === "unavailable") {
+          return {
+            status: "coordination-unavailable",
+            error: backend.reason
+          };
+        }
+        if (backend.mode === "mysql") {
+          const prisma2 = backend.prisma;
           try {
             await ensureCoordinationRowInMySql(prisma2);
             return await prisma2.$transaction(
@@ -4937,9 +5036,14 @@ var init_mediaCoordination = __esm({
        * Keeps the key permanently blocked to writers until forward-completion verifies `fileExists === false`.
        */
       async markDeletionFenceUncertain(compositeKey, errorMessage) {
-        const prisma2 = this.getMySqlClient();
+        const backend = this.resolveCoordinationBackend();
         const nowMs = this.now();
-        if (prisma2) {
+        if (backend.mode === "unavailable") {
+          console.warn("[MEDIA-COORD] MySQL coordination unavailable while marking deletion fence UNCERTAIN (fail-closed):", backend.reason);
+          return;
+        }
+        if (backend.mode === "mysql") {
+          const prisma2 = backend.prisma;
           try {
             await ensureCoordinationRowInMySql(prisma2);
             await prisma2.$transaction(
@@ -5004,29 +5108,40 @@ var init_mediaCoordination = __esm({
           retiredAtMs: this.now(),
           reason: params.reason
         };
-        const prisma2 = this.getMySqlClient();
-        if (prisma2) {
-          await ensureCoordinationRowInMySql(prisma2);
-          await prisma2.$transaction(
-            async (tx) => {
-              const { state, description } = await lockAndReadCoordinationRowInTx(tx, "EXCLUSIVE");
-              await insertPermanentRetiredTombstoneInTx(tx, tombstone);
-              const nextDeleting = { ...state.deletingKeys };
-              delete nextDeleting[compositeKey];
-              const nextState = {
-                schemaVersion: 1,
-                version: state.version + 1,
-                deletingKeys: nextDeleting
-              };
-              await updateCoordinationRowInTx(tx, nextState, description);
-            },
-            {
-              isolationLevel: "ReadCommitted",
-              maxWait: this.cleanupGateTxMaxWaitMs,
-              timeout: this.cleanupGateTxTimeoutMs
-            }
-          );
-          return true;
+        const backend = this.resolveCoordinationBackend();
+        if (backend.mode === "unavailable") {
+          throw new MediaCoordinationUnavailableError(backend.reason);
+        }
+        if (backend.mode === "mysql") {
+          const prisma2 = backend.prisma;
+          try {
+            await ensureCoordinationRowInMySql(prisma2);
+            await prisma2.$transaction(
+              async (tx) => {
+                const { state, description } = await lockAndReadCoordinationRowInTx(tx, "EXCLUSIVE");
+                await insertPermanentRetiredTombstoneInTx(tx, tombstone);
+                const nextDeleting = { ...state.deletingKeys };
+                delete nextDeleting[compositeKey];
+                const nextState = {
+                  schemaVersion: 1,
+                  version: state.version + 1,
+                  deletingKeys: nextDeleting
+                };
+                await updateCoordinationRowInTx(tx, nextState, description);
+              },
+              {
+                isolationLevel: "ReadCommitted",
+                maxWait: this.cleanupGateTxMaxWaitMs,
+                timeout: this.cleanupGateTxTimeoutMs
+              }
+            );
+            return true;
+          } catch (err) {
+            if (isMediaCoordinationError(err)) throw err;
+            throw new MediaCoordinationUnavailableError(
+              `Failed to finalize permanent tombstone in MySQL: ${err?.message || String(err)}`
+            );
+          }
         }
         await this.localRwLock.withExclusive(async () => {
           this.writeLocalRetiredTombstone(tombstone);
@@ -5044,8 +5159,12 @@ var init_mediaCoordination = __esm({
        * Never unblocks writers; only authorizes taking over forward deletion to verified `fileExists === false`.
        */
       async claimReconcilableDeletingFences(provider, staleThresholdMs = DEFAULT_FENCE_HEARTBEAT_STALE_MS) {
-        const prisma2 = this.getMySqlClient();
+        const backend = this.resolveCoordinationBackend();
         const nowMs = this.now();
+        if (backend.mode === "unavailable") {
+          console.warn("[MEDIA-COORD] MySQL coordination unavailable; aborting fence reconciliation (fail-closed):", backend.reason);
+          return [];
+        }
         const pickAndClaim = (state) => {
           const claimed = [];
           let changed = false;
@@ -5067,7 +5186,8 @@ var init_mediaCoordination = __esm({
           }
           return { claimed, changed };
         };
-        if (prisma2) {
+        if (backend.mode === "mysql") {
+          const prisma2 = backend.prisma;
           try {
             await ensureCoordinationRowInMySql(prisma2);
             return await prisma2.$transaction(
@@ -5105,29 +5225,51 @@ var init_mediaCoordination = __esm({
        * Read-only diagnostic inspection (used in tests to verify fences & permanent tombstones).
        */
       async getCoordinationSnapshot() {
-        const prisma2 = this.getMySqlClient();
-        if (prisma2) {
-          await ensureCoordinationRowInMySql(prisma2);
-          const state2 = await prisma2.$transaction(
-            async (tx) => {
-              const res = await lockAndReadCoordinationRowInTx(tx, "SHARED");
-              return res.state;
-            },
-            { isolationLevel: "ReadCommitted", maxWait: 5e3, timeout: 5e3 }
-          );
-          return { state: state2, mysqlActive: true };
+        const backend = this.resolveCoordinationBackend();
+        if (backend.mode === "unavailable") {
+          throw new MediaCoordinationUnavailableError(backend.reason);
+        }
+        if (backend.mode === "mysql") {
+          const prisma2 = backend.prisma;
+          try {
+            await ensureCoordinationRowInMySql(prisma2);
+            const state2 = await prisma2.$transaction(
+              async (tx) => {
+                const res = await lockAndReadCoordinationRowInTx(tx, "SHARED");
+                return res.state;
+              },
+              { isolationLevel: "ReadCommitted", maxWait: 5e3, timeout: 5e3 }
+            );
+            return { state: state2, mysqlActive: true };
+          } catch (err) {
+            if (isMediaCoordinationError(err)) throw err;
+            throw new MediaCoordinationUnavailableError(
+              `MySQL coordination snapshot unavailable: ${err?.message || String(err)}`
+            );
+          }
         }
         const state = await this.localRwLock.withShared(async () => this.readLocalCoordinationState());
         return { state, mysqlActive: false };
       }
       async isKeyPermanentlyRetired(compositeKey) {
-        const prisma2 = this.getMySqlClient();
-        if (prisma2) {
-          const hits = await prisma2.$transaction(
-            async (tx) => readPermanentRetiredTombstonesInTx(tx, [compositeKey]),
-            { isolationLevel: "ReadCommitted", maxWait: 5e3, timeout: 5e3 }
-          );
-          return hits.length > 0;
+        const backend = this.resolveCoordinationBackend();
+        if (backend.mode === "unavailable") {
+          throw new MediaCoordinationUnavailableError(backend.reason);
+        }
+        if (backend.mode === "mysql") {
+          const prisma2 = backend.prisma;
+          try {
+            const hits = await prisma2.$transaction(
+              async (tx) => readPermanentRetiredTombstonesInTx(tx, [compositeKey]),
+              { isolationLevel: "ReadCommitted", maxWait: 5e3, timeout: 5e3 }
+            );
+            return hits.length > 0;
+          } catch (err) {
+            if (isMediaCoordinationError(err)) throw err;
+            throw new MediaCoordinationUnavailableError(
+              `MySQL retired tombstone check unavailable: ${err?.message || String(err)}`
+            );
+          }
         }
         return this.localRwLock.withShared(async () => {
           const retired = this.readLocalRetiredTombstones();
@@ -31905,8 +32047,19 @@ async function ensureMySqlSchemaInitialized() {
 
 // server.ts
 init_seed();
+function readCliArg(flag) {
+  const idx = process.argv.indexOf(flag);
+  if (idx !== -1 && idx + 1 < process.argv.length) {
+    return process.argv[idx + 1];
+  }
+  const prefix = `${flag}=`;
+  const eqArg = process.argv.find((arg) => arg.startsWith(prefix));
+  return eqArg ? eqArg.slice(prefix.length) : void 0;
+}
 var app = express2();
-var port = Number(process.env.PORT) || 3e3;
+var cliPort = Number(readCliArg("--port"));
+var port = (Number.isFinite(cliPort) && cliPort > 0 ? cliPort : Number(process.env.PORT)) || 3e3;
+var host = readCliArg("--host") || process.env.HOST || "0.0.0.0";
 var isProd = process.env.NODE_ENV === "production";
 app.set("trust proxy", 1);
 app.get("/health", (_req, res) => {
@@ -32906,8 +33059,12 @@ async function startServer() {
       return sendSpaHtml(req, res);
     });
   }
-  httpServer.listen(port, "0.0.0.0", () => {
-    console.log(`[TORIWEAR] Enterprise Platform server & WebSocket running on http://0.0.0.0:${port}`);
+  httpServer.on("error", (err) => {
+    console.error(`[SERVER] Failed to bind http://${host}:${port}:`, err?.message || err);
+    process.exit(1);
+  });
+  httpServer.listen(port, host, () => {
+    console.log(`[TORIWEAR] Enterprise Platform server & WebSocket running on http://${host}:${port}`);
     mediaCleanupService.startBackgroundSweeper();
   });
   const shutdown = async (signal) => {
@@ -32934,4 +33091,7 @@ async function startServer() {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
 }
-startServer();
+startServer().catch((err) => {
+  console.error("[SERVER] Fatal startup error:", err);
+  process.exit(1);
+});

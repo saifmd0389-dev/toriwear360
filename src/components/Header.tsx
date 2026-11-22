@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Search, ShoppingBag, User, Menu, X, ChevronDown } from 'lucide-react';
 import { InstagramIcon, WhatsAppIcon, FacebookIcon, XTwitterIcon, YouTubeIcon } from './SocialIcons';
 import { Department, MenWorldCategory, KidsWorldCategory, StoreCategory, StoreContactConfig } from '../types';
@@ -10,6 +10,7 @@ import { getAuthoritativeInstagramUrl, normalizeSocialUrl } from '../utils/socia
 import { fetchFrontPageCmsDataFromServer } from '../admin/data/frontPageCmsData';
 import { apiClient } from '../services/apiClient';
 import { buildWhatsAppHref, renderSocialChannelIcon } from './ContactSupportModal';
+import { computeNextHeaderScrolledState } from '../utils/headerScrollState';
 
 interface HeaderProps {
   cartCount: number;
@@ -18,6 +19,7 @@ interface HeaderProps {
   isFrontPage?: boolean;
   menCount?: number;
   kidsCount?: number;
+  kidsComingSoon?: boolean;
   categories?: StoreCategory[];
   onSelectCategorySlug?: (slug: string) => void;
   onSelectDepartment: (dept: Department | 'ALL') => void;
@@ -40,6 +42,7 @@ export const Header: React.FC<HeaderProps> = ({
   isFrontPage,
   menCount,
   kidsCount,
+  kidsComingSoon = false,
   categories = [],
   onSelectCategorySlug,
   onSelectDepartment,
@@ -57,7 +60,10 @@ export const Header: React.FC<HeaderProps> = ({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [collectionsDropdownOpen, setCollectionsDropdownOpen] = useState(false);
   const [moreNavDropdownOpen, setMoreNavDropdownOpen] = useState(false);
-  const [scrolled, setScrolled] = useState(false);
+  const [scrolled, setScrolled] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? computeNextHeaderScrolledState(false, window.scrollY) : false
+  );
+  const scrolledRef = useRef<boolean>(scrolled);
   const [contactConfig, setContactConfig] = useState<StoreContactConfig | null>(null);
 
   const { customer, isLoggedIn, loginWithGoogle, openAuthModal, openAccountModal, logout } = useCustomerAuth();
@@ -172,13 +178,34 @@ export const Header: React.FC<HeaderProps> = ({
   }, []);
 
   useEffect(() => {
-    const handleScroll = () => {
-      setScrolled(window.scrollY > 15);
+    let rafId: number | null = null;
+
+    const evaluateScroll = () => {
+      rafId = null;
+      const y = window.scrollY || window.pageYOffset || 0;
+      const next = computeNextHeaderScrolledState(scrolledRef.current, y);
+      if (next !== scrolledRef.current) {
+        scrolledRef.current = next;
+        setScrolled(next);
+      }
     };
-    handleScroll();
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    return () => window.removeEventListener('scroll', handleScroll);
-  }, []);
+
+    const scheduleScrollCheck = () => {
+      if (rafId !== null) return;
+      rafId = window.requestAnimationFrame(evaluateScroll);
+    };
+
+    // Initial sync on mount or route mode transition
+    evaluateScroll();
+
+    window.addEventListener('scroll', scheduleScrollCheck, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', scheduleScrollCheck);
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
+  }, [isFront]);
 
   useEffect(() => {
     let mounted = true;
@@ -231,20 +258,28 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header 
       style={{
-        position: isFront ? (scrolled ? 'fixed' : 'absolute') : 'sticky',
+        position: isFront ? 'fixed' : 'sticky',
         top: 0,
         left: 0,
         right: 0,
         isolation: 'isolate',
       }}
-      className={`site-header w-full select-none transition-all duration-300 z-30 ${
+      className={`site-header w-full select-none z-30 ${
         isFront 
-          ? (scrolled 
-              ? 'bg-[#0a0a0f]/80 backdrop-blur-md border-b border-neutral-800/80 shadow-md' 
-              : 'bg-transparent border-transparent shadow-none') 
+          ? 'bg-transparent border-transparent shadow-none' 
           : 'bg-[#0a0a0f] border-b border-neutral-800/90 shadow-md'
       }`}
     >
+      {/* Front-page frosted scrolled backdrop — GPU opacity-only transition (zero layout shift) */}
+      {isFront && (
+        <div
+          aria-hidden="true"
+          className={`pointer-events-none absolute inset-0 bg-[#0a0a0f]/80 backdrop-blur-md border-b border-neutral-800/80 shadow-md transition-opacity duration-300 ease-out will-change-[opacity] ${
+            scrolled ? 'opacity-100' : 'opacity-0'
+          }`}
+        />
+      )}
+
       {/* Top Announcement Bar */}
       {shouldRenderAnnouncementBar && (
         <div 
@@ -254,7 +289,7 @@ export const Header: React.FC<HeaderProps> = ({
             backgroundColor: (!isFront || scrolled) ? (announcementAd.bgColor || undefined) : undefined,
             color: announcementAd.textColor || undefined,
           } : undefined}
-          className={`text-neutral-300 text-[10.5px] sm:text-[11px] font-sans font-medium tracking-[0.05em] py-1.5 px-4 text-center flex items-center justify-center gap-3 overflow-hidden transition-colors duration-300 ${
+          className={`relative z-10 text-neutral-300 text-[10.5px] sm:text-[11px] font-sans font-medium tracking-[0.05em] py-1.5 px-4 text-center flex items-center justify-center gap-3 overflow-hidden transition-colors duration-300 ${
             announcementAd?.linkUrl ? 'cursor-pointer' : ''
           } ${
             isFront 
@@ -292,22 +327,18 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       )}
 
-      {/* Main Navigation Bar — 3-ZONE MATHEMATICALLY CENTERED LAYOUT */}
+      {/* Main Navigation Bar — 3-ZONE MATHEMATICALLY CENTERED LAYOUT (CONSTANT HEIGHT, ZERO REFLOW) */}
       <nav 
         id="main-nav"
-        className={`w-full transition-all duration-300 select-none ${
-          scrolled ? 'py-0.5 sm:py-1' : 'py-1 sm:py-2'
+        className={`relative z-10 w-full select-none ${
+          isFront ? 'py-0.5 sm:py-1' : 'py-1 sm:py-2'
         }`}
       >
-        <div className={`max-w-7xl mx-auto px-2.5 sm:px-6 lg:px-8 ${
+        <div className={`relative max-w-7xl mx-auto px-2.5 sm:px-6 lg:px-8 ${
           isFront 
-            ? 'flex items-center justify-center' 
-            : 'flex items-center justify-between sm:grid sm:grid-cols-[1fr_auto_1fr]'
-        } items-center transition-all duration-300 ${
-          scrolled 
-            ? 'min-h-[52px] sm:min-h-[58px]' 
-            : (isFront ? 'min-h-[58px] sm:min-h-[68px] lg:min-h-[calc(4rem+3cm)]' : 'min-h-[56px] sm:min-h-[64px] lg:min-h-[82px]')
-        } gap-1 sm:gap-2`}>
+            ? 'flex items-center justify-center h-[52px] sm:h-[58px]' 
+            : 'flex items-center justify-between sm:grid sm:grid-cols-[1fr_auto_1fr] min-h-[56px] sm:min-h-[64px] lg:min-h-[82px]'
+        } items-center gap-1 sm:gap-2`}>
           {/* LEFT ZONE: Navigation & Mobile Menu Icon — Only visible on Shop Men, Shop Kids & next pages */}
           {!isFront && (
             <div className="justify-self-start flex items-center gap-2 sm:gap-6">
@@ -342,7 +373,7 @@ export const Header: React.FC<HeaderProps> = ({
                     const displayBadge = isMen
                       ? (tab.badge || String(menCount ?? 30))
                       : isKids
-                        ? (tab.badge || String(kidsCount ?? 24))
+                        ? (kidsComingSoon ? 'COMING SOON' : (tab.badge || String(kidsCount ?? 24)))
                         : tab.badge;
 
                     return (
@@ -432,7 +463,7 @@ export const Header: React.FC<HeaderProps> = ({
                         <div>
                           <div className="text-[11px] font-heading font-semibold tracking-[0.08em] text-neutral-300 pb-2 border-b border-neutral-800 flex items-center justify-between uppercase">
                             <span>Kids’ Storywear</span>
-                            <span className="text-[10px] font-sans font-semibold text-sky-400">Ages 2–13</span>
+                            <span className="text-[10px] font-sans font-semibold text-sky-400">{kidsComingSoon ? 'Coming Soon' : 'Ages 2–13'}</span>
                           </div>
                           <div className="space-y-1 mt-2">
                             {KIDS_WORLDS.map((w) => (
@@ -534,42 +565,84 @@ export const Header: React.FC<HeaderProps> = ({
           )}
 
           {/* CENTER ZONE: FIRST LOGO AT TOP (+3CM), SECOND LOGO WHEN SCROLLED (NORMAL COMPACT SIZE) */}
-          <div className="justify-self-center flex items-center justify-center">
+          <div className={`justify-self-center flex items-center justify-center ${isFront ? 'h-full' : ''}`}>
             <button 
               id="brand-logo-btn"
               onClick={onNavigateHome}
-              className="group cursor-pointer focus:outline-none flex items-center justify-center shrink-0 p-0.5"
+              className={`group cursor-pointer focus:outline-none flex items-center justify-center shrink-0 p-0.5 ${
+                isFront ? 'relative h-full' : ''
+              }`}
               aria-label="TORIWEAR — WEAR YOUR WORLD"
             >
-              <div 
-                className={`relative flex items-center justify-center [perspective:800px] transition-all duration-300 ${
-                  scrolled 
-                    ? 'h-8 sm:h-9 md:h-11 w-24 sm:w-28 md:w-44 max-h-11' 
-                    : (isFront 
-                        ? 'h-14 sm:h-16 md:h-20 lg:h-[calc(3.5rem+3cm)] w-32 sm:w-36 md:w-44 lg:w-[calc(3.5rem+3cm)] max-h-[calc(3.5rem+3cm)]' 
-                        : 'h-8 sm:h-10 md:h-14 w-20 sm:w-28 md:w-36 max-h-14')
-                }`}
-              >
-                {/* FIRST LOGO (Official Emblem) — Authoritative SVG/PNG asset from BrandLogoState */}
-                <OfficialToriwearLogo
-                  variant="primary"
-                  alt="TORIWEAR Original Logo"
-                  suppressWarning
-                  className={`absolute inset-0 w-full h-full object-contain logo-spin-two-turns transition-opacity duration-300 ${
-                    !scrolled ? 'opacity-100 z-10 pointer-events-auto' : 'opacity-0 z-0 pointer-events-none'
-                  }`}
-                />
+              {isFront ? (
+                <>
+                  {/* FIRST LOGO (Official Emblem) — Exact original top placement & +3cm sizing, GPU fade/scale only */}
+                  <span
+                    className={`absolute top-[3px] sm:top-[6px] lg:top-[8px] left-1/2 -translate-x-1/2 flex items-center justify-center [perspective:800px] h-14 sm:h-16 md:h-20 lg:h-[calc(3.5rem+3cm)] w-32 sm:w-36 md:w-44 lg:w-[calc(3.5rem+3cm)] max-h-[calc(3.5rem+3cm)] transition-[opacity,transform,scale,translate] duration-300 ease-out will-change-[opacity,transform] ${
+                      !scrolled
+                        ? 'opacity-100 scale-100 translate-y-0 z-10 pointer-events-auto'
+                        : 'opacity-0 scale-95 -translate-y-2 z-0 pointer-events-none'
+                    }`}
+                  >
+                    <OfficialToriwearLogo
+                      variant="primary"
+                      alt="TORIWEAR Original Logo"
+                      suppressWarning
+                      className="w-full h-full object-contain logo-spin-two-turns"
+                    />
+                  </span>
 
-                {/* SECOND LOGO (Horizontal Wordmark Banner) — Normal compact size, visible when scrolled down */}
-                <OfficialToriwearLogo
-                  variant="secondary"
-                  alt="TORIWEAR Second Brand Logo"
-                  suppressWarning
-                  className={`absolute inset-0 w-full h-full object-contain logo-spin-two-turns transition-opacity duration-300 ${
-                    scrolled ? 'opacity-100 z-10 pointer-events-auto' : 'opacity-0 z-0 pointer-events-none'
-                  }`}
-                />
-              </div>
+                  {/* SECOND LOGO (Horizontal Wordmark Banner) — Normal compact size, visible when scrolled down */}
+                  <span
+                    className={`relative flex items-center justify-center [perspective:800px] h-8 sm:h-9 md:h-11 w-24 sm:w-28 md:w-44 max-h-11 transition-[opacity,transform,scale,translate] duration-300 ease-out will-change-[opacity,transform] ${
+                      scrolled
+                        ? 'opacity-100 scale-100 translate-y-0 z-10 pointer-events-auto'
+                        : 'opacity-0 scale-95 translate-y-1 z-0 pointer-events-none'
+                    }`}
+                  >
+                    <OfficialToriwearLogo
+                      variant="secondary"
+                      alt="TORIWEAR Second Brand Logo"
+                      suppressWarning
+                      className="w-full h-full object-contain logo-spin-two-turns"
+                    />
+                  </span>
+                </>
+              ) : (
+                <div className="relative flex items-center justify-center h-8 sm:h-10 md:h-14 w-24 sm:w-28 md:w-44">
+                  {/* FIRST LOGO (Official Emblem) — Exact original inner-page size */}
+                  <span
+                    className={`absolute inset-0 m-auto flex items-center justify-center [perspective:800px] h-8 sm:h-10 md:h-14 w-20 sm:w-28 md:w-36 max-h-14 transition-[opacity,transform,scale,translate] duration-300 ease-out will-change-[opacity,transform] ${
+                      !scrolled
+                        ? 'opacity-100 scale-100 z-10 pointer-events-auto'
+                        : 'opacity-0 scale-95 z-0 pointer-events-none'
+                    }`}
+                  >
+                    <OfficialToriwearLogo
+                      variant="primary"
+                      alt="TORIWEAR Original Logo"
+                      suppressWarning
+                      className="w-full h-full object-contain logo-spin-two-turns"
+                    />
+                  </span>
+
+                  {/* SECOND LOGO (Horizontal Wordmark Banner) — Exact original compact scrolled size */}
+                  <span
+                    className={`absolute inset-0 m-auto flex items-center justify-center [perspective:800px] h-8 sm:h-9 md:h-11 w-24 sm:w-28 md:w-44 max-h-11 transition-[opacity,transform,scale,translate] duration-300 ease-out will-change-[opacity,transform] ${
+                      scrolled
+                        ? 'opacity-100 scale-100 z-10 pointer-events-auto'
+                        : 'opacity-0 scale-95 z-0 pointer-events-none'
+                    }`}
+                  >
+                    <OfficialToriwearLogo
+                      variant="secondary"
+                      alt="TORIWEAR Second Brand Logo"
+                      suppressWarning
+                      className="w-full h-full object-contain logo-spin-two-turns"
+                    />
+                  </span>
+                </div>
+              )}
             </button>
           </div>
 
@@ -967,7 +1040,9 @@ export const Header: React.FC<HeaderProps> = ({
                     className="w-full text-left py-2 px-3 text-neutral-200 hover:bg-neutral-800/50 rounded-lg flex items-center justify-between"
                   >
                     <span>Kids' Storywear (Ages 2–13)</span>
-                    <span className="text-[10px] text-sky-400 font-sans font-semibold tabular-nums">{kidsCount ?? 24} PIECES</span>
+                    <span className="text-[10px] text-sky-400 font-sans font-semibold tabular-nums">
+                      {kidsComingSoon ? 'COMING SOON' : `${kidsCount ?? 24} PIECES`}
+                    </span>
                   </button>
                 </>
               )}

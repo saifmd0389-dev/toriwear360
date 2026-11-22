@@ -23,8 +23,20 @@ import { paymentConfigService } from './server/services/paymentConfigService';
 import { requireAuth } from './server/middleware/authMiddleware';
 import { mediaCleanupService } from './server/services/storage/mediaCleanupService';
 
+function readCliArg(flag: string): string | undefined {
+  const idx = process.argv.indexOf(flag);
+  if (idx !== -1 && idx + 1 < process.argv.length) {
+    return process.argv[idx + 1];
+  }
+  const prefix = `${flag}=`;
+  const eqArg = process.argv.find((arg) => arg.startsWith(prefix));
+  return eqArg ? eqArg.slice(prefix.length) : undefined;
+}
+
 const app = express();
-const port = Number(process.env.PORT) || 3000;
+const cliPort = Number(readCliArg('--port'));
+const port = (Number.isFinite(cliPort) && cliPort > 0 ? cliPort : Number(process.env.PORT)) || 3000;
+const host = readCliArg('--host') || process.env.HOST || '0.0.0.0';
 const isProd = process.env.NODE_ENV === 'production';
 
 // Trust proxy for reverse proxies, Cloud Run, Firebase Hosting, and load balancers
@@ -1219,8 +1231,13 @@ async function startServer() {
     });
   }
 
-  httpServer.listen(port, '0.0.0.0', () => {
-    console.log(`[TORIWEAR] Enterprise Platform server & WebSocket running on http://0.0.0.0:${port}`);
+  httpServer.on('error', (err: NodeJS.ErrnoException) => {
+    console.error(`[SERVER] Failed to bind http://${host}:${port}:`, err?.message || err);
+    process.exit(1);
+  });
+
+  httpServer.listen(port, host, () => {
+    console.log(`[TORIWEAR] Enterprise Platform server & WebSocket running on http://${host}:${port}`);
     mediaCleanupService.startBackgroundSweeper();
   });
 
@@ -1251,4 +1268,7 @@ async function startServer() {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('[SERVER] Fatal startup error:', err);
+  process.exit(1);
+});

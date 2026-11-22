@@ -77,6 +77,8 @@ export interface StoreSettingsRecord {
   codFee: number;
   orderPrefix: string;
   maintenanceMode: boolean;
+  twinComboEnabled: boolean;
+  kidsComingSoon: boolean;
   twoFactorRequiredForStaff: boolean;
   allowGuestCheckout: boolean;
   autoArchiveOutOfStock: boolean;
@@ -205,6 +207,8 @@ export const BASELINE_SETTINGS: StoreSettingsRecord = {
   codFee: 50,
   orderPrefix: 'TORI-',
   maintenanceMode: false,
+  twinComboEnabled: true,
+  kidsComingSoon: false,
   twoFactorRequiredForStaff: false,
   allowGuestCheckout: true,
   autoArchiveOutOfStock: false,
@@ -250,6 +254,8 @@ export class CmsRepository {
         : BASELINE_CONTACT_CHANNELS.map((c) => ({ ...c, url: c.valueOrUrl, enabled: c.isEnabled })),
       returnWindowDays: Math.max(1, Math.min(60, Number(raw?.returnWindowDays || base.returnWindowDays || 7))),
       exchangeEnabled: raw?.exchangeEnabled !== undefined ? Boolean(raw.exchangeEnabled) : true,
+      twinComboEnabled: raw?.twinComboEnabled !== undefined ? Boolean(raw.twinComboEnabled) : true,
+      kidsComingSoon: raw?.kidsComingSoon !== undefined ? Boolean(raw.kidsComingSoon) : false,
       metaBusiness: {
         domainVerificationCode: String(raw?.metaBusiness?.domainVerificationCode || '').trim(),
         pixelId: String(raw?.metaBusiness?.pixelId || '').replace(/[^0-9a-zA-Z_-]/g, '').trim(),
@@ -905,7 +911,7 @@ export class CmsRepository {
                   key: `store_${key}`,
                   value: typeof value === 'object' ? JSON.stringify(value) : String(value),
                   group: 'GENERAL',
-                  isPublic: ['freeShippingThreshold', 'standardShippingFee', 'codFee', 'maintenanceMode', 'returnWindowDays'].includes(key),
+                  isPublic: ['freeShippingThreshold', 'standardShippingFee', 'codFee', 'maintenanceMode', 'twinComboEnabled', 'kidsComingSoon', 'returnWindowDays'].includes(key),
                 },
                 update: {
                   value: typeof value === 'object' ? JSON.stringify(value) : String(value),

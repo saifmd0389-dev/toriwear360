@@ -135,7 +135,7 @@ export default function App() {
     return false;
   });
 
-  // --- Storefront Maintenance Mode State ---
+  // --- Storefront Maintenance Mode & Feature Launch Flags ---
   const [isMaintenanceMode, setIsMaintenanceMode] = useState<boolean>(() => {
     try {
       const stored = localStorage.getItem('tori_admin_settings');
@@ -147,17 +147,60 @@ export default function App() {
     return false;
   });
 
-  // Sync maintenance mode status on storage / custom events
+  const [twinComboEnabled, setTwinComboEnabled] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem('tori_admin_settings');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed.twinComboEnabled !== undefined) {
+          return Boolean(parsed.twinComboEnabled);
+        }
+      }
+    } catch {}
+    return true;
+  });
+
+  const [kidsComingSoon, setKidsComingSoon] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem('tori_admin_settings');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        return Boolean(parsed.kidsComingSoon);
+      }
+    } catch {}
+    return false;
+  });
+
+  // Sync maintenance mode & feature launch flags on storage / custom events
   useEffect(() => {
     const handleSettingsSync = (e?: any) => {
       try {
         if (e && 'key' in e && e.key && e.key !== 'tori_admin_settings') {
           return;
         }
+        const payload = e?.detail && typeof e.detail === 'object' ? e.detail : null;
+        if (payload) {
+          if (typeof payload.maintenanceMode === 'boolean') {
+            setIsMaintenanceMode(payload.maintenanceMode);
+          }
+          if (typeof payload.twinComboEnabled === 'boolean') {
+            setTwinComboEnabled(payload.twinComboEnabled);
+          }
+          if (typeof payload.kidsComingSoon === 'boolean') {
+            setKidsComingSoon(payload.kidsComingSoon);
+          }
+          return;
+        }
         const stored = localStorage.getItem('tori_admin_settings');
         if (stored) {
           const parsed = JSON.parse(stored);
           setIsMaintenanceMode(Boolean(parsed.maintenanceMode));
+          if (parsed.twinComboEnabled !== undefined) {
+            setTwinComboEnabled(Boolean(parsed.twinComboEnabled));
+          }
+          if (parsed.kidsComingSoon !== undefined) {
+            setKidsComingSoon(Boolean(parsed.kidsComingSoon));
+          }
         }
       } catch {}
     };
@@ -201,6 +244,12 @@ export default function App() {
         if (!isMounted || !data) return;
         if (typeof data.maintenanceMode === 'boolean') {
           setIsMaintenanceMode(data.maintenanceMode);
+        }
+        if (typeof data.twinComboEnabled === 'boolean') {
+          setTwinComboEnabled(data.twinComboEnabled);
+        }
+        if (typeof data.kidsComingSoon === 'boolean') {
+          setKidsComingSoon(data.kidsComingSoon);
         }
         if (data.logoUpdatedAt) {
           try {
@@ -1549,6 +1598,7 @@ export default function App() {
         isFrontPage={activeDepartment === 'ALL' && selectedProductDetail === null && !isProductDetailLoading && selectedWorldCategory === 'ALL' && !selectedCategorySlug}
         menCount={storefrontCatalog.filter((p) => p.department === 'MEN').length}
         kidsCount={storefrontCatalog.filter((p) => p.department === 'KIDS').length}
+        kidsComingSoon={kidsComingSoon}
         categories={categories}
         onSelectCategorySlug={(slug) => handleSelectCategorySlug(slug)}
         onSelectDepartment={handleSelectDepartment}
@@ -1601,7 +1651,7 @@ export default function App() {
               setSizeGuideDept(selectedProductDetail.department === 'KIDS' ? 'KIDS' : 'MEN');
               setIsSizeGuideOpen(true);
             }}
-            onOpenCombo={(prod) => setTwinningComboProduct(prod)}
+            onOpenCombo={twinComboEnabled ? (prod) => setTwinningComboProduct(prod) : undefined}
             onOpenCompare={(prod) => handleOpenCompare(prod)}
             recentlyViewedIds={recentlyViewed}
             wishlistIds={wishlist}
@@ -1629,6 +1679,7 @@ export default function App() {
                       <Hero
                         key={sec.id || 'sec-hero'}
                         isLoading={isCmsLoading}
+                        kidsComingSoon={kidsComingSoon}
                         onShopMen={() => {
                           setActiveDepartment('MEN');
                           setSelectedWorldCategory('ALL');
@@ -1641,10 +1692,10 @@ export default function App() {
                         }}
                         onExploreChapters={() => scrollToSection('choose-your-world-section')}
                         onOpenSearch={() => setIsSearchOpen(true)}
-                        onOpenCombo={() => {
+                        onOpenCombo={twinComboEnabled ? () => {
                           const sample = storefrontCatalog.find((p) => p.department === 'MEN') || storefrontCatalog[0] || null;
                           setTwinningComboProduct(sample);
-                        }}
+                        } : undefined}
                       />
                     );
                   } else if (k.includes('portal') || k.includes('department_portals') || sec.key === 'department_portals') {
@@ -1653,6 +1704,7 @@ export default function App() {
                       <DepartmentPortals
                         key={sec.id || 'sec-portals'}
                         isLoading={isCatalogLoading}
+                        kidsComingSoon={kidsComingSoon}
                         menCount={storefrontCatalog.filter((p) => p.department === 'MEN').length}
                         kidsCount={storefrontCatalog.filter((p) => p.department === 'KIDS').length}
                         onShopMen={() => {
@@ -1665,15 +1717,15 @@ export default function App() {
                           setSelectedWorldCategory('ALL');
                           window.scrollTo({ top: 0, behavior: 'smooth' });
                         }}
-                        onOpenCombo={() => {
+                        onOpenCombo={twinComboEnabled ? () => {
                           const sample = storefrontCatalog.find((p) => p.department === 'MEN') || storefrontCatalog[0] || null;
                           setTwinningComboProduct(sample);
-                        }}
+                        } : undefined}
                       />
                     );
                   } else if (k.includes('twinning') || sec.key === 'twinning_spotlight') {
-                    // 3. Twinning Duo Soft Highlight
-                    sectionNode = (
+                    // 3. Twinning Duo Soft Highlight (hidden when Twin Combo is disabled in Admin)
+                    sectionNode = twinComboEnabled ? (
                       <TwinningSpotlightSection
                         key={sec.id || 'sec-twinning'}
                         allProducts={storefrontCatalog}
@@ -1690,7 +1742,7 @@ export default function App() {
                           window.scrollTo({ top: 0, behavior: 'smooth' });
                         }}
                       />
-                    );
+                    ) : null;
                   } else if (k.includes('new_drop') || k.includes('new drop') || sec.key === 'new_drops') {
                     // 3b. New Drops & Live Vault Releases
                     sectionNode = (
@@ -1834,7 +1886,7 @@ export default function App() {
                         }}
                         className="px-3 py-1.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/30 text-xs font-sans font-semibold uppercase tracking-[0.04em] transition flex items-center gap-1.5 cursor-pointer shadow-sm"
                       >
-                        <span>SWITCH TO KIDS' WEAR 👶</span>
+                        <span>{kidsComingSoon ? "KIDS' WEAR · COMING SOON" : "SWITCH TO KIDS' WEAR 👶"}</span>
                       </button>
                     </div>
                   </div>
@@ -1851,7 +1903,7 @@ export default function App() {
                   onSelectCategorySlug={handleSelectCategorySlug}
                   onOpenProductDetail={handleOpenProductDetail}
                   onOpenPopoutZoom={(prod) => setPopoutZoomProduct(prod)}
-                  onOpenCombo={(prod) => setTwinningComboProduct(prod)}
+                  onOpenCombo={twinComboEnabled ? (prod) => setTwinningComboProduct(prod) : undefined}
                   onOpenCompare={(prod) => handleOpenCompare(prod)}
                   onAddToCart={handleAddToCart}
                   wishlist={wishlist}
@@ -1880,7 +1932,11 @@ export default function App() {
                         KIDS' STORYWEAR CATALOGUE
                       </span>
                       <span className="text-[10px] bg-sky-500/15 text-sky-300 border border-sky-500/30 px-2 py-0.5 rounded-full font-sans font-semibold tracking-[0.04em] tabular-nums">
-                        {isCatalogLoading ? '···' : `${storefrontCatalog.filter((p) => p.department === 'KIDS').length} DROPS · BIO-WASH`}
+                        {kidsComingSoon
+                          ? 'COMING SOON'
+                          : isCatalogLoading
+                            ? '···'
+                            : `${storefrontCatalog.filter((p) => p.department === 'KIDS').length} DROPS · BIO-WASH`}
                       </span>
                     </div>
 
@@ -1901,23 +1957,60 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Section: Kids Worlds & Products (STRICTLY ONLY KIDS) */}
-                <ShopKidsWorlds
-                  products={storefrontCatalog}
-                  isLoading={isCatalogLoading}
-                  selectedWorld={selectedWorldCategory}
-                  onSelectWorld={setSelectedWorldCategory}
-                  categories={categories}
-                  selectedCategorySlug={selectedCategorySlug}
-                  onSelectCategorySlug={handleSelectCategorySlug}
-                  onOpenProductDetail={handleOpenProductDetail}
-                  onOpenPopoutZoom={(prod) => setPopoutZoomProduct(prod)}
-                  onOpenCombo={(prod) => setTwinningComboProduct(prod)}
-                  onOpenCompare={(prod) => handleOpenCompare(prod)}
-                  onAddToCart={handleAddToCart}
-                  wishlist={wishlist}
-                  onToggleWishlist={handleToggleWishlist}
-                />
+                {/* Section: Kids Coming Soon Screen OR Live Kids Catalog */}
+                {kidsComingSoon ? (
+                  <section className="relative overflow-hidden bg-gradient-to-b from-[#0b1320] via-[#0a0f1a] to-[#050505] py-20 sm:py-28 px-4 sm:px-6 lg:px-8 border-b border-sky-900/40">
+                    <div className="max-w-3xl mx-auto text-center space-y-6">
+                      <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-sky-500/15 border border-sky-400/40 text-sky-300 text-xs font-mono font-bold uppercase tracking-[0.14em]">
+                        KIDS' STORYWEAR · DROPPING SOON
+                      </span>
+                      <h1 className="font-heading text-4xl sm:text-6xl font-black text-white uppercase tracking-tight leading-[1.05]">
+                        SHOP FOR KIDS <span className="text-sky-400">COMING SOON.</span>
+                      </h1>
+                      <p className="text-sm sm:text-base text-neutral-300 max-w-xl mx-auto leading-relaxed font-sans">
+                        Our 180 GSM bio-washed super-soft Kids' Storywear collection (Ages 2–13Y) with non-toxic, skin-friendly original anime artwork is getting ready for launch.
+                      </p>
+                      <div className="pt-4 flex flex-col sm:flex-row items-center justify-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveDepartment('MEN');
+                            setSelectedCategorySlug(null);
+                            setSelectedWorldCategory('ALL');
+                            window.scrollTo({ top: 0, behavior: 'smooth' });
+                          }}
+                          className="w-full sm:w-auto px-7 py-3.5 rounded-xl bg-white hover:bg-neutral-200 text-black font-sans font-bold text-xs sm:text-sm uppercase tracking-[0.06em] transition cursor-pointer shadow-xl"
+                        >
+                          EXPLORE MEN'S COLLECTION →
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleNavigateHome}
+                          className="w-full sm:w-auto px-7 py-3.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-white border border-neutral-700 font-sans font-semibold text-xs sm:text-sm uppercase tracking-[0.06em] transition cursor-pointer"
+                        >
+                          BACK TO HOME
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+                ) : (
+                  <ShopKidsWorlds
+                    products={storefrontCatalog}
+                    isLoading={isCatalogLoading}
+                    selectedWorld={selectedWorldCategory}
+                    onSelectWorld={setSelectedWorldCategory}
+                    categories={categories}
+                    selectedCategorySlug={selectedCategorySlug}
+                    onSelectCategorySlug={handleSelectCategorySlug}
+                    onOpenProductDetail={handleOpenProductDetail}
+                    onOpenPopoutZoom={(prod) => setPopoutZoomProduct(prod)}
+                    onOpenCombo={twinComboEnabled ? (prod) => setTwinningComboProduct(prod) : undefined}
+                    onOpenCompare={(prod) => handleOpenCompare(prod)}
+                    onAddToCart={handleAddToCart}
+                    wishlist={wishlist}
+                    onToggleWishlist={handleToggleWishlist}
+                  />
+                )}
 
                 <FaqSection />
               </div>
@@ -1984,7 +2077,7 @@ export default function App() {
 
       {/* Twinning Combo (Men & Kid Pair) Modal */}
       <TwinningComboModal
-        isOpen={Boolean(twinningComboProduct)}
+        isOpen={twinComboEnabled && Boolean(twinningComboProduct)}
         onClose={() => setTwinningComboProduct(null)}
         baseProduct={twinningComboProduct}
         allProducts={storefrontCatalog}
