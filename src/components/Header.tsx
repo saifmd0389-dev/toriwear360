@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, ShoppingBag, User, Menu, X, ChevronDown } from 'lucide-react';
+import { Search, ShoppingBag, User, Menu, X, ChevronDown, Bell } from 'lucide-react';
 import { InstagramIcon, WhatsAppIcon, FacebookIcon, XTwitterIcon, YouTubeIcon } from './SocialIcons';
 import { Department, MenWorldCategory, KidsWorldCategory, StoreCategory, StoreContactConfig } from '../types';
 import { MEN_WORLDS, KIDS_WORLDS } from '../data/constants';
@@ -27,6 +27,8 @@ interface HeaderProps {
   onOpenCart: () => void;
   onOpenSearch: () => void;
   onOpenWishlist: () => void;
+  onOpenNotifications?: () => void;
+  unreadNotificationsCount?: number;
   onOpenTrackOrder: () => void;
   onOpenSizeGuide?: () => void;
   onOpenStory: () => void;
@@ -50,6 +52,8 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenCart,
   onOpenSearch,
   onOpenWishlist,
+  onOpenNotifications,
+  unreadNotificationsCount = 0,
   onOpenTrackOrder,
   onOpenSizeGuide,
   onOpenStory,
@@ -820,6 +824,19 @@ export const Header: React.FC<HeaderProps> = ({
                           <span>Orders & Invoices</span>
                           <span className="text-[10px] bg-red-100 text-red-600 font-mono font-bold px-1.5 py-0.2 rounded">History</span>
                         </button>
+                        {onOpenNotifications && (
+                          <button
+                            onClick={() => { setProfileDropdownOpen(false); onOpenNotifications(); }}
+                            className="w-full text-left px-4 py-1.5 hover:bg-slate-50 text-slate-700 font-medium transition cursor-pointer flex items-center justify-between"
+                          >
+                            <span>Notifications &amp; Restocks</span>
+                            {unreadNotificationsCount > 0 && (
+                              <span className="text-[10px] bg-red-600 text-white font-mono font-bold px-1.5 py-0.2 rounded-full">
+                                {unreadNotificationsCount}
+                              </span>
+                            )}
+                          </button>
+                        )}
                         <button
                           onClick={() => { setProfileDropdownOpen(false); onOpenWishlist(); }}
                           className="w-full text-left px-4 py-1.5 hover:bg-slate-50 text-slate-700 font-medium transition cursor-pointer"
@@ -905,6 +922,29 @@ export const Header: React.FC<HeaderProps> = ({
               </>
             )}
           </div>
+
+            {/* Customer Website Notifications Bell (signed-in customers) */}
+            {isLoggedIn && onOpenNotifications && (
+              <button
+                id="header-notifications-btn"
+                onClick={onOpenNotifications}
+                className="flex flex-col items-center justify-center text-neutral-300 hover:text-white p-1 sm:px-2 sm:py-1 rounded-lg hover:bg-neutral-800 transition relative cursor-pointer group shrink-0"
+                aria-label="Notifications"
+                title="Notifications & Back-in-Stock Alerts"
+              >
+                <div className="relative flex items-center justify-center">
+                  <Bell className="w-4 h-4 sm:w-5 sm:h-5 text-neutral-300 group-hover:text-white transition" />
+                  {unreadNotificationsCount > 0 && (
+                    <span className="absolute -top-1 -right-2 min-w-[16px] h-4 px-1 bg-red-600 text-white text-[9px] font-semibold rounded-full flex items-center justify-center shadow-md font-sans tabular-nums">
+                      {unreadNotificationsCount > 9 ? '9+' : unreadNotificationsCount}
+                    </span>
+                  )}
+                </div>
+                <span className="hidden sm:block text-[10px] font-medium tracking-[0.02em] font-sans text-neutral-300 group-hover:text-white mt-0.5">
+                  Alerts
+                </span>
+              </button>
+            )}
 
             {/* Wishlist Button with Label */}
             <button

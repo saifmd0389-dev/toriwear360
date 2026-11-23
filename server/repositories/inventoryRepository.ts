@@ -328,6 +328,7 @@ export class InventoryRepository {
       }
 
       const previousQuantity = current.quantityOnHand;
+      const previousAvailable = current.quantityAvailable;
 
       // 2. Strict Negative Inventory & Overselling Prevention
       if (delta < 0 && previousQuantity + delta < 0) {
@@ -368,6 +369,10 @@ export class InventoryRepository {
         }
       } catch (err) {
         console.warn('[InventoryRepo] Warning syncing variant stock to product repository:', err);
+      }
+
+      if (previousAvailable <= 0 && current.quantityAvailable > 0) {
+        this.emitBackInStockTransition(current.variantId, previousAvailable, current.quantityAvailable);
       }
 
       return current;
@@ -517,6 +522,7 @@ export class InventoryRepository {
       const current = this.fallbackInventory.get(variantId);
       if (!current) return null;
 
+      const previousAvailable = current.quantityAvailable;
       current.quantityReserved = Math.max(0, current.quantityReserved - releaseQty);
       current.quantityAvailable = Math.max(0, current.quantityOnHand - current.quantityReserved);
       current.lowStockAlert = current.quantityAvailable <= current.threshold;
@@ -538,6 +544,11 @@ export class InventoryRepository {
 
       this.saveToDisk();
       await this.syncPrisma(current);
+
+      if (previousAvailable <= 0 && current.quantityAvailable > 0) {
+        this.emitBackInStockTransition(current.variantId, previousAvailable, current.quantityAvailable);
+      }
+
       return current;
     } finally {
       release();
@@ -661,6 +672,9 @@ export class InventoryRepository {
         current = await this.getByVariantId(variantId);
       }
 
+      const previousAvailable = current ? current.quantityAvailable : 0;
+      const hadExisting = Boolean(current);
+
       if (!current) {
         const variant = await productRepository.getVariantById(variantId);
         current = {
@@ -706,6 +720,10 @@ export class InventoryRepository {
           await productRepository.updateVariantStock(current.sku, newStock);
         }
       } catch (err) {}
+
+      if (hadExisting && previousAvailable <= 0 && current.quantityAvailable > 0) {
+        this.emitBackInStockTransition(current.variantId, previousAvailable, current.quantityAvailable);
+      }
 
       return current;
     } finally {
@@ -782,6 +800,7 @@ export class InventoryRepository {
     if (!Array.isArray(variants) || variants.length === 0) return;
 
     let changed = false;
+    const restockedTransitions: Array<{ variantId: string; previousAvailable: number; newAvailable: number }> = [];
     for (const v of variants) {
       if (!v.id) continue;
       const existing = this.fallbackInventory.get(v.id);
@@ -789,6 +808,7 @@ export class InventoryRepository {
       const reservedVal = Math.max(0, Number(v.reservedStock ?? existing?.quantityReserved ?? 0));
       const availableVal = Math.max(0, stockVal - reservedVal);
       if (existing) {
+        const previousAvailable = existing.quantityAvailable;
         existing.sku = v.sku || existing.sku;
         existing.quantityOnHand = stockVal;
         existing.quantityReserved = reservedVal;
@@ -796,6 +816,13 @@ export class InventoryRepository {
         existing.lowStockAlert = availableVal <= existing.threshold;
         existing.updatedAt = new Date();
         this.fallbackInventory.set(v.id, existing);
+        if (previousAvailable <= 0 && availableVal > 0) {
+          restockedTransitions.push({
+            variantId: v.id,
+            previousAvailable,
+            newAvailable: availableVal,
+          });
+        }
       } else {
         this.fallbackInventory.set(v.id, {
           id: `inv-${v.id}`,
@@ -816,6 +843,33 @@ export class InventoryRepository {
       this.loadedFromDisk = true;
       this.saveToDisk();
     }
+
+    for (const tr of restockedTransitions) {
+      this.emitBackInStockTransition(tr.variantId, tr.previousAvailable, tr.newAvailable);
+    }
+  }
+
+  private backInStockHook: ((variantId: string, previousAvailable: number, newAvailable: number) => void) | null = null;
+
+  setBackInStockTransitionHook(
+    hook: (variantId: string, previousAvailable: number, newAvailable: number) => void
+  ): void {
+    this.backInStockHook = hook;
+  }
+
+  private emitBackInStockTransition(variantId: string, previousAvailable: number, newAvailable: number): void {
+    if (!(previousAvailable <= 0 && newAvailable > 0)) return;
+    if (this.backInStockHook) {
+      try {
+        this.backInStockHook(variantId, previousAvailable, newAvailable);
+      } catch (err) {
+        console.warn('[InventoryRepo] Back-in-stock transition hook error:', err);
+      }
+      return;
+    }
+    void import('../services/notifications/backInStockService')
+      .then((mod) => mod.triggerVariantBackInStockSafe(variantId, previousAvailable, newAvailable))
+      .catch(() => {});
   }
 
   async deleteByVariantIds(variantIds: string[]): Promise<void> {

@@ -156,6 +156,53 @@ export async function ensureMySqlSchemaInitialized(): Promise<boolean> {
       console.log('[MYSQL-INIT] Upgraded product_images.url column to LONGTEXT.');
     }
 
+    // Check additive Phase 2 Transactional Order Notifications columns idempotently
+    const [ordWaColRows]: any = await connection.query(
+      "SELECT COUNT(*) AS colCount FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'whatsappOptIn'"
+    );
+    const hasOrdWaCols = Number(ordWaColRows?.[0]?.colCount || 0) >= 1;
+
+    const [delOrdColRows]: any = await connection.query(
+      "SELECT COUNT(*) AS colCount FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'notification_deliveries' AND column_name = 'orderId'"
+    );
+    const hasDelOrdCols = Number(delOrdColRows?.[0]?.colCount || 0) >= 1;
+
+    const [delSubNullRows]: any = await connection.query(
+      "SELECT IS_NULLABLE AS isNullable FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'notification_deliveries' AND column_name = 'subscriberId'"
+    );
+    const isSubNullable = String(delSubNullRows?.[0]?.isNullable || '').toUpperCase() === 'YES';
+
+    if (!hasOrdWaCols || !hasDelOrdCols || !isSubNullable) {
+      const orderNotifPath = resolveMigrationSqlPath('prisma/migrations/20261122_order_transactional_notifications/migration.sql');
+      if (orderNotifPath) {
+        const orderNotifSql = fs.readFileSync(orderNotifPath, 'utf8');
+        console.log('[MYSQL-INIT] Applying additive Phase 2 Order Notifications schema updates...');
+        await applyStatementsIdempotently(connection, orderNotifSql);
+        console.log('[MYSQL-INIT] Additive Phase 2 Order Notifications schema verified.');
+      }
+    }
+
+    // Check additive Phase 3 Back-in-Stock Notifications tables & column idempotently
+    const [bisTablesRows]: any = await connection.query(
+      "SELECT COUNT(*) AS tableCount FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('back_in_stock_subscriptions', 'customer_notifications')"
+    );
+    const existingBisTables = Number(bisTablesRows?.[0]?.tableCount || 0);
+
+    const [delBisSubColRows]: any = await connection.query(
+      "SELECT COUNT(*) AS colCount FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'notification_deliveries' AND column_name = 'subscriptionId'"
+    );
+    const hasDelBisSubCol = Number(delBisSubColRows?.[0]?.colCount || 0) >= 1;
+
+    if (existingBisTables < 2 || !hasDelBisSubCol) {
+      const bisNotifPath = resolveMigrationSqlPath('prisma/migrations/20261123_back_in_stock_notifications/migration.sql');
+      if (bisNotifPath) {
+        const bisNotifSql = fs.readFileSync(bisNotifPath, 'utf8');
+        console.log('[MYSQL-INIT] Applying additive Phase 3 Back-in-Stock Notifications schema updates...');
+        await applyStatementsIdempotently(connection, bisNotifSql);
+        console.log('[MYSQL-INIT] Additive Phase 3 Back-in-Stock Notifications schema verified.');
+      }
+    }
+
     return true;
   } catch (err: any) {
     console.warn('[MYSQL-INIT] Database schema check note:', err?.message || err);

@@ -65,6 +65,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   });
 
   const [formErrors, setFormErrors] = useState<Partial<Record<keyof ShippingAddress, string>>>({});
+  const [whatsappOptIn, setWhatsappOptIn] = useState(false);
 
   // Payment Method State (defaults to COD until gateway availability is confirmed)
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodType>('cod');
@@ -274,6 +275,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         })),
         couponCode: discountCode || undefined,
         paymentMethod: paymentMethod.toUpperCase(),
+        whatsappOptIn: whatsappOptIn === true,
         idempotencyKey,
       };
 
@@ -582,6 +584,26 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                   />
                   {formErrors.pincode && <p className="text-[11px] text-[#FF2028] mt-1">{formErrors.pincode}</p>}
                 </div>
+              </div>
+
+              {/* Explicit WhatsApp Transactional Order Updates Opt-In */}
+              <div className="p-3.5 rounded-xl bg-neutral-950/80 border border-neutral-800/90">
+                <label className="flex items-start gap-3 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={whatsappOptIn}
+                    onChange={(e) => setWhatsappOptIn(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-[#FF2028] focus:ring-[#FF2028] focus:ring-offset-0 cursor-pointer shrink-0"
+                  />
+                  <span className="text-xs font-sans text-neutral-200 leading-relaxed">
+                    <span className="font-semibold text-white">
+                      Send transactional order updates on WhatsApp
+                    </span>
+                    <span className="block text-[11px] text-neutral-400 mt-0.5">
+                      I confirm my mobile number{address.phone.trim() ? ` (+91 ${address.phone.trim()})` : ''} is WhatsApp-enabled and consent to receive order confirmation, cancellation, shipping &amp; delivery updates. Optional — transactional emails are always sent.
+                    </span>
+                  </span>
+                </label>
               </div>
 
               <div>

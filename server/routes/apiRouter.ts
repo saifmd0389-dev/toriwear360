@@ -39,6 +39,15 @@ import {
 } from '../validation/schemas';
 import { mediaCleanupService } from '../services/storage/mediaCleanupService';
 import { isMediaCoordinationError } from '../services/storage/mediaCoordination';
+import { backInStockRepository, BrowserPushChannelStatus } from '../repositories/backInStockRepository';
+import {
+  BackInStockValidationError,
+  cancelCustomerBackInStockSubscription,
+  getAdminBackInStockOverview,
+  retryFailedBackInStockSubscription,
+  subscribeToBackInStock,
+} from '../services/notifications/backInStockService';
+import { normalizeBackInStockPhoneToE164 } from '../services/notifications/backInStockTemplates';
 
 export const apiRouter = Router();
 
@@ -1569,6 +1578,7 @@ apiRouter.post('/v1/orders', async (req: Request, res: Response) => {
   const result = await mediaCleanupService.withMediaReferenceWrite(() =>
     orderService.createOrder({
       ...req.body,
+      whatsappOptIn: req.body?.whatsappOptIn === true,
       customerId: authCustomer ? authCustomer.id : undefined,
       idempotencyKey: idempotencyKey || req.body.idempotencyKey,
     }, ip)
@@ -3259,4 +3269,296 @@ apiRouter.post('/v1/admin/returns/:id/verify-refund', requireStaffPermission('or
     return res.status(400).json({ success: false, error: err.message || 'Failed to verify refund status.' });
   }
 });
+
+// ============================================================================
+// PHASE 3: BACK-IN-STOCK SUBSCRIPTIONS & CUSTOMER WEBSITE NOTIFICATIONS INBOX
+// Strict Priority: 1. WhatsApp (PRIMARY) -> 2. Website (SECONDARY) -> 3. Email (BACKUP)
+// ============================================================================
+
+/**
+ * Subscribe to exact product/color/size/variant back-in-stock notifications.
+ * Uses registered customer mobile/email if authenticated, while always requiring
+ * explicit WhatsApp consent (whatsappConsent === true) before enabling WhatsApp.
+ */
+apiRouter.post('/v1/back-in-stock/subscribe', async (req: Request, res: Response) => {
+  try {
+    const authCustomer = await resolveAuthenticatedCustomer(req);
+    const body = req.body || {};
+
+    const productId = String(body.productId || '').trim();
+    const variantId = body.variantId ? String(body.variantId).trim() : undefined;
+    const size = String(body.size || '').trim();
+    const color = body.color ? String(body.color).trim() : undefined;
+
+    if (!productId || !size) {
+      return res.status(400).json({
+        success: false,
+        code: 'MISSING_VARIANT_FIELDS',
+        error: 'Product and exact size are required to subscribe for back-in-stock alerts.',
+      });
+    }
+
+    const phone =
+      body.phone !== undefined && String(body.phone || '').trim() !== ''
+        ? String(body.phone).trim()
+        : authCustomer?.phone || null;
+
+    const email =
+      body.email !== undefined && String(body.email || '').trim() !== ''
+        ? String(body.email).trim()
+        : authCustomer?.email || null;
+
+    const customerName =
+      body.customerName !== undefined && String(body.customerName || '').trim() !== ''
+        ? String(body.customerName).trim().slice(0, 120)
+        : authCustomer?.name || null;
+
+    const result = await subscribeToBackInStock({
+      productId,
+      variantId,
+      size,
+      color,
+      customerId: authCustomer?.id || null,
+      customerName,
+      phone,
+      email,
+      whatsappConsent: body.whatsappConsent === true,
+      websiteEnabled:
+        body.websiteEnabled !== undefined ? Boolean(body.websiteEnabled) : Boolean(authCustomer?.id),
+      browserPushEnabled: Boolean(body.browserPushEnabled),
+      emailBackupEnabled: Boolean(body.emailBackupEnabled),
+    });
+
+    return res.status(result.alreadySubscribed ? 200 : 201).json({
+      success: true,
+      alreadySubscribed: result.alreadySubscribed,
+      message: result.alreadySubscribed
+        ? 'Your back-in-stock alert preferences for this exact size & color have been updated.'
+        : 'You are on the restock waitlist! We will notify you as soon as this exact size & color is back in stock.',
+      data: {
+        id: result.subscription.id,
+        productId: result.subscription.productId,
+        productName: result.subscription.productName,
+        variantId: result.subscription.variantId,
+        size: result.subscription.size,
+        color: result.subscription.color,
+        whatsappConsent: result.subscription.whatsappConsent,
+        websiteEnabled: result.subscription.websiteEnabled,
+        browserPushEnabled: result.subscription.browserPushEnabled,
+        emailBackupEnabled: result.subscription.emailBackupEnabled,
+        status: result.subscription.status,
+      },
+    });
+  } catch (err: any) {
+    if (err instanceof BackInStockValidationError) {
+      return res.status(err.statusCode).json({
+        success: false,
+        code: err.code,
+        error: err.message,
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Unable to save back-in-stock subscription.',
+    });
+  }
+});
+
+/**
+ * Authenticated customer's own back-in-stock subscriptions
+ */
+apiRouter.get('/v1/back-in-stock/my-subscriptions', async (req: Request, res: Response) => {
+  try {
+    const authCustomer = await resolveAuthenticatedCustomer(req);
+    if (!authCustomer) {
+      return res.status(401).json({ success: false, error: 'Please sign in to view your restock alerts.' });
+    }
+    const phoneE164 = authCustomer.phone ? normalizeBackInStockPhoneToE164(authCustomer.phone) : null;
+    const subs = await backInStockRepository.listSubscriptions({
+      customerId: authCustomer.id,
+      customerEmail: authCustomer.email || undefined,
+      customerPhone: phoneE164 || undefined,
+      limit: 100,
+    });
+    return res.json({ success: true, data: subs });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to load restock alerts.' });
+  }
+});
+
+/**
+ * Cancel authenticated customer's own back-in-stock subscription (ownership enforced)
+ */
+apiRouter.delete('/v1/back-in-stock/subscriptions/:id', async (req: Request, res: Response) => {
+  try {
+    const authCustomer = await resolveAuthenticatedCustomer(req);
+    if (!authCustomer) {
+      return res.status(401).json({ success: false, error: 'Authentication required.' });
+    }
+    const phoneE164 = authCustomer.phone ? normalizeBackInStockPhoneToE164(authCustomer.phone) : null;
+    const updated = await cancelCustomerBackInStockSubscription(String(req.params.id || ''), {
+      customerId: authCustomer.id,
+      email: authCustomer.email || null,
+      phoneE164,
+    });
+    return res.json({ success: true, data: updated });
+  } catch (err: any) {
+    if (err instanceof BackInStockValidationError) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to cancel subscription.' });
+  }
+});
+
+/**
+ * Authenticated customer's durable Website Notifications Inbox (persists even while offline)
+ */
+apiRouter.get('/v1/notifications/inbox', async (req: Request, res: Response) => {
+  try {
+    const authCustomer = await resolveAuthenticatedCustomer(req);
+    if (!authCustomer) {
+      return res.status(401).json({ success: false, error: 'Sign in to view your notifications.' });
+    }
+    const phoneE164 = authCustomer.phone ? normalizeBackInStockPhoneToE164(authCustomer.phone) : null;
+    const notifications = await backInStockRepository.listCustomerNotifications({
+      customerId: authCustomer.id,
+      email: authCustomer.email || null,
+      phoneE164,
+      limit: 50,
+    });
+    const unreadCount = notifications.filter((n) => !n.isRead).length;
+    return res.json({
+      success: true,
+      unreadCount,
+      data: notifications,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to load notifications.' });
+  }
+});
+
+/**
+ * Mark a single website notification as read (ownership enforced)
+ */
+apiRouter.post('/v1/notifications/:id/read', async (req: Request, res: Response) => {
+  try {
+    const authCustomer = await resolveAuthenticatedCustomer(req);
+    if (!authCustomer) {
+      return res.status(401).json({ success: false, error: 'Authentication required.' });
+    }
+    const notif = await backInStockRepository.findCustomerNotificationById(String(req.params.id || ''));
+    if (!notif) {
+      return res.status(404).json({ success: false, error: 'Notification not found.' });
+    }
+    const phoneE164 = authCustomer.phone ? normalizeBackInStockPhoneToE164(authCustomer.phone) : null;
+    const emailLower = authCustomer.email ? authCustomer.email.toLowerCase() : null;
+    const owns =
+      (notif.customerId && notif.customerId === authCustomer.id) ||
+      (emailLower && notif.customerEmail === emailLower) ||
+      (phoneE164 && notif.customerPhone === phoneE164);
+
+    if (!owns) {
+      return res.status(403).json({ success: false, error: 'Forbidden.' });
+    }
+
+    const updated = await backInStockRepository.markCustomerNotificationRead(notif.id);
+    return res.json({ success: true, data: updated });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to mark notification read.' });
+  }
+});
+
+/**
+ * Mark all customer website notifications as read
+ */
+apiRouter.post('/v1/notifications/read-all', async (req: Request, res: Response) => {
+  try {
+    const authCustomer = await resolveAuthenticatedCustomer(req);
+    if (!authCustomer) {
+      return res.status(401).json({ success: false, error: 'Authentication required.' });
+    }
+    const phoneE164 = authCustomer.phone ? normalizeBackInStockPhoneToE164(authCustomer.phone) : null;
+    const count = await backInStockRepository.markAllCustomerNotificationsRead({
+      customerId: authCustomer.id,
+      email: authCustomer.email || null,
+      phoneE164,
+    });
+    return res.json({ success: true, markedRead: count });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to mark notifications read.' });
+  }
+});
+
+/**
+ * Record client-side Browser Notification delivery outcome independently
+ */
+apiRouter.post('/v1/notifications/:id/browser-push-status', async (req: Request, res: Response) => {
+  try {
+    const authCustomer = await resolveAuthenticatedCustomer(req);
+    if (!authCustomer) {
+      return res.status(401).json({ success: false, error: 'Authentication required.' });
+    }
+    const status = String(req.body?.status || '').trim().toUpperCase() as BrowserPushChannelStatus;
+    if (!['DELIVERED', 'FAILED', 'SKIPPED', 'UNSUPPORTED'].includes(status)) {
+      return res.status(400).json({ success: false, error: 'Invalid browser push status.' });
+    }
+
+    const notif = await backInStockRepository.findCustomerNotificationById(String(req.params.id || ''));
+    if (!notif) {
+      return res.status(404).json({ success: false, error: 'Notification not found.' });
+    }
+    const phoneE164 = authCustomer.phone ? normalizeBackInStockPhoneToE164(authCustomer.phone) : null;
+    const emailLower = authCustomer.email ? authCustomer.email.toLowerCase() : null;
+    const owns =
+      (notif.customerId && notif.customerId === authCustomer.id) ||
+      (emailLower && notif.customerEmail === emailLower) ||
+      (phoneE164 && notif.customerPhone === phoneE164);
+
+    if (!owns) {
+      return res.status(403).json({ success: false, error: 'Forbidden.' });
+    }
+
+    const updated = await backInStockRepository.updateBrowserPushStatus(notif.id, status);
+    return res.json({ success: true, data: updated });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to update browser push status.' });
+  }
+});
+
+/**
+ * Admin Visibility: Back-in-Stock Waitlist, Variant Demand, & Per-Channel Delivery Status
+ */
+apiRouter.get('/v1/admin/back-in-stock', requireStaffPermission('inventory.view'), async (req: Request, res: Response) => {
+  try {
+    const status = req.query.status ? String(req.query.status) : undefined;
+    const search = req.query.search ? String(req.query.search) : undefined;
+    const overview = await getAdminBackInStockOverview({ status, search });
+    return res.json({ success: true, data: overview });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to load back-in-stock overview.' });
+  }
+});
+
+/**
+ * Admin Safe Retry: Retries ONLY failed notification channels without re-sending succeeded ones
+ */
+apiRouter.post('/v1/admin/back-in-stock/:id/retry', requireStaffPermission('inventory.edit'), async (req: Request, res: Response) => {
+  try {
+    const result = await retryFailedBackInStockSubscription(String(req.params.id || ''));
+    return res.json({
+      success: true,
+      message:
+        result.finalStatus === 'NOTIFIED'
+          ? 'Failed channel(s) retried and delivered successfully.'
+          : 'Retry completed; one or more channels still require attention.',
+      data: result,
+    });
+  } catch (err: any) {
+    if (err instanceof BackInStockValidationError) {
+      return res.status(err.statusCode).json({ success: false, code: err.code, error: err.message });
+    }
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to retry back-in-stock delivery.' });
+  }
+});
+
 

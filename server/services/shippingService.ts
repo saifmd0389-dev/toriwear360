@@ -8,6 +8,8 @@ import { logisticsPartnerRepository } from '../repositories/logisticsPartnerRepo
 import { logisticsManager } from './logistics/logisticsManager';
 import { safeTimingEqual } from '../utils/storageHelper';
 import { LogisticsCarrierKey } from './logistics/types';
+import { dispatchOrderNotificationSafe } from './notifications/orderNotificationService';
+import { sanitizeTrackingUrl } from './notifications/orderWhatsAppTemplates';
 
 export interface CreateShipmentInput {
   orderId: string;
@@ -80,6 +82,13 @@ export class ShippingService {
 
     let shipment = await shippingRepository.findByAwbCode(carrierRes.awbNumber);
     if (!shipment) {
+      const carrierPartnerConfig = await logisticsPartnerRepository.getByCarrierKey(carrierRes.carrierKey);
+      const resolvedTrackingUrl = carrierPartnerConfig?.trackingUrlTemplate
+        ? sanitizeTrackingUrl(
+            carrierPartnerConfig.trackingUrlTemplate.replace('{awb}', encodeURIComponent(carrierRes.awbNumber))
+          )
+        : undefined;
+
       shipment = await shippingRepository.createShipment({
         id: `shp-${Date.now()}`,
         orderId: order.id,
@@ -88,6 +97,7 @@ export class ShippingService {
         carrierShipmentId: carrierRes.shipmentId,
         trackingNumber: carrierRes.awbNumber,
         awbCode: carrierRes.awbNumber,
+        trackingUrl: resolvedTrackingUrl,
         shippingLabelUrl: carrierRes.labelUrl || `/api/v1/admin/logistics/shipments/${carrierRes.awbNumber}/label`,
         status: 'MANIFESTED',
         estimatedDeliveryDate: carrierRes.estimatedDeliveryDate ? new Date(carrierRes.estimatedDeliveryDate) : undefined,
@@ -237,6 +247,12 @@ export class ShippingService {
     }
 
     // 4. Map Status & Record Tracking Event
+    const previousFulfillmentStatus = order.fulfillmentStatus;
+    const webhookTrackingUrl =
+      sanitizeTrackingUrl(payload.tracking_url || payload.trackingUrl || payload.etd_url) ||
+      shipment?.trackingUrl ||
+      undefined;
+
     let mappedShipmentStatus: ShipmentRecord['status'] = 'IN_TRANSIT';
     let mappedFulfillmentStatus: OrderFulfillmentStatus = order.fulfillmentStatus;
     let shouldRestockInventory = false;
@@ -270,6 +286,7 @@ export class ShippingService {
     if (shipment) {
       await shippingRepository.updateShipment(shipment.id, {
         status: mappedShipmentStatus,
+        trackingUrl: webhookTrackingUrl || shipment.trackingUrl,
         actualDeliveryDate: mappedShipmentStatus === 'DELIVERED' ? new Date() : shipment.actualDeliveryDate,
       });
 
@@ -285,12 +302,27 @@ export class ShippingService {
 
     // 6. Update Order Status & Timeline
     order.fulfillmentStatus = mappedFulfillmentStatus;
+    if (awb && !order.awbNumber) {
+      order.awbNumber = awb;
+      order.courierTrackingNumber = order.courierTrackingNumber || awb;
+    }
+    if (payload.courier_name && !order.courierPartner) {
+      order.courierPartner = String(payload.courier_name);
+    }
     if (mappedShipmentStatus === 'DELIVERED' && order.paymentMethod?.toUpperCase() === 'COD') {
       order.paymentStatus = 'PAID';
     }
-    if (mappedFulfillmentStatus === 'CANCELLED' && !order.cancelledAt) {
-      order.cancelledAt = new Date();
+    if (mappedFulfillmentStatus === 'CANCELLED') {
+      if (!order.cancelledAt) order.cancelledAt = new Date();
       order.cancellationReason = order.cancellationReason || `Cancelled via Shiprocket webhook (${rawStatus})`;
+      if (!order.refundStatus) {
+        order.refundStatus =
+          order.paymentStatus === 'PAID'
+            ? 'REFUND_INITIATED'
+            : order.paymentMethod?.toUpperCase() === 'COD'
+              ? 'NOT_APPLICABLE_COD'
+              : 'NOT_APPLICABLE_UNPAID';
+      }
     }
 
     order.timeline.push({
@@ -300,7 +332,7 @@ export class ShippingService {
       actorId: 'SHIPROCKET_WEBHOOK',
       actorName: payload.courier_name || 'Shiprocket 3PL',
     });
-    await orderRepository.update(order.id, order);
+    const updatedOrder = (await orderRepository.update(order.id, order)) || order;
 
     // 7. Automated Inventory Restock on RTO Delivered / Shipment Cancelled
     if (shouldRestockInventory) {
@@ -340,6 +372,45 @@ export class ShippingService {
       severity: shouldRestockInventory ? 'WARNING' : 'INFO',
     });
 
+    // 8. Post-commit transactional shipping & cancellation notifications (non-blocking, idempotent)
+    const courierName = payload.courier_name || updatedOrder.courierPartner || shipment?.carrier;
+    const trackingNo = awb || updatedOrder.awbNumber || updatedOrder.courierTrackingNumber || shipment?.awbCode;
+
+    if (mappedFulfillmentStatus === 'CANCELLED' && previousFulfillmentStatus !== 'CANCELLED') {
+      dispatchOrderNotificationSafe('ORDER_CANCELLED', {
+        order: updatedOrder,
+        cancellationReason: updatedOrder.cancellationReason,
+      });
+    } else if (mappedFulfillmentStatus === 'DELIVERED' && previousFulfillmentStatus !== 'DELIVERED') {
+      dispatchOrderNotificationSafe('ORDER_DELIVERED', {
+        order: updatedOrder,
+        courierPartner: courierName,
+        trackingNumber: trackingNo,
+        trackingUrl: webhookTrackingUrl,
+      });
+    } else if (
+      mappedFulfillmentStatus === 'OUT_FOR_DELIVERY' &&
+      previousFulfillmentStatus !== 'OUT_FOR_DELIVERY' &&
+      previousFulfillmentStatus !== 'DELIVERED'
+    ) {
+      dispatchOrderNotificationSafe('ORDER_OUT_FOR_DELIVERY', {
+        order: updatedOrder,
+        courierPartner: courierName,
+        trackingNumber: trackingNo,
+        trackingUrl: webhookTrackingUrl,
+      });
+    } else if (
+      mappedFulfillmentStatus === 'SHIPPED' &&
+      !['SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED'].includes(previousFulfillmentStatus)
+    ) {
+      dispatchOrderNotificationSafe('ORDER_SHIPPED', {
+        order: updatedOrder,
+        courierPartner: courierName,
+        trackingNumber: trackingNo,
+        trackingUrl: webhookTrackingUrl,
+      });
+    }
+
     return {
       success: true,
       message: `Shipment status updated to ${rawStatus}.`,
@@ -363,12 +434,21 @@ export class ShippingService {
       return { success: false, error: res.message };
     }
 
+    let cancelledOrder = null;
     if (shipment) {
       const order = await orderRepository.findById(shipment.orderId);
       if (order && !['DELIVERED', 'CANCELLED', 'RETURNED'].includes(order.fulfillmentStatus)) {
         order.fulfillmentStatus = 'CANCELLED';
         order.cancelledAt = new Date();
         order.cancellationReason = reason || 'Shipment cancelled by operator';
+        if (!order.refundStatus) {
+          order.refundStatus =
+            order.paymentStatus === 'PAID'
+              ? 'REFUND_INITIATED'
+              : order.paymentMethod?.toUpperCase() === 'COD'
+                ? 'NOT_APPLICABLE_COD'
+                : 'NOT_APPLICABLE_UNPAID';
+        }
         order.timeline.push({
           status: 'CANCELLED',
           timestamp: new Date().toISOString(),
@@ -376,7 +456,7 @@ export class ShippingService {
           actorId: operatorId,
           actorName: 'Operations',
         });
-        await orderRepository.update(order.id, order);
+        cancelledOrder = (await orderRepository.update(order.id, order)) || order;
       }
     }
 
@@ -390,6 +470,13 @@ export class ShippingService {
       newValue: reason || 'Shipment cancelled on carrier network',
       severity: 'WARNING',
     });
+
+    if (cancelledOrder) {
+      dispatchOrderNotificationSafe('ORDER_CANCELLED', {
+        order: cancelledOrder,
+        cancellationReason: cancelledOrder.cancellationReason,
+      });
+    }
 
     return { success: true, message: res.message };
   }

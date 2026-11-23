@@ -14,7 +14,7 @@ export interface SendEmailInput {
   subject: string;
   html: string;
   text: string;
-  unsubscribeUrl: string;
+  unsubscribeUrl?: string;
   idempotencyKey: string;
   deliveryId?: string;
   tags?: Array<{ name: string; value: string }>;
@@ -30,15 +30,19 @@ export interface SendEmailResult {
   rawResponse?: unknown;
 }
 
+export function resolveResendApiKey(): string {
+  return String(process.env.RESEND_API_KEY || process.env.EMAIL_API_KEY || '').trim();
+}
+
 export function getEmailProviderStatus(): EmailProviderStatus {
   const provider = String(process.env.EMAIL_PROVIDER || 'resend').trim().toLowerCase();
-  const apiKey = String(process.env.RESEND_API_KEY || '').trim();
+  const apiKey = resolveResendApiKey();
   const fromAddr = String(process.env.EMAIL_FROM_ADDRESS || '').trim();
   const webhookSecret = String(process.env.EMAIL_WEBHOOK_SECRET || '').trim();
 
   const missingVars: string[] = [];
   if (provider !== 'resend') missingVars.push('EMAIL_PROVIDER (must be "resend")');
-  if (!apiKey) missingVars.push('RESEND_API_KEY');
+  if (!apiKey) missingVars.push('RESEND_API_KEY (or EMAIL_API_KEY)');
   if (!fromAddr) missingVars.push('EMAIL_FROM_ADDRESS');
 
   return {
@@ -186,7 +190,7 @@ export async function sendResendEmail(input: SendEmailInput): Promise<SendEmailR
     return { success: false, error: errorMsg, configMissing: true, attempts: 0 };
   }
 
-  const apiKey = String(process.env.RESEND_API_KEY).trim();
+  const apiKey = resolveResendApiKey();
   const fromAddress = String(process.env.EMAIL_FROM_ADDRESS).trim();
   const replyTo = String(process.env.EMAIL_REPLY_TO || '').trim() || undefined;
   const maxAttempts = 3;
@@ -212,17 +216,21 @@ export async function sendResendEmail(input: SendEmailInput): Promise<SendEmailR
     }
 
     try {
+      const headers: Record<string, string> = {
+        'X-Entity-Ref-ID': input.idempotencyKey,
+      };
+      if (input.unsubscribeUrl && input.unsubscribeUrl.trim()) {
+        headers['List-Unsubscribe'] = `<${input.unsubscribeUrl.trim()}>`;
+        headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
+      }
+
       const payload: Record<string, any> = {
         from: fromAddress,
         to: [input.to],
         subject: input.subject,
         html: input.html,
         text: input.text,
-        headers: {
-          'List-Unsubscribe': `<${input.unsubscribeUrl}>`,
-          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-          'X-Entity-Ref-ID': input.idempotencyKey,
-        },
+        headers,
       };
       if (replyTo) payload.reply_to = replyTo;
       if (input.tags && input.tags.length > 0) payload.tags = input.tags;

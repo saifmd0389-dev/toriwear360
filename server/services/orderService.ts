@@ -14,6 +14,8 @@ import { productRepository } from '../repositories/productRepository';
 import { financeRepository } from '../repositories/financeRepository';
 import { auditRepository } from '../repositories/auditRepository';
 import { withTransaction } from '../../database/transactions';
+import { dispatchOrderNotificationSafe } from './notifications/orderNotificationService';
+import { normalizeOrderPhoneToE164 } from './notifications/orderWhatsAppTemplates';
 
 export interface CreateOrderItemInput {
   productId: string;
@@ -33,6 +35,7 @@ export interface CreateOrderInput {
   couponCode?: string;
   paymentMethod: 'UPI' | 'CARD' | 'NET_BANKING' | 'WALLET' | 'COD' | string;
   deliveryNotes?: string;
+  whatsappOptIn?: boolean;
   idempotencyKey?: string;
 }
 
@@ -371,10 +374,11 @@ export class OrderService {
     }));
 
     try {
-      return await withTransaction(async (tx) => {
+      const normalizedPaymentMethod = (input.paymentMethod || 'UPI').toUpperCase();
+      const isCod = normalizedPaymentMethod === 'COD';
+
+      const txResult = await withTransaction(async (tx) => {
         // 5. Inventory Reservation / Allocation
-        const normalizedPaymentMethod = (input.paymentMethod || 'UPI').toUpperCase();
-        const isCod = normalizedPaymentMethod === 'COD';
         const heldItems: Array<{ variantId: string; quantity: number }> = [];
 
         tx.onRollback?.(async () => {
@@ -467,6 +471,11 @@ export class OrderService {
     ];
 
     const orderAccessToken = 'ord_tok_' + crypto.randomBytes(24).toString('hex');
+    const normalizedWhatsappNumber =
+      input.whatsappOptIn === true
+        ? normalizeOrderPhoneToE164(input.customerPhone || addressSnapshot.phone)
+        : null;
+    const whatsappOptIn = input.whatsappOptIn === true && Boolean(normalizedWhatsappNumber);
 
     const orderRecord: OrderRecord = {
       id: orderId,
@@ -490,6 +499,9 @@ export class OrderService {
       shippingAddress: addressSnapshot,
       items: verifiedItems,
       deliveryNotes: input.deliveryNotes,
+      whatsappOptIn,
+      whatsappOptInAt: whatsappOptIn ? new Date() : undefined,
+      whatsappNumber: normalizedWhatsappNumber || undefined,
       ipAddress: ip,
       timeline,
       createdAt: new Date(),
@@ -543,6 +555,14 @@ export class OrderService {
 
         return { success: true, order: saved };
       });
+
+      // Dispatch transactional confirmation ONLY after COD order commits.
+      // Prepaid orders are confirmed exclusively after payment verification/webhook.
+      if (txResult.success && txResult.order && isCod) {
+        dispatchOrderNotificationSafe('ORDER_CONFIRMED', { order: txResult.order });
+      }
+
+      return txResult;
     } catch (err: any) {
       console.warn('[OrderService] Order atomic transaction error:', err.message);
       return { success: false, error: err.message || 'Failed to place order.' };
@@ -599,6 +619,19 @@ export class OrderService {
       fulfillmentStatus: targetStatus,
     };
 
+    if (targetStatus === 'CANCELLED') {
+      if (!order.cancelledAt) updates.cancelledAt = new Date();
+      if (!order.cancellationReason) updates.cancellationReason = note || 'Cancelled by administrator';
+      if (!order.refundStatus) {
+        updates.refundStatus =
+          order.paymentStatus === 'PAID'
+            ? 'REFUND_INITIATED'
+            : order.paymentMethod?.toUpperCase() === 'COD'
+              ? 'NOT_APPLICABLE_COD'
+              : 'NOT_APPLICABLE_UNPAID';
+      }
+    }
+
     if (courierInfo?.courierPartner) updates.courierPartner = courierInfo.courierPartner;
     if (courierInfo?.trackingNumber) {
       updates.courierTrackingNumber = courierInfo.trackingNumber;
@@ -633,6 +666,33 @@ export class OrderService {
       severity: 'INFO',
     });
 
+    if (updated) {
+      if (targetStatus === 'CANCELLED') {
+        dispatchOrderNotificationSafe('ORDER_CANCELLED', {
+          order: updated,
+          cancellationReason: note || updated.cancellationReason,
+        });
+      } else if (targetStatus === 'SHIPPED') {
+        dispatchOrderNotificationSafe('ORDER_SHIPPED', {
+          order: updated,
+          courierPartner: courierInfo?.courierPartner || updated.courierPartner,
+          trackingNumber: courierInfo?.trackingNumber || updated.awbNumber || updated.courierTrackingNumber,
+        });
+      } else if (targetStatus === 'OUT_FOR_DELIVERY') {
+        dispatchOrderNotificationSafe('ORDER_OUT_FOR_DELIVERY', {
+          order: updated,
+          courierPartner: courierInfo?.courierPartner || updated.courierPartner,
+          trackingNumber: courierInfo?.trackingNumber || updated.awbNumber || updated.courierTrackingNumber,
+        });
+      } else if (targetStatus === 'DELIVERED') {
+        dispatchOrderNotificationSafe('ORDER_DELIVERED', {
+          order: updated,
+          courierPartner: courierInfo?.courierPartner || updated.courierPartner,
+          trackingNumber: courierInfo?.trackingNumber || updated.awbNumber || updated.courierTrackingNumber,
+        });
+      }
+    }
+
     return { success: true, order: updated || undefined };
   }
 
@@ -647,7 +707,7 @@ export class OrderService {
   ): Promise<{ success: boolean; order?: OrderRecord; alreadyCancelled?: boolean; error?: string }> {
     const releaseLock = await this.acquireOrderLock(orderId);
     try {
-      return await withTransaction(async (_tx) => {
+      const txResult = await withTransaction(async (_tx) => {
         const order = (await orderRepository.findById(orderId)) || (await orderRepository.findByOrderNumber(orderId));
         if (!order) {
           return { success: false, error: 'Order not found.' };
@@ -707,7 +767,11 @@ export class OrderService {
         }
 
         const isPaid = order.paymentStatus === 'PAID';
-        const refundStatus = isPaid ? 'REFUND_INITIATED' : 'NOT_APPLICABLE_COD';
+        const refundStatus = isPaid
+          ? 'REFUND_INITIATED'
+          : order.paymentMethod?.toUpperCase() === 'COD'
+            ? 'NOT_APPLICABLE_COD'
+            : 'NOT_APPLICABLE_UNPAID';
 
         // 3. Record refund/cancellation in Phase 2 Finance if paid
         if (isPaid) {
@@ -769,6 +833,15 @@ export class OrderService {
 
         return { success: true, order: updated || undefined };
       });
+
+      if (txResult.success && !txResult.alreadyCancelled && txResult.order) {
+        dispatchOrderNotificationSafe('ORDER_CANCELLED', {
+          order: txResult.order,
+          cancellationReason: reason,
+        });
+      }
+
+      return txResult;
     } finally {
       releaseLock();
     }

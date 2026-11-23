@@ -8,6 +8,7 @@ import { auditRepository } from '../repositories/auditRepository';
 import { withTransaction } from '../../database/transactions';
 import { paymentConfigService } from './paymentConfigService';
 import { safeTimingEqual } from '../utils/storageHelper';
+import { dispatchOrderNotificationSafe } from './notifications/orderNotificationService';
 
 export interface CreatePaymentIntentInput {
   orderId: string;
@@ -391,6 +392,9 @@ export class PaymentService {
       severity: 'INFO',
     });
 
+    // Post-commit transactional order confirmation (idempotent across verifyPayment & Razorpay webhooks)
+    dispatchOrderNotificationSafe('ORDER_CONFIRMED', { order });
+
     return {
       success: true,
       message: 'Payment verified successfully and order transitioned to PAID.',
@@ -659,6 +663,8 @@ export class PaymentService {
       if (tx) order = await orderRepository.findById(tx.orderId);
     }
 
+    let confirmedPaidOrder: typeof order = null;
+
     if (eventType === 'payment.captured' || eventType === 'order.paid') {
       if (order && order.paymentStatus !== 'PAID' && order.paymentStatus !== 'REFUNDED') {
         await withTransaction(async () => {
@@ -704,6 +710,7 @@ export class PaymentService {
 
           this.recordOrderPaymentFinance(order);
         });
+        confirmedPaidOrder = order;
       }
     } else if (eventType === 'payment.failed') {
       if (order && order.paymentStatus !== 'PAID' && order.paymentStatus !== 'REFUNDED') {
@@ -779,6 +786,10 @@ export class PaymentService {
       receivedAt: new Date(),
     };
     await paymentRepository.logWebhook(webhookRecord);
+
+    if (confirmedPaidOrder) {
+      dispatchOrderNotificationSafe('ORDER_CONFIRMED', { order: confirmedPaidOrder });
+    }
 
     return { success: true, message: `Webhook event "${eventType}" processed successfully.` };
   }

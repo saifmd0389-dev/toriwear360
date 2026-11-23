@@ -82,6 +82,7 @@ export type AdminView =
   | 'PRODUCTS'
   | 'CATEGORIES'
   | 'INVENTORY'
+  | 'BACK_IN_STOCK'
   | 'ORDERS'
   | 'CUSTOMERS'
   | 'PAYMENTS'
@@ -435,6 +436,10 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [securitySessions, setSecuritySessions] = useState<SecuritySession[]>(() => loadInitial('securitySessions', INITIAL_SECURITY_SESSIONS));
   const [staff, setStaff] = useState<AdminUser[]>(() => loadInitial('staff', INITIAL_ADMIN_USERS));
   const [settings, setSettings] = useState<StoreSettings>(() => loadInitial('settings', INITIAL_STORE_SETTINGS));
+  const settingsRef = useRef<StoreSettings>(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   // AI Design Lab States
   const [aiConcepts, setAiConcepts] = useState<AIDesignConcept[]>(() => loadInitial('ai_concepts', INITIAL_AI_CONCEPTS));
@@ -1489,25 +1494,21 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       console.warn('[AdminData] Network error deleting product on backend:', err);
     }
 
-    // Atomically update products state
-    setProducts(prev => {
-      const next = prev.filter(p => p.id !== id);
-      safeLocalStorageSet('tori_admin_products', next);
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('tori_admin_products_updated', { detail: next }));
-      }
-      return next;
-    });
+    // Atomically update products state (keep state updater pure; dispatch events outside updater)
+    const nextProducts = products.filter(p => p.id !== id);
+    setProducts(prev => prev.filter(p => p.id !== id));
+    safeLocalStorageSet('tori_admin_products', nextProducts);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('tori_admin_products_updated', { detail: nextProducts }));
+    }
 
     // Atomically remove linked inventory records
-    setInventory(prev => {
-      const next = prev.filter(item => item.productId !== id);
-      safeLocalStorageSet('tori_admin_inventory', next);
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('tori_admin_inventory_updated', { detail: next }));
-      }
-      return next;
-    });
+    const nextInventory = inventory.filter(item => item.productId !== id);
+    setInventory(prev => prev.filter(item => item.productId !== id));
+    safeLocalStorageSet('tori_admin_inventory', nextInventory);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('tori_admin_inventory_updated', { detail: nextInventory }));
+    }
 
     logAction('PRODUCT_DELETED', `Product #${targetCatalog} (${targetName})`, 'Permanently deleted from product catalogue and database.');
     showToast(`Product "${targetName}" permanently deleted.`);
@@ -1583,11 +1584,8 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     } else if (action === 'DELETE') {
       const updatedProducts = products.filter(p => !ids.includes(p.id));
       persistProductsImmediately(updatedProducts);
-      setInventory(prev => {
-        const next = prev.filter(item => !ids.includes(item.productId));
-        persistInventoryImmediately(next);
-        return next;
-      });
+      const nextInventory = inventory.filter(item => !ids.includes(item.productId));
+      persistInventoryImmediately(nextInventory);
       showToast(`${ids.length} products deleted.`);
       await Promise.all(
         ids.map(id => 
@@ -1687,21 +1685,23 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   // Inventory SKU Deletion (Functional & Atomic)
   const deleteInventoryItem = (variantId: string, reason?: string) => {
-    let deletedItem: InventoryItem | undefined;
+    const deletedItem = inventory.find(
+      i => i.variantId === variantId || i.sku === variantId || i.id === variantId
+    );
+    if (!deletedItem) return;
 
-    setInventory(prev => {
-      const target = prev.find(i => i.variantId === variantId || i.sku === variantId || i.id === variantId);
-      if (!target) return prev;
-      deletedItem = target;
-      const next = prev.filter(i => i.variantId !== variantId && i.sku !== variantId && i.id !== variantId);
-      safeLocalStorageSet('tori_admin_inventory', next);
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('tori_admin_inventory_updated', { detail: next }));
-      }
-      return next;
-    });
+    const nextInv = inventory.filter(
+      i => i.variantId !== variantId && i.sku !== variantId && i.id !== variantId
+    );
+    setInventory(prev =>
+      prev.filter(i => i.variantId !== variantId && i.sku !== variantId && i.id !== variantId)
+    );
+    safeLocalStorageSet('tori_admin_inventory', nextInv);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('tori_admin_inventory_updated', { detail: nextInv }));
+    }
 
-    if (deletedItem) {
+    {
       const invItem = deletedItem;
       // Record movement audit
       const movement: InventoryMovement = {
@@ -1720,8 +1720,8 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setInventoryMovements(prev => [movement, ...prev]);
 
       // Remove variant from products and update stock
-      setProducts(prevProducts => {
-        const nextProducts = prevProducts.map(p => {
+      const mapUpdatedProducts = (prevProducts: AdminProduct[]) =>
+        prevProducts.map(p => {
           if (p.id === invItem.productId || p.variants?.some(v => v.id === invItem.variantId || v.sku === invItem.sku)) {
             const nextVariants = (p.variants || []).filter(v => v.id !== invItem.variantId && v.sku !== invItem.sku);
             const totalStock = nextVariants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
@@ -1735,12 +1735,13 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           }
           return p;
         });
-        safeLocalStorageSet('tori_admin_products', nextProducts);
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('tori_admin_products_updated', { detail: nextProducts }));
-        }
-        return nextProducts;
-      });
+
+      const nextProducts = mapUpdatedProducts(products);
+      setProducts(mapUpdatedProducts);
+      safeLocalStorageSet('tori_admin_products', nextProducts);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('tori_admin_products_updated', { detail: nextProducts }));
+      }
 
       logAction(
         'STOCK_MODIFIED',
@@ -2466,14 +2467,13 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   // Settings (Server Authoritative)
   const updateSettings = async (newSettings: Partial<StoreSettings>) => {
-    setSettings(prev => {
-      const updated = { ...prev, ...newSettings };
-      try {
-        safeLocalStorageSet('tori_admin_settings', updated);
-        window.dispatchEvent(new CustomEvent('tori_settings_updated', { detail: updated }));
-      } catch {}
-      return updated;
-    });
+    const updated = { ...settingsRef.current, ...newSettings };
+    settingsRef.current = updated;
+    setSettings(updated);
+    try {
+      safeLocalStorageSet('tori_admin_settings', updated);
+      window.dispatchEvent(new CustomEvent('tori_settings_updated', { detail: updated }));
+    } catch {}
 
     const token = getSessionToken();
     try {
@@ -2502,15 +2502,14 @@ export const AdminDataProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   };
 
   const toggleMaintenanceMode = async () => {
-    const nextState = !settings.maintenanceMode;
-    setSettings(prev => {
-      const updated = { ...prev, maintenanceMode: nextState };
-      try {
-        safeLocalStorageSet('tori_admin_settings', updated);
-        window.dispatchEvent(new CustomEvent('tori_settings_updated', { detail: updated }));
-      } catch {}
-      return updated;
-    });
+    const nextState = !settingsRef.current.maintenanceMode;
+    const updated = { ...settingsRef.current, maintenanceMode: nextState };
+    settingsRef.current = updated;
+    setSettings(updated);
+    try {
+      safeLocalStorageSet('tori_admin_settings', updated);
+      window.dispatchEvent(new CustomEvent('tori_settings_updated', { detail: updated }));
+    } catch {}
 
     const token = getSessionToken();
     try {

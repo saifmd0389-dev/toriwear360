@@ -45,6 +45,7 @@ import { InternalCommunicationView } from './InternalCommunicationView';
 import { ProductsView } from './ProductsView';
 import { CategoryManagementView } from './CategoryManagementView';
 import { InventoryView } from './InventoryView';
+import { BackInStockView } from './BackInStockView';
 import { OrdersView } from './OrdersView';
 import { PaymentsView } from './PaymentsView';
 import { CustomersView } from './CustomersView';
@@ -161,6 +162,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
     { id: 'PRODUCTS', label: 'Products Vault', icon: Package, permission: 'products.view' },
     { id: 'CATEGORIES', label: 'Categories', icon: FolderTree, permission: 'products.view' },
     { id: 'INVENTORY', label: 'Inventory & Stock', icon: Boxes, permission: 'inventory.view', badge: lowStockCount },
+    { id: 'BACK_IN_STOCK', label: 'Back-in-Stock Alerts', icon: BellRing, permission: 'inventory.view' },
     { id: 'ORDERS', label: 'Orders Fulfillment', icon: ShoppingBag, permission: 'orders.view', badge: pendingOrdersCount },
     { id: 'PAYMENTS', label: 'Payments & UPI', icon: CreditCard, permission: 'payments.view' },
     { id: 'CUSTOMERS', label: 'Customer CRM', icon: Users, permission: 'customers.view' },
@@ -488,6 +490,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
           {currentView === 'PRODUCTS' && <ProductsView />}
           {currentView === 'CATEGORIES' && <CategoryManagementView />}
           {currentView === 'INVENTORY' && <InventoryView />}
+          {currentView === 'BACK_IN_STOCK' && <BackInStockView />}
           {currentView === 'ORDERS' && <OrdersView />}
           {currentView === 'PAYMENTS' && <PaymentsView />}
           {currentView === 'CUSTOMERS' && <CustomersView />}

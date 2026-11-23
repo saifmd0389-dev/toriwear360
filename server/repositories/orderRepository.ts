@@ -99,6 +99,9 @@ export interface OrderRecord {
   refundAmount?: number;
   estimatedDeliveryDate?: string;
   deliveryNotes?: string;
+  whatsappOptIn?: boolean;
+  whatsappOptInAt?: Date;
+  whatsappNumber?: string;
   ipAddress?: string;
   timeline: OrderTimelineRecord[];
   createdAt: Date;
@@ -135,6 +138,9 @@ export class OrderRepository {
               createdAt: new Date(item.createdAt || Date.now()),
               updatedAt: new Date(item.updatedAt || Date.now()),
               cancelledAt: item.cancelledAt ? new Date(item.cancelledAt) : undefined,
+              whatsappOptIn: item.whatsappOptIn === true,
+              whatsappOptInAt: item.whatsappOptInAt ? new Date(item.whatsappOptInAt) : undefined,
+              whatsappNumber: item.whatsappNumber || undefined,
             };
             this.fallbackOrders.set(rec.id, rec);
           }
@@ -348,6 +354,9 @@ export class OrderRepository {
           cancelledAt: orderToSave.cancelledAt,
           refundStatus: orderToSave.refundStatus,
           refundAmount: orderToSave.refundAmount,
+          whatsappOptIn: orderToSave.whatsappOptIn === true,
+          whatsappOptInAt: orderToSave.whatsappOptInAt || null,
+          whatsappNumber: orderToSave.whatsappNumber || null,
           items: {
             create: itemsToCreate,
           },
@@ -494,6 +503,9 @@ export class OrderRepository {
               cancelledAt: merged.cancelledAt,
               refundStatus: merged.refundStatus,
               refundAmount: merged.refundAmount,
+              ...(typeof merged.whatsappOptIn === 'boolean' ? { whatsappOptIn: merged.whatsappOptIn } : {}),
+              ...(merged.whatsappOptInAt !== undefined ? { whatsappOptInAt: merged.whatsappOptInAt || null } : {}),
+              ...(merged.whatsappNumber !== undefined ? { whatsappNumber: merged.whatsappNumber || null } : {}),
             },
           });
 
@@ -635,6 +647,14 @@ export class OrderRepository {
       awbNumber: prismaOrder.awbNumber || fallbackOrder?.awbNumber,
       cancellationReason: prismaOrder.cancellationReason || undefined,
       cancelledAt: prismaOrder.cancelledAt || undefined,
+      whatsappOptIn:
+        typeof prismaOrder.whatsappOptIn === 'boolean'
+          ? prismaOrder.whatsappOptIn
+          : fallbackOrder?.whatsappOptIn === true,
+      whatsappOptInAt: prismaOrder.whatsappOptInAt
+        ? new Date(prismaOrder.whatsappOptInAt)
+        : fallbackOrder?.whatsappOptInAt,
+      whatsappNumber: prismaOrder.whatsappNumber || fallbackOrder?.whatsappNumber || undefined,
       timeline: (prismaOrder.statusHistory || []).map((h: any) => ({
         status: h.toStatus,
         timestamp: h.timestamp ? new Date(h.timestamp).toISOString() : new Date().toISOString(),

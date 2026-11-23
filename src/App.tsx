@@ -41,6 +41,7 @@ import { PromoBannerPopup } from './components/PromoBannerPopup';
 import { CustomerAuthModal } from './components/CustomerAuthModal';
 import { CustomerAccountModals } from './components/CustomerAccountModals';
 import { WishlistModal } from './components/WishlistModal';
+import { CustomerNotificationsInboxModal, CustomerInboxNotification } from './components/CustomerNotificationsInboxModal';
 import { ProductCompareModal } from './components/ProductCompareModal';
 import { RecentlyViewedSection } from './components/RecentlyViewedSection';
 import { SupportFloatingWidget } from './components/SupportFloatingWidget';
@@ -792,6 +793,68 @@ export default function App() {
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [isWishlistOpen, setIsWishlistOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [customerNotifications, setCustomerNotifications] = useState<CustomerInboxNotification[]>([]);
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0);
+  const pushedNotificationIdsRef = useRef<Set<string>>(new Set());
+
+  const refreshCustomerNotifications = useCallback(async () => {
+    if (!customer?.id) {
+      setCustomerNotifications([]);
+      setUnreadNotificationsCount(0);
+      return;
+    }
+    const res = await apiClient.getCustomerNotificationsInbox();
+    if (res.success && Array.isArray(res.data)) {
+      const list = res.data as CustomerInboxNotification[];
+      setCustomerNotifications(list);
+      setUnreadNotificationsCount(typeof res.unreadCount === 'number' ? res.unreadCount : list.filter((n) => !n.isRead).length);
+
+      // Show browser push notification ONLY if customer already granted browser permission
+      if (typeof window !== 'undefined' && 'Notification' in window && window.Notification.permission === 'granted') {
+        for (const notif of list) {
+          if (notif.browserPushStatus === 'PENDING' && !pushedNotificationIdsRef.current.has(notif.id)) {
+            pushedNotificationIdsRef.current.add(notif.id);
+            try {
+              const browserNotif = new window.Notification(notif.title, {
+                body: notif.message,
+                icon: notif.productImage || undefined,
+                tag: `toriwear-${notif.id}`,
+              });
+              browserNotif.onclick = () => {
+                window.focus();
+                setIsNotificationsOpen(true);
+              };
+              void apiClient.reportCustomerNotificationBrowserPush(notif.id, 'DELIVERED');
+            } catch {
+              void apiClient.reportCustomerNotificationBrowserPush(notif.id, 'FAILED');
+            }
+          }
+        }
+      }
+    }
+  }, [customer?.id]);
+
+  useEffect(() => {
+    if (!customer?.id) {
+      setCustomerNotifications([]);
+      setUnreadNotificationsCount(0);
+      return;
+    }
+    void refreshCustomerNotifications();
+    const interval = window.setInterval(() => {
+      void refreshCustomerNotifications();
+    }, 60000);
+    const onFocus = () => {
+      void refreshCustomerNotifications();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [customer?.id, refreshCustomerNotifications]);
+
   const [popoutZoomProduct, setPopoutZoomProduct] = useState<Product | null>(null);
   const [twinningComboProduct, setTwinningComboProduct] = useState<Product | null>(null);
   const [isSizeGuideOpen, setIsSizeGuideOpen] = useState(false);
@@ -1606,6 +1669,8 @@ export default function App() {
         onOpenCart={() => setIsCartOpen(true)}
         onOpenSearch={() => setIsSearchOpen(true)}
         onOpenWishlist={() => setIsWishlistOpen(true)}
+        onOpenNotifications={() => setIsNotificationsOpen(true)}
+        unreadNotificationsCount={unreadNotificationsCount}
         onOpenTrackOrder={() => setIsTrackingOpen(true)}
         onOpenSizeGuide={() => {
           setSizeGuideDept('MEN');
@@ -2276,6 +2341,20 @@ export default function App() {
           } else {
             scrollToSection(activeDepartment === 'KIDS' ? 'shop-kids-section' : 'shop-men-section');
           }
+        }}
+      />
+
+      {/* Customer Notifications & Back-in-Stock Inbox Drawer */}
+      <CustomerNotificationsInboxModal
+        isOpen={isNotificationsOpen}
+        onClose={() => setIsNotificationsOpen(false)}
+        notifications={customerNotifications}
+        unreadCount={unreadNotificationsCount}
+        allProducts={storefrontCatalog}
+        onRefresh={refreshCustomerNotifications}
+        onSelectProduct={(prod) => {
+          handleOpenProductDetail(prod);
+          setIsNotificationsOpen(false);
         }}
       />
 

@@ -15,6 +15,7 @@ import {
   Maximize2,
   Scale,
   Star,
+  BellRing,
 } from 'lucide-react';
 import { Product, ProductReviewSummary, StoreContactConfig } from '../types';
 import { useCustomerAuth } from '../context/CustomerAuthContext';
@@ -24,6 +25,7 @@ import { WishlistHeartIcon } from './WishlistHeartIcon';
 import { getAuthoritativeInstagramUrl } from '../utils/socialLinks';
 import { ShimmerImage, ProductDetailSkeleton } from './StorefrontSkeletons';
 import { ProductZoomViewer } from './ProductZoomViewer';
+import { BackInStockModal } from './BackInStockModal';
 import { apiClient } from '../services/apiClient';
 
 interface ProductDetailPageProps {
@@ -119,6 +121,23 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
   const [shareToast, setShareToast] = useState<string | null>(null);
   const [reviewSummary, setReviewSummary] = useState<ProductReviewSummary | null>(null);
   const [contactConfig, setContactConfig] = useState<StoreContactConfig | null>(null);
+  const [isBackInStockOpen, setIsBackInStockOpen] = useState(false);
+
+  const findExactVariant = React.useCallback(
+    (sizeVal: string, colorVal: string) => {
+      const list = Array.isArray(product.variants) ? product.variants : [];
+      const cleanSize = String(sizeVal || '').trim().toUpperCase();
+      const cleanColor = String(colorVal || '').trim().toLowerCase();
+      const exactMatch = list.find(
+        (v: any) =>
+          String(v?.size || '').trim().toUpperCase() === cleanSize &&
+          String(v?.colorName || v?.color || '').trim().toLowerCase() === cleanColor
+      );
+      if (exactMatch) return exactMatch;
+      return list.find((v: any) => String(v?.size || '').trim().toUpperCase() === cleanSize);
+    },
+    [product.variants]
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -1060,7 +1079,7 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
               <div className="flex flex-wrap gap-2">
                 {availableSizes.map((size) => {
                   const isSelected = selectedSize === size;
-                  const varForSize = (product.variants || []).find((v: any) => v.size === size);
+                  const varForSize = findExactVariant(size, selectedColor);
                   const isSizeOutOfStock = varForSize && varForSize.stock === 0;
 
                   return (
@@ -1083,16 +1102,29 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
 
               {/* Stock status indicator */}
               {(() => {
-                const selectedVariant = (product.variants || []).find((v: any) => v.size === selectedSize);
+                const selectedVariant = findExactVariant(selectedSize, selectedColor);
                 const currentStock = selectedVariant ? selectedVariant.stock : (product.stock !== undefined ? product.stock : 20);
                 const isItemOutOfStock = product.inStock === false || (product.stock !== undefined && product.stock === 0) || currentStock === 0;
                 const isItemLowStock = !isItemOutOfStock && currentStock <= 5;
 
                 if (isItemOutOfStock) {
                   return (
-                    <div className="mt-2.5 px-3 py-2 bg-red-50 border border-red-200 text-red-700 rounded text-xs font-mono font-medium flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
-                      <span>Currently Out of Stock in size {selectedSize}. Please choose another size.</span>
+                    <div className="mt-2.5 px-3 py-2.5 bg-red-50 border border-red-200 text-red-700 rounded text-xs font-mono font-medium flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                        <span>
+                          Currently Out of Stock in Size {selectedSize} ({selectedColor}).
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        id="pdp-notify-back-in-stock-inline-btn"
+                        onClick={() => setIsBackInStockOpen(true)}
+                        className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1 bg-black hover:bg-neutral-800 text-white text-[11px] font-sans font-bold uppercase tracking-wider shrink-0 transition cursor-pointer"
+                      >
+                        <BellRing className="w-3.5 h-3.5 text-[#FF2028]" />
+                        <span>Notify Me</span>
+                      </button>
                     </div>
                   );
                 }
@@ -1135,22 +1167,21 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
             {/* 5. ADD TO CART and WISHLIST buttons (The Souled Store signature layout) */}
             <div className="flex items-center gap-3 pt-1">
               {(() => {
-                const selectedVariant = (product.variants || []).find((v: any) => v.size === selectedSize);
+                const selectedVariant = findExactVariant(selectedSize, selectedColor);
                 const currentStock = selectedVariant ? selectedVariant.stock : (product.stock !== undefined ? product.stock : 20);
                 const isItemOutOfStock = product.inStock === false || (product.stock !== undefined && product.stock === 0) || currentStock === 0;
+
+                if (isItemOutOfStock) {
+                  return null;
+                }
 
                 return (
                   <button
                     id="pdp-add-to-cart-red-btn"
-                    disabled={isItemOutOfStock}
                     onClick={handleAdd}
-                    className={`flex-1 py-3.5 px-6 font-bold text-xs uppercase tracking-wider transition shadow-xs rounded-none flex items-center justify-center gap-2 ${
-                      isItemOutOfStock
-                        ? 'bg-neutral-200 text-neutral-400 cursor-not-allowed'
-                        : 'bg-[#e11b23] hover:bg-[#c6171e] text-white cursor-pointer active:scale-[0.99]'
-                    }`}
+                    className="flex-1 py-3.5 px-6 font-bold text-xs uppercase tracking-wider transition shadow-xs rounded-none flex items-center justify-center gap-2 bg-[#e11b23] hover:bg-[#c6171e] text-white cursor-pointer active:scale-[0.99]"
                   >
-                    <span>{isItemOutOfStock ? 'OUT OF STOCK' : (addedNotice ? 'ADDED TO CART! ✓' : 'ADD TO CART')}</span>
+                    <span>{addedNotice ? 'ADDED TO CART! ✓' : 'ADD TO CART'}</span>
                   </button>
                 );
               })()}
@@ -1669,6 +1700,23 @@ export const ProductDetailPage: React.FC<ProductDetailPageProps> = ({
         </div>,
         document.body
       )}
+
+      {/* Exact-Variant Back-in-Stock Subscription Modal */}
+      {(() => {
+        const selectedVariant = findExactVariant(selectedSize, selectedColor);
+        return (
+          <BackInStockModal
+            isOpen={isBackInStockOpen}
+            onClose={() => setIsBackInStockOpen(false)}
+            product={product}
+            variantId={selectedVariant?.id}
+            size={selectedSize}
+            color={selectedVariant?.colorName || selectedVariant?.color || selectedColor}
+            sku={selectedVariant?.sku}
+            imageUrl={galleryImages[0]?.url}
+          />
+        );
+      })()}
 
     </div>
   );

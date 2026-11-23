@@ -642,6 +642,18 @@ async function applyMonotonicDeliveryUpdate(params: {
   if (delivery.campaignId) {
     await refreshCampaignCounters(params.prisma, delivery.campaignId);
   }
+  if (delivery.subscriptionId) {
+    const { backInStockRepository } = await import('../../repositories/backInStockRepository');
+    const channel = delivery.channel === 'WHATSAPP' ? 'WHATSAPP' : 'EMAIL';
+    await backInStockRepository
+      .syncWebhookDeliveryStatusToSubscription(
+        String(delivery.subscriptionId),
+        channel,
+        params.targetStatus,
+        params.failureReason
+      )
+      .catch(() => {});
+  }
   return true;
 }
 
@@ -801,6 +813,35 @@ export async function handleWhatsAppWebhook(params: {
           });
           optOutCount += 1;
           console.info(`[WHATSAPP-WEBHOOK] Revoked WhatsApp consent for ${maskPhone(e164)} via "${textBody}"`);
+        }
+
+        // Also revoke transactional WhatsApp opt-in on matching orders so future status alerts respect STOP
+        let revokedOther = false;
+        if (prisma?.order?.updateMany) {
+          const ordRevoke = await prisma.order
+            .updateMany({
+              where: { whatsappNumber: e164, whatsappOptIn: true },
+              data: { whatsappOptIn: false },
+            })
+            .catch(() => null);
+          if (ordRevoke && Number(ordRevoke.count || 0) > 0) {
+            revokedOther = true;
+            console.info(`[WHATSAPP-WEBHOOK] Revoked order WhatsApp updates for ${maskPhone(e164)} via "${textBody}"`);
+          }
+        }
+
+        // Also revoke WhatsApp consent on Back-in-Stock subscriptions (both Prisma and local fallback)
+        try {
+          const { backInStockRepository } = await import('../../repositories/backInStockRepository');
+          const bisRevoked = await backInStockRepository.revokeWhatsAppConsentByPhone(e164);
+          if (bisRevoked > 0) {
+            revokedOther = true;
+            console.info(`[WHATSAPP-WEBHOOK] Revoked ${bisRevoked} back-in-stock WhatsApp alert(s) for ${maskPhone(e164)} via "${textBody}"`);
+          }
+        } catch {}
+
+        if (!subscriber && revokedOther) {
+          optOutCount += 1;
         }
       }
     }

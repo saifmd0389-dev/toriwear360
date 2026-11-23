@@ -15,6 +15,7 @@ export interface SendWhatsAppTemplateInput {
   toE164: string;
   templateName?: string;
   templateLang?: string;
+  allowDefaultTemplateFallback?: boolean;
   bodyParameters?: string[];
   buttonUrlSuffix?: string;
   deliveryId?: string;
@@ -81,11 +82,16 @@ export async function sendWhatsAppTemplateMessage(
     return { success: false, error: errorMsg, configMissing: true, attempts: 0 };
   }
 
-  const templateName = String(input.templateName || status.defaultTemplateName || '').trim();
+  const allowFallback = input.allowDefaultTemplateFallback !== false;
+  const templateName = String(
+    input.templateName || (allowFallback ? status.defaultTemplateName : '') || ''
+  ).trim();
   const templateLang = String(input.templateLang || status.defaultTemplateLang || 'en').trim() || 'en';
 
   if (!templateName) {
-    const errorMsg = 'WhatsApp approved template name is required (WHATSAPP_TEMPLATE_NAME or campaign template).';
+    const errorMsg = allowFallback
+      ? 'WhatsApp approved template name is required (WHATSAPP_TEMPLATE_NAME or campaign template).'
+      : 'WhatsApp approved template name is not configured for this notification event.';
     if (input.deliveryId && prisma?.notificationDelivery) {
       await prisma.notificationDelivery
         .update({
@@ -107,9 +113,23 @@ export async function sendWhatsAppTemplateMessage(
   const recipientDigits = String(input.toE164 || '').replace(/[^\d]/g, '');
 
   if (!recipientDigits || recipientDigits.length < 7) {
+    const invalidPhoneErr = 'Invalid E.164 WhatsApp recipient number.';
+    if (input.deliveryId && prisma?.notificationDelivery) {
+      await prisma.notificationDelivery
+        .update({
+          where: { id: input.deliveryId },
+          data: {
+            status: 'FAILED',
+            attemptCount: { increment: 1 },
+            lastAttemptAt: new Date(),
+            failureReason: invalidPhoneErr,
+          },
+        })
+        .catch(() => {});
+    }
     return {
       success: false,
-      error: 'Invalid E.164 WhatsApp recipient number.',
+      error: invalidPhoneErr,
       attempts: 0,
     };
   }

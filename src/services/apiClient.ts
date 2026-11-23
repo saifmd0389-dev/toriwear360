@@ -1376,5 +1376,144 @@ export const apiClient = {
       return { success: false, error: err?.message || 'Failed to verify Razorpay refund' };
     }
   },
+
+  // ==========================================
+  // Phase 3: Back-in-Stock & Customer Website Notifications
+  // ==========================================
+  async subscribeBackInStock(payload: {
+    productId: string;
+    variantId?: string;
+    size: string;
+    color?: string;
+    customerName?: string;
+    phone?: string;
+    email?: string;
+    whatsappConsent: boolean;
+    websiteEnabled?: boolean;
+    browserPushEnabled?: boolean;
+    emailBackupEnabled?: boolean;
+  }): Promise<ApiResponse<any> & { alreadySubscribed?: boolean; code?: string }> {
+    try {
+      const res = await fetch(`${API_BASE}/back-in-stock/subscribe`, {
+        method: 'POST',
+        headers: getCustomerHeaders(),
+        body: JSON.stringify(payload),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false, error: 'Failed to subscribe to back-in-stock alerts.' };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Unable to save back-in-stock alert.' };
+    }
+  },
+
+  async getMyBackInStockSubscriptions(): Promise<ApiResponse<any[]>> {
+    try {
+      const res = await fetch(`${API_BASE}/back-in-stock/my-subscriptions`, {
+        headers: getCustomerHeaders(),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false, data: [] };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to load restock alerts.', data: [] };
+    }
+  },
+
+  async cancelMyBackInStockSubscription(id: string): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(`${API_BASE}/back-in-stock/subscriptions/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: getCustomerHeaders(),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false, error: 'Failed to cancel alert.' };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to cancel alert.' };
+    }
+  },
+
+  async getCustomerNotificationsInbox(): Promise<ApiResponse<any[]> & { unreadCount?: number }> {
+    try {
+      const res = await fetch(`${API_BASE}/notifications/inbox`, {
+        headers: getCustomerHeaders(),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false, data: [], unreadCount: 0 };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to load notifications.', data: [], unreadCount: 0 };
+    }
+  },
+
+  async markCustomerNotificationRead(id: string): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(`${API_BASE}/notifications/${encodeURIComponent(id)}/read`, {
+        method: 'POST',
+        headers: getCustomerHeaders(),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to mark notification read.' };
+    }
+  },
+
+  async markAllCustomerNotificationsRead(): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(`${API_BASE}/notifications/read-all`, {
+        method: 'POST',
+        headers: getCustomerHeaders(),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to mark all notifications read.' };
+    }
+  },
+
+  async reportCustomerNotificationBrowserPush(
+    id: string,
+    status: 'DELIVERED' | 'FAILED' | 'SKIPPED' | 'UNSUPPORTED'
+  ): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(`${API_BASE}/notifications/${encodeURIComponent(id)}/browser-push-status`, {
+        method: 'POST',
+        headers: getCustomerHeaders(),
+        body: JSON.stringify({ status }),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to record browser push status.' };
+    }
+  },
+
+  async getAdminBackInStockOverview(params?: { status?: string; search?: string }): Promise<ApiResponse<any>> {
+    try {
+      const q = new URLSearchParams();
+      if (params?.status && params.status !== 'ALL') q.set('status', params.status);
+      if (params?.search) q.set('search', params.search);
+      const qs = q.toString() ? `?${q.toString()}` : '';
+      const res = await fetch(`${API_BASE}/admin/back-in-stock${qs}`, {
+        headers: getAuthHeaders(),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false, error: 'Failed to load back-in-stock overview.' };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to load back-in-stock overview.' };
+    }
+  },
+
+  async retryAdminBackInStockDelivery(id: string): Promise<ApiResponse<any>> {
+    try {
+      const res = await fetch(`${API_BASE}/admin/back-in-stock/${encodeURIComponent(id)}/retry`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+      const parsed = await safeParseJson<any>(res);
+      return parsed.data || { success: false, error: 'Failed to retry notification delivery.' };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to retry notification delivery.' };
+    }
+  },
 };
+
 
